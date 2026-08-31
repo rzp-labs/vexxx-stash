@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,18 +26,30 @@ import (
 // buildDownloadFilename); Metadata is carried for the Phase 2 scan-and-stamp
 // step and unused while streaming.
 type apihubDownloadItem struct {
-	Provider  string            `json:"provider"`
-	URL       string            `json:"url"`
-	Filename  string            `json:"filename"`
-	Studio    string            `json:"studio"`
-	Performer string            `json:"performer"`
-	Title     string            `json:"title"`
+	Provider  string `json:"provider"`
+	URL       string `json:"url"`
+	Filename  string `json:"filename"`
+	Studio    string `json:"studio"`
+	Performer string `json:"performer"`
+	Title     string `json:"title"`
 	// Quality is the human-readable rendition label the user picked in the
 	// cart (e.g. "1080p"), carried along purely for display in the download
 	// history — it plays no part in the download itself.
-	Quality   string               `json:"quality,omitempty"`
-	Headers   map[string]string    `json:"headers,omitempty"`
-	Metadata  *apihubSceneMetadata `json:"metadata,omitempty"`
+	Quality  string               `json:"quality,omitempty"`
+	Headers  map[string]string    `json:"headers,omitempty"`
+	Metadata *apihubSceneMetadata `json:"metadata,omitempty"`
+	// Kind classifies URL: "hls" for a playlist that needs remuxing, empty for
+	// a progressive file. See apihubDownloadSource.
+	Kind string `json:"kind,omitempty"`
+	// Height is the rendition URL represents, used to pick a variant when a
+	// source turns out to be an HLS master playlist.
+	Height int `json:"height,omitempty"`
+	// Fallbacks are alternative sources to try, in order, when URL itself is
+	// refused. This is what makes a streaming-only account work: Adult Time's
+	// member download route answers 404 without the download entitlement, so
+	// the plugin attaches the same rendition's HLS stream behind it. An
+	// account that *does* have the entitlement never touches these.
+	Fallbacks []apihubDownloadSource `json:"fallbacks,omitempty"`
 	// Gallery, when present, is the accompanying photo set to download and
 	// attach to the imported scene. Nil when the user didn't opt in, or the
 	// provider has no gallery for this scene.
@@ -316,27 +329,125 @@ func (j *apihubDownloadJob) download(ctx context.Context, item apihubDownloadIte
 	dest := filepath.Join(itemDir, name)
 	part := dest + ".part"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, item.URL, nil)
-	if err != nil {
+	if err := j.downloadFromSources(ctx, item, part, onProgress); err != nil {
+		cleanupItemDir(itemDir, part)
 		return "", err
 	}
-	for k, v := range item.Headers {
+
+	if err := os.Rename(part, dest); err != nil {
+		cleanupItemDir(itemDir, part)
+		return "", err
+	}
+	return dest, nil
+}
+
+// cleanupItemDir discards what a failed or cancelled transfer left behind: the
+// partial file, and the item's own folder, which is created up front to
+// receive it. Without this a retry doesn't reuse the empty leftover — uniqueDir
+// steps around anything that already exists — so every attempt at a scene that
+// keeps failing accumulates another "Title (2)", "Title (3)" sibling.
+//
+// The folder goes via os.Remove rather than RemoveAll: it only succeeds while
+// the folder is empty, so should anything else have landed in there it stays
+// put. A folder we can't remove is left alone and logged, never forced.
+func cleanupItemDir(itemDir, part string) {
+	os.Remove(part)
+	if err := os.Remove(itemDir); err != nil && !os.IsNotExist(err) {
+		logger.Debugf("[apihub-download] left %s in place: %v", itemDir, err)
+	}
+}
+
+// downloadFromSources writes the item's video to part, trying its primary
+// source and then each fallback in order.
+//
+// Only an entitlement-shaped rejection falls through: a 403/404 means "this
+// account may not have this route", which is exactly the Adult Time case (the
+// member /movieaction/download endpoint 404s for a streaming-only plan while
+// the HLS stream behind it serves fine). Anything else — a timeout, a 5xx, a
+// disk error — is reported as-is rather than being masked by a fallback
+// attempt, so a transient CDN failure doesn't silently downgrade the file the
+// user asked for.
+func (j *apihubDownloadJob) downloadFromSources(ctx context.Context, item apihubDownloadItem, part string, onProgress func(float64)) error {
+	sources := append(
+		[]apihubDownloadSource{{URL: item.URL, Headers: item.Headers, Kind: item.Kind, Height: item.Height}},
+		item.Fallbacks...,
+	)
+
+	var lastErr error
+	for i, src := range sources {
+		if src.URL == "" {
+			continue
+		}
+		if i > 0 {
+			logger.Infof("[apihub-download] primary source refused (%v); trying fallback %d of %d", lastErr, i, len(sources)-1)
+		}
+
+		var err error
+		if src.isHLS() {
+			err = downloadHLS(ctx, j.client, src, part, onProgress)
+		} else {
+			err = j.downloadFile(ctx, src, part, onProgress)
+		}
+		if err == nil {
+			if i > 0 {
+				logger.Infof("[apihub-download] fallback source succeeded for %q", item.Title)
+			}
+			return nil
+		}
+
+		lastErr = err
+		// Cancellation is the user stopping the job, never a reason to try
+		// another source.
+		if ctx.Err() != nil {
+			return err
+		}
+		var refusal apihubSourceRefusedError
+		if !errors.As(err, &refusal) {
+			return err
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no download source available")
+	}
+	return lastErr
+}
+
+// apihubSourceRefusedError marks a status that means "this account can't have
+// this URL" rather than "the transfer went wrong" — the only class of failure
+// downloadFromSources will try a fallback for.
+type apihubSourceRefusedError struct {
+	status string
+}
+
+func (e apihubSourceRefusedError) Error() string { return "unexpected status " + e.status }
+
+// downloadFile streams a progressive source into part.
+func (j *apihubDownloadJob) downloadFile(ctx context.Context, src apihubDownloadSource, part string, onProgress func(float64)) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
+	if err != nil {
+		return err
+	}
+	for k, v := range src.Headers {
 		req.Header.Set(k, v)
 	}
 
 	resp, err := j.client.Do(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status %s", resp.Status)
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+			return apihubSourceRefusedError{status: resp.Status}
+		}
+		return fmt.Errorf("unexpected status %s", resp.Status)
 	}
 
 	out, err := os.Create(part)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	pr := &progressReader{r: resp.Body, total: resp.ContentLength, onProgress: onProgress}
@@ -345,18 +456,13 @@ func (j *apihubDownloadJob) download(ctx context.Context, item apihubDownloadIte
 
 	if copyErr != nil {
 		os.Remove(part)
-		return "", copyErr
+		return copyErr
 	}
 	if closeErr != nil {
 		os.Remove(part)
-		return "", closeErr
+		return closeErr
 	}
-
-	if err := os.Rename(part, dest); err != nil {
-		os.Remove(part)
-		return "", err
-	}
-	return dest, nil
+	return nil
 }
 
 // progressReader wraps the response body to report a 0..1 fraction as bytes
