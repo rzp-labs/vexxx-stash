@@ -1,0 +1,42 @@
+# APPNICENAME=Vexxx
+# APPDESCRIPTION=A Feature-Enhanced Fork of Stash
+services:
+  vexxx:
+    build: .
+    container_name: vexxx
+    restart: unless-stopped
+    ## Set STASH_PORT in a .env file (or environment) to change the mapped port.
+    ## HOST_PORT controls the host-side port; STASH_PORT controls the container-side port.
+    ## Both default to 9999.
+    ports:
+      - "${HOST_PORT:-9999}:${STASH_PORT:-9999}"
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "10"
+        max-size: "2m"
+    environment:
+      - STASH_STASH=/data/
+      - STASH_GENERATED=/generated/
+      - STASH_METADATA=/metadata/
+      - STASH_CACHE=/cache/
+      ## Change STASH_PORT to move the internal listening port (also update ports mapping above).
+      - STASH_PORT=${STASH_PORT:-9999}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      ## Adjust below paths (the left part) to your liking.
+      ## The left part is the path on your host, the right part is the path in the vexxx container.
+
+      ## Keep configs, scrapers, and plugins here.
+      - ./config:/root/.stash
+      ## Point this at your collection.
+      ## The left side is where your collection is on your host, the right side is where it will be in vexxx.
+      - ./data:/data
+      ## This is where your vexxx's metadata lives
+      - ./metadata:/metadata
+      ## Any other cache content.
+      - ./cache:/cache
+      ## Where to store binary blob data (scene covers, images)
+      - ./blobs:/blobs
+      ## Where to store generated content (screenshots,previews,transcodes,sprites)
+      - ./generated:/generated
