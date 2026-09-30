@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -689,7 +690,7 @@ func TestGetPathSearchClause(t *testing.T) {
 			addWildcards: true,
 			not:          false,
 			expectSQL:    fmt.Sprintf("%s || '%s' || %s LIKE ?", pathCol, string(filepath.Separator), baseCol),
-			expectArgs:   []interface{}{"%/home/user/videos%"},
+			expectArgs:   []interface{}{"/home/user/videos%"},
 		},
 		{
 			name:         "relative path fragment with separator (wildcard)",
@@ -721,7 +722,7 @@ func TestGetPathSearchClause(t *testing.T) {
 			addWildcards: true,
 			not:          true,
 			expectSQL:    fmt.Sprintf("NOT (%s || '%s' || %s LIKE ?)", pathCol, string(filepath.Separator), baseCol),
-			expectArgs:   []interface{}{"%/home/user%"},
+			expectArgs:   []interface{}{"/home/user%"},
 		},
 	}
 
@@ -730,6 +731,44 @@ func TestGetPathSearchClause(t *testing.T) {
 			clause := getPathSearchClause(pathCol, baseCol, tt.pattern, tt.addWildcards, tt.not)
 			assert.Equal(t, tt.expectSQL, clause.sql)
 			assert.Equal(t, tt.expectArgs, clause.args)
+		})
+	}
+}
+
+func TestPathSearchRootBoundaries(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer db.Close()
+
+	tests := []struct {
+		name, folder, basename, pattern string
+		matches                         bool
+	}{
+		{"absolute folder", "/media/films", "a.mp4", "/media/films", true},
+		{"unrelated root", "/mnt/media/films", "a.mp4", "/media/films", false},
+		{"absolute filename", "/media/films", "a.mp4", "/media/films/a.mp4", true},
+		{"absolute filename prefix", "/media/films", "a.mp4", "/media/films/a", true},
+		{"filename under unrelated root", "/mnt/media/films", "a.mp4", "/media/films/a.mp4", false},
+		{"relative folder", "/mnt/media/films", "a.mp4", "media/films", true},
+		{"relative filename", "/mnt/media/films", "a.mp4", "films/a.mp4", true},
+		{"quoted absolute filename", "/media/my films", "a.mp4", `"/media/my films/a.mp4"`, true},
+		{"quoted unrelated root", "/mnt/media/my films", "a.mp4", `"/media/my films/a.mp4"`, false},
+		{"windows drive", "C:/media/films", "a.mp4", "C:/media/films", true},
+		{"windows unrelated prefix", "backup/C:/media/films", "a.mp4", "C:/media/films", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, not := range []bool{false, true} {
+				clause := getPathSearchClauseMany("folder_path", "basename", tt.pattern, true, not)
+				args := append(clause.args, tt.folder, tt.basename)
+				var matches bool
+				err := db.QueryRow("SELECT ("+clause.sql+") FROM (SELECT ? AS folder_path, ? AS basename)", args...).Scan(&matches)
+				if assert.NoError(t, err) {
+					assert.Equal(t, tt.matches != not, matches, "negated=%v", not)
+				}
+			}
 		})
 	}
 }

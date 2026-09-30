@@ -162,6 +162,12 @@ func containsPathSeparator(p string) bool {
 	return strings.ContainsRune(p, '/') || strings.ContainsRune(p, '\\')
 }
 
+// isAbsolutePath recognizes Unix and Windows drive-rooted search patterns.
+func isAbsolutePath(p string) bool {
+	return strings.HasPrefix(p, "/") ||
+		(len(p) >= 3 && p[1] == ':' && (p[2] == '/' || p[2] == '\\'))
+}
+
 // getPathSearchClause avoids concatenation for searches confined to a single
 // path component. Searches with separators can span the folder and basename.
 func getPathSearchClause(pathColumn, basenameColumn, p string, addWildcards, not bool) sqlClause {
@@ -177,7 +183,11 @@ func getPathSearchClause(pathColumn, basenameColumn, p string, addWildcards, not
 
 	if containsPathSeparator(p) {
 		filepathColumn := fmt.Sprintf("%s || '%s' || %s", pathColumn, string(filepath.Separator), basenameColumn)
-		ret := makeClause(fmt.Sprintf("%s LIKE ?", filepathColumn), "%"+p+"%")
+		pattern := p + "%"
+		if !isAbsolutePath(p) {
+			pattern = "%" + pattern
+		}
+		ret := makeClause(fmt.Sprintf("%s LIKE ?", filepathColumn), pattern)
 		if not {
 			ret = ret.not()
 		}

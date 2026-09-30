@@ -231,6 +231,9 @@ func (qb *galleryFilterHandler) pathCriterionHandler(c *models.StringCriterionIn
 			const pathColumn = "folders.path"
 			const basenameColumn = "files.basename"
 			const folderPathColumn = "gallery_folder.path"
+			// A gallery with neither a file nor a folder cannot match a path.
+			// Negating a missing path yields SQL NULL, so include it explicitly.
+			pathless := makeClause("files.id IS NULL AND gallery_folder.id IS NULL")
 
 			addWildcards := true
 			not := false
@@ -245,7 +248,7 @@ func (qb *galleryFilterHandler) pathCriterionHandler(c *models.StringCriterionIn
 					not = true
 					clause := getPathSearchClauseMany(pathColumn, basenameColumn, c.Value, addWildcards, not)
 					clause2 := getStringSearchClause([]string{folderPathColumn}, c.Value, true)
-					f.whereClauses = append(f.whereClauses, orClauses(clause, clause2))
+					f.whereClauses = append(f.whereClauses, orClauses(clause, clause2, pathless))
 				case models.CriterionModifierEquals:
 					addWildcards = false
 					clause := getPathSearchClause(pathColumn, basenameColumn, c.Value, addWildcards, not)
@@ -256,7 +259,7 @@ func (qb *galleryFilterHandler) pathCriterionHandler(c *models.StringCriterionIn
 					not = true
 					clause := getPathSearchClause(pathColumn, basenameColumn, c.Value, addWildcards, not)
 					clause2 := makeClause(folderPathColumn+" NOT LIKE ?", c.Value)
-					f.whereClauses = append(f.whereClauses, orClauses(clause, clause2))
+					f.whereClauses = append(f.whereClauses, orClauses(clause, clause2, pathless))
 				case models.CriterionModifierMatchesRegex:
 					if _, err := regexp.Compile(c.Value); err != nil {
 						f.setError(err)

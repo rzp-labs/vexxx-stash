@@ -1561,6 +1561,51 @@ func TestGalleryQueryPathFolderWithoutFiles(t *testing.T) {
 	}
 }
 
+func TestGalleryQueryNegativePathWithoutFiles(t *testing.T) {
+	for _, kind := range []string{"pathless", "folder", "file"} {
+		for _, modifier := range []models.CriterionModifier{
+			models.CriterionModifierExcludes, models.CriterionModifierNotEquals,
+			models.CriterionModifierIncludes, models.CriterionModifierEquals,
+		} {
+			runWithRollbackTxn(t, kind+"/"+string(modifier), func(t *testing.T, ctx context.Context) {
+				gallery := models.NewGallery()
+				var fileIDs []models.FileID
+				path := "/missing-gallery-path"
+				switch kind {
+				case "folder":
+					gallery.FolderID = &folderIDs[folderIdxWithGalleryFiles]
+					path = folderPaths[folderIdxWithGalleryFiles]
+				case "file":
+					file := makeFileWithID(fileIdxStartGalleryFiles).Base()
+					fileIDs = []models.FileID{file.ID}
+					path = file.Path
+				}
+				if !assert.NoError(t, db.Gallery.Create(ctx, &gallery, fileIDs)) {
+					return
+				}
+				for _, value := range []string{path, "/unrelated-gallery-path"} {
+					perPage := -1
+					galleries, _, err := db.Gallery.Query(ctx, &models.GalleryFilterType{
+						Path: &models.StringCriterionInput{Value: value, Modifier: modifier},
+					}, &models.FindFilterType{PerPage: &perPage})
+					if !assert.NoError(t, err) {
+						return
+					}
+					found := false
+					for _, result := range galleries {
+						found = found || result.ID == gallery.ID
+					}
+					want := kind != "pathless" && value == path
+					if modifier == models.CriterionModifierExcludes || modifier == models.CriterionModifierNotEquals {
+						want = !want
+					}
+					assert.Equal(t, want, found, "path=%q", value)
+				}
+			})
+		}
+	}
+}
+
 func TestGalleryQueryPathOr(t *testing.T) {
 	const gallery1Idx = 1
 	const gallery2Idx = 2
