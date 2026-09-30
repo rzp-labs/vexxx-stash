@@ -23,6 +23,9 @@ jobs:
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 10.34.4
+      - name: Configure pnpm store before restoring cache
+        # Keep setup-node's cache path aligned with make pre-ui in CI.
+        run: pnpm config set store-dir ~/.pnpm-store
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
