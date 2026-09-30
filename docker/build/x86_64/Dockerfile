@@ -45,6 +45,7 @@ COPY --from=backend /stash/stash /usr/bin/
 COPY --from=backend /stash/pkg/stashface/client.py /usr/lib/stash/stashface/client.py
 COPY --from=backend /stash/pkg/stashtag/client.py /usr/lib/stash/stashtag/client.py
 COPY --from=backend /stash/pkg/megaface/client.py /usr/lib/stash/megaface/client.py
+RUN mkdir -p /root/.stash
 ENV STASH_CONFIG_FILE=/root/.stash/config.yml
 # Set Docker container environment variable for detection
 ENV DOCKER_CONTAINER=1

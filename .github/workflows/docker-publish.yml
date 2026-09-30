@@ -99,7 +99,7 @@ jobs:
             "$IMAGE_NAME:sha-$GITHUB_SHA"
           trap 'docker logs vexxx-smoke; docker rm --force vexxx-smoke' EXIT
           curl --fail --silent --show-error --retry 30 \
-            --retry-connrefused --retry-delay 2 --max-time 5 \
+            --retry-all-errors --retry-delay 2 --max-time 5 \
             http://127.0.0.1:9999/ > /dev/null
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
