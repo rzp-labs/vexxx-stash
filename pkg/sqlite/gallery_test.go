@@ -1522,6 +1522,45 @@ func verifyGalleriesPath(ctx context.Context, t *testing.T, pathCriterion models
 	}
 }
 
+func TestGalleryQueryPathFolderWithoutFiles(t *testing.T) {
+	tests := []struct {
+		modifier models.CriterionModifier
+		matches  bool
+	}{
+		{models.CriterionModifierEquals, true},
+		{models.CriterionModifierIncludes, true},
+		{models.CriterionModifierNotNull, true},
+		{models.CriterionModifierIsNull, false},
+	}
+	for _, tt := range tests {
+		runWithRollbackTxn(t, string(tt.modifier), func(t *testing.T, ctx context.Context) {
+			assert := assert.New(t)
+			gallery := models.NewGallery()
+			gallery.FolderID = &folderIDs[folderIdxWithGalleryFiles]
+			if !assert.NoError(db.Gallery.Create(ctx, &gallery, nil)) {
+				return
+			}
+			galleries, _, err := db.Gallery.Query(ctx, &models.GalleryFilterType{
+				Path: &models.StringCriterionInput{
+					Value:    folderPaths[folderIdxWithGalleryFiles],
+					Modifier: tt.modifier,
+				},
+			}, nil)
+			if !assert.NoError(err) {
+				return
+			}
+			var found bool
+			for _, result := range galleries {
+				if result.ID == gallery.ID {
+					found = true
+					break
+				}
+			}
+			assert.Equal(tt.matches, found)
+		})
+	}
+}
+
 func TestGalleryQueryPathOr(t *testing.T) {
 	const gallery1Idx = 1
 	const gallery2Idx = 2

@@ -1037,7 +1037,8 @@ func (qb *ImageStore) findIDsFast(ctx context.Context, findFilter *models.FindFi
 	case "random":
 		orderBy = "ORDER BY RANDOM()"
 	default:
-		orderBy = fmt.Sprintf("ORDER BY images.%s %s", sort, direction)
+		// Match the secondary ordering used by setImageSortAndPagination.
+		orderBy = fmt.Sprintf("ORDER BY images.%s %s, COALESCE(images.title, images.id) COLLATE NATURAL_CI ASC", sort, direction)
 	}
 
 	// Build pagination

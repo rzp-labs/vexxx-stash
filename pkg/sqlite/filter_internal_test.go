@@ -642,29 +642,6 @@ func TestStringCriterionHandlerNotNull(t *testing.T) {
 	assert.Len(f.whereClauses[0].args, 0)
 }
 
-func TestIsAbsolutePath(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected bool
-	}{
-		{"unix root", "/home/user/videos", true},
-		{"unix slash only", "/", true},
-		{"windows C drive", "C:\\Users\\videos", true},
-		{"windows D drive forward slash", "D:/media", true},
-		{"relative path", "some/path", false},
-		{"empty string", "", false},
-		{"just a name", "videos", false},
-		{"tilde path", "~/videos", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, isAbsolutePath(tt.input))
-		})
-	}
-}
-
 func TestContainsPathSeparator(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -711,15 +688,15 @@ func TestGetPathSearchClause(t *testing.T) {
 			pattern:      "/home/user/videos",
 			addWildcards: true,
 			not:          false,
-			expectSQL:    fmt.Sprintf("%s LIKE ?", pathCol),
-			expectArgs:   []interface{}{"/home/user/videos%"},
+			expectSQL:    fmt.Sprintf("%s || '%s' || %s LIKE ?", pathCol, string(filepath.Separator), baseCol),
+			expectArgs:   []interface{}{"%/home/user/videos%"},
 		},
 		{
 			name:         "relative path fragment with separator (wildcard)",
 			pattern:      "user/videos",
 			addWildcards: true,
 			not:          false,
-			expectSQL:    fmt.Sprintf("%s LIKE ?", pathCol),
+			expectSQL:    fmt.Sprintf("%s || '%s' || %s LIKE ?", pathCol, string(filepath.Separator), baseCol),
 			expectArgs:   []interface{}{"%user/videos%"},
 		},
 		{
@@ -743,8 +720,8 @@ func TestGetPathSearchClause(t *testing.T) {
 			pattern:      "/home/user",
 			addWildcards: true,
 			not:          true,
-			expectSQL:    fmt.Sprintf("NOT (%s LIKE ?)", pathCol),
-			expectArgs:   []interface{}{"/home/user%"},
+			expectSQL:    fmt.Sprintf("NOT (%s || '%s' || %s LIKE ?)", pathCol, string(filepath.Separator), baseCol),
+			expectArgs:   []interface{}{"%/home/user%"},
 		},
 	}
 

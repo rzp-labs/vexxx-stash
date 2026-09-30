@@ -224,9 +224,8 @@ func (qb *galleryFilterHandler) getMultiCriterionHandlerBuilder(foreignTable, jo
 func (qb *galleryFilterHandler) pathCriterionHandler(c *models.StringCriterionInput) criterionHandlerFunc {
 	return func(ctx context.Context, f *filterBuilder) {
 		if c != nil {
-			// Use INNER joins for the file chain since path filters
-			// can only match galleries that have files
-			galleryRepository.addFoldersTableInner(f)
+			// Folder galleries and galleries without a path may have no files.
+			galleryRepository.addFoldersTable(f)
 			f.addLeftJoin(folderTable, "gallery_folder", "galleries.folder_id = gallery_folder.id")
 
 			const pathColumn = "folders.path"
