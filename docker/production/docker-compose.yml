@@ -2,7 +2,8 @@
 # APPDESCRIPTION=An organizer for your porn, written in Go
 services:
   stash:
-    image: stashapp/stash:latest
+    image: ${STASH_IMAGE:-ghcr.io/rzp-labs/vexxx-stash:${IMAGE_TAG:-edge}}
+    platform: linux/amd64
     container_name: stash
     restart: unless-stopped
     ## Set STASH_PORT in a .env file (or environment) to change the mapped port.

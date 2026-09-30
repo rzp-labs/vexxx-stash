@@ -10,7 +10,7 @@ COPY Makefile /stash/
 COPY ./graphql /stash/graphql/
 COPY ./ui /stash/ui/
 # pnpm install with npm
-RUN npm install -g pnpm@10
+RUN npm install -g pnpm@10.34.4
 RUN make pre-ui
 RUN make generate-ui
 ARG GITHASH

@@ -432,9 +432,10 @@ validate-backend: lint it
 validate: validate-ui validate-backend
 
 # locally builds and tags a 'stash/build' docker image
+# Build the same Linux amd64 image on x86 Linux and Apple Silicon Macs.
 .PHONY: docker-build
 docker-build: build-info
-	docker build --build-arg GITHASH=$(GITHASH) --build-arg STASH_VERSION=$(STASH_VERSION) -t stash/build -f docker/build/x86_64/Dockerfile .
+	docker build --platform linux/amd64 --build-arg GITHASH=$(GITHASH) --build-arg STASH_VERSION=$(STASH_VERSION) -t stash/build -f docker/build/x86_64/Dockerfile .
 
 # locally builds and tags a 'stash/cuda-build' docker image
 .PHONY: docker-cuda-build
