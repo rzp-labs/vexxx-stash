@@ -18,7 +18,7 @@ ARG STASH_VERSION
 RUN BUILD_DATE=$(date +"%Y-%m-%d %H:%M:%S") make ui-only
 
 # Build Backend
-FROM golang:1.26-alpine AS backend
+FROM golang:1.26-alpine3.24 AS backend
 RUN apk add --no-cache make alpine-sdk
 WORKDIR /stash
 COPY ./go* ./*.go Makefile gqlgen.yml .gqlgenc.yml /stash/
@@ -36,8 +36,13 @@ ARG STASH_VERSION
 RUN make flags-release flags-pie stash
 
 # Final Runnable Image
-FROM alpine:latest
-RUN apk add --no-cache ca-certificates vips-tools ffmpeg python3 py3-pip
+FROM alpine:3.24
+# Keep the dispatcher, VAAPI driver and QSV GPU runtime on one Alpine release.
+RUN apk add --no-cache ca-certificates vips-tools ffmpeg python3 py3-pip \
+    intel-media-driver libvpl onevpl-intel-gpu
+COPY scripts/check_intel_runtime.py /usr/local/bin/check_intel_runtime.py
+# Packaging regression check; does not require or initialize a GPU.
+RUN python3 /usr/local/bin/check_intel_runtime.py
 # Install Python dependencies for AI services (StashFace, StashTag, MegaFace)
 RUN pip3 install --no-cache-dir --break-system-packages gradio_client==1.8.0
 COPY --from=backend /stash/stash /usr/bin/

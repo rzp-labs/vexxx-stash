@@ -121,7 +121,27 @@ Configuration notes:
 - Edit `.env` to set `HOST_CONFIG`, `HOST_MEDIA_PATH`, and `HOST_STORAGE` to host directories you want mounted into the container.
 - On Windows use absolute paths in `.env` (e.g. `C:\Users\you\Media`). If using Docker Desktop make sure the drive is shared.
 
-If you run into permission issues on Linux, set `PUID` and `PGID` in `.env` to match your host user so files created by the container are accessible.
+The standard image runs as root and does not interpret `PUID` or `PGID`.
+Setting those variables does not change its process identity or device access.
+
+### Intel hardware acceleration
+
+The amd64 image includes the Intel media driver for VAAPI and the Intel VPL GPU
+runtime for QSV, alongside FFmpeg and the VPL dispatcher, from Alpine 3.24.
+The host must provide a working GPU kernel driver and firmware, and the container
+must have access to its render device (for example, a Compose `devices` mapping
+of `/dev/dri:/dev/dri`). Supplemental groups matter when running as a non-root
+user; use the host render device's actual group ID.
+
+Every image build checks the Intel packages, shared-library loading, and FFmpeg
+encoder/filter availability without initializing a GPU. To repeat that check:
+
+```sh
+docker exec <container-name> python3 /usr/local/bin/check_intel_runtime.py
+```
+
+A passing packaging check does not verify hardware encoding. Intel Arc B580
+acceptance still requires a successful VAAPI/QSV encode on the actual host.
 
 
 Change the `<xxx>` to the appropriate paths. Note that the `<path to media>` directory should be separate from the cache, generated and metadata directories. It is recommended to have the cache, generated and metadata directories in the same parent directory, for example:
