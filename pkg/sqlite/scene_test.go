@@ -2317,6 +2317,24 @@ func TestSceneQueryPath(t *testing.T) {
 			[]int{otherSceneIdx},
 		},
 		{
+			"excludes full path",
+			models.StringCriterionInput{
+				Value:    scenePath,
+				Modifier: models.CriterionModifierExcludes,
+			},
+			[]int{otherSceneIdx},
+			[]int{sceneIdx},
+		},
+		{
+			"includes relative full path",
+			models.StringCriterionInput{
+				Value:    filepath.Join(filepath.Base(folder), basename),
+				Modifier: models.CriterionModifierIncludes,
+			},
+			[]int{sceneIdx},
+			[]int{otherSceneIdx},
+		},
+		{
 			"matches regex",
 			models.StringCriterionInput{
 				Value:    "scene_.*1_Path",

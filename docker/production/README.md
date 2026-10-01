@@ -1,39 +1,106 @@
-# Docker Installation (for most 64-bit GNU/Linux systems)
-StashApp is supported on most systems that support Docker. Your OS likely ships with or makes available the necessary packages.
+# Run Vexxx with Docker Compose
 
-## Dependencies
-Only `docker` is required. For the most part your understanding of the technologies can be superficial. So long as you can follow commands and are open to reading a bit, you should be fine.
+The published image is `ghcr.io/rzp-labs/vexxx-stash`. It includes the frontend,
+backend, FFmpeg, libvips, Python, and the AI service clients. Images target
+`linux/amd64` for x86 Linux servers. Docker Desktop on Apple Silicon Macs runs
+the same image using emulation.
 
-Installation instructions are available below, and if your distributions's repository ships a current version of docker, you may use that.
-https://docs.docker.com/engine/install/
+## Install in a homelab
 
-On some distributions, `docker compose` is shipped seperately, usually as `docker-cli-compose`. docker-compose is not recommended.
+Install [Docker Engine and the Compose plugin](https://docs.docker.com/engine/install/).
+Download the deployment files into your service's persistent data directory:
 
-### Get the docker-compose.yml file
-
-Now you can either navigate to the [docker-compose.yml](https://raw.githubusercontent.com/stashapp/stash/develop/docker/production/docker-compose.yml) in the repository, or if you have curl, you can make your Linux console do it for you:
-
-```
-mkdir stashapp && cd stashapp
-curl -o docker-compose.yml https://raw.githubusercontent.com/stashapp/stash/develop/docker/production/docker-compose.yml
+```sh
+mkdir vexxx && cd vexxx
+curl -fsSLO https://raw.githubusercontent.com/rzp-labs/vexxx-stash/master/docker/production/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/rzp-labs/vexxx-stash/master/docker/production/.env.example -o .env
 ```
 
-Once you have that file where you want it, modify the settings as you please, and then run:
+Edit the volume paths in `docker-compose.yml` to point at your collection and
+persistent storage. The paths on the left are host directories; paths on the
+right are container directories. Keep the config/database, metadata, cache,
+blobs, and generated content on persistent mounts.
 
+Select an image in `.env`:
+
+```dotenv
+# Latest tested build from master:
+IMAGE_TAG=edge
+
+# Or select a published release or commit:
+# IMAGE_TAG=v1.2.3
+# IMAGE_TAG=sha-<full 40-character commit SHA>
+
+# For an immutable reference, override the entire image instead:
+# STASH_IMAGE=ghcr.io/rzp-labs/vexxx-stash@sha256:<digest>
 ```
-docker compose up -d
+
+`STASH_IMAGE` takes precedence over `IMAGE_TAG`. A digest is immutable; release
+and commit tags identify builds but can be overwritten if republished.
+
+Public packages need no login. For private packages, log in on the server with a
+GitHub personal access token (classic) with `read:packages` and package access.
+Authorize organization SSO if required:
+
+```sh
+# In Bash; enter the token without displaying it.
+read -rsp 'GitHub token: ' GHCR_TOKEN
+printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+unset GHCR_TOKEN
 ```
 
-Installing StashApp this way will by default bind stash to port 9999. This is available in your web browser locally at http://localhost:9999 or on your network as http://YOUR-LOCAL-IP:9999
+Start the service:
 
-Good luck and have fun!
+```sh
+docker compose pull stash
+docker compose up -d stash
+```
 
-### Docker
-Docker is effectively a cross-platform software package repository. It allows you to ship an entire environment in what's referred to as a container. Containers are intended to hold everything that is needed to run an application from one place to another, making it easy for everyone along the way to reproduce the environment.
+Open `http://YOUR-SERVER-IP:9999`. Set `HOST_PORT` and `STASH_PORT` in `.env` to
+change the host and container ports. Use container paths such as `/data` when
+adding libraries in Vexxx. For remote access, configure a
+[reverse proxy](https://docs.stashapp.cc/guides/reverse-proxy/).
 
-The StashApp docker container ships with everything you need to automatically run stash, including ffmpeg.
+## Updates and rollback
 
-### docker compose
-Docker Compose lets you specify how and where to run your containers, and to manage their environment. The docker-compose.yml file in this folder gets you a fully working instance of StashApp exactly as you would need it to have a reasonable instance for testing / developing on. If you are deploying a live instance for production, a [reverse proxy](https://docs.stashapp.cc/guides/reverse-proxy/) (such as NGINX or Traefik) is recommended, but not required.
+Back up the config/database before upgrading. Select the new release, SHA tag,
+or digest in `.env`, then run:
 
-The latest version is always recommended.
+```sh
+docker compose pull stash
+docker compose up -d stash
+docker compose logs --tail 100 stash
+```
+
+Updates preserve the mounted data. To restore an older version, select its
+reference and repeat these commands. Database migrations may require restoring
+the matching backup as well. Avoid `docker compose down --volumes` when retaining
+named volumes.
+
+## Building and publishing
+
+[The GitHub Actions workflow](../../.github/workflows/docker-publish.yml) runs Go
+unit/integration tests, frontend tests, and the TypeScript check, then builds and
+smoke-tests the Linux amd64 container. Only successful builds are published:
+
+- Pushes to `master` publish `edge` and `sha-<full commit SHA>`.
+- Pushes of `v*` tags publish the exact tag and a SHA tag.
+- Manual runs publish a SHA tag, plus `edge` when run on `master`.
+- Pull requests run the checks and container smoke test without publishing.
+
+The workflow authenticates with `GITHUB_TOKEN` using `packages: write`; no PAT is
+needed in repository secrets. After the first successful publication, set the
+package's visibility in GitHub's package settings. Packages may initially be
+private even when the repository is public. Organization settings must allow
+the workflow to create/write packages. The source label links the image to the
+repository.
+
+For a local build on Linux or an Apple Silicon Mac:
+
+```sh
+make docker-build
+```
+
+This also targets `linux/amd64`. To run it with this Compose file, set
+`STASH_IMAGE=stash/build:latest` and run `docker compose up -d stash` without
+pulling. Emulated builds on Apple Silicon take longer than native x86 builds.

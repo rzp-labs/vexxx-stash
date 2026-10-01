@@ -1,6 +1,10 @@
 # Introduction
 
-This dockerfile is used to build a stash docker container using the current source code. This is ideal for testing your current branch in docker. Note that it does not include python, so python-based scrapers will not work in this image. The production docker images distributed by the project contain python and the necessary packages.
+This Dockerfile builds the complete Vexxx container from source, including Python,
+FFmpeg, libvips, and the AI service clients. GitHub Actions uses this same file to
+publish tested Linux amd64 images to `ghcr.io/rzp-labs/vexxx-stash`.
+See the [deployment instructions](../../production/README.md) to pull an image
+with Docker Compose.
 
 # Building the docker container
 
@@ -11,13 +15,18 @@ make docker-build
 
 ```
 
+The build explicitly targets `linux/amd64`, including on Apple Silicon Macs.
+Docker Desktop uses emulation on those machines; Linux x86 servers run natively.
+
 # Running the docker container
 
 ## Using docker-compose
 
 See the `README.md` file in `docker/production` for instructions on how to get docker-compose if needed.
 
-The `stash/build` container can be run with the `docker-compose.yml` file in `docker/production` by changing the `image` value to be `stash/build`. See the instructions in `docker/production` for how to run docker-compose.
+To run the local `stash/build` image with the Compose file in `docker/production`,
+set `STASH_IMAGE=stash/build:latest` in that directory's `.env` and run
+`docker compose up -d stash` without pulling.
 
 ## Using `docker run`
 

@@ -29,6 +29,7 @@ var iptvTestProviders = []struct {
 	{iptvSourceEvilAngel, iptvEvilAngelKeyPrefix, evilAngelNetworkChannelKey()},
 	{iptvSourceTeamSkeet, iptvTeamSkeetKeyPrefix, teamSkeetNetworkChannelKey()},
 	{iptvSourceNewSensations, iptvNSKeyPrefix, nsNetworkChannelKey()},
+	{iptvSourceDfxtra, iptvDfxtraKeyPrefix, dfxtraNetworkChannelKey()},
 }
 
 func TestEveryProviderIsRegisteredAndReachableByItsSource(t *testing.T) {

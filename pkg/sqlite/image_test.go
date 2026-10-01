@@ -2964,13 +2964,47 @@ func TestImageQuerySorting(t *testing.T) {
 			last := images[len(images)-1]
 
 			if tt.firstIdx != -1 {
-				firstID := sceneIDs[tt.firstIdx]
+				firstID := imageIDs[tt.firstIdx]
 				assert.Equal(firstID, first.ID)
 			}
 			if tt.lastIdx != -1 {
-				lastID := sceneIDs[tt.lastIdx]
+				lastID := imageIDs[tt.lastIdx]
 				assert.Equal(lastID, last.ID)
 			}
+		})
+	}
+}
+
+func TestImageQueryDateSortingConsistentWithFilters(t *testing.T) {
+	for _, direction := range []models.SortDirectionEnum{models.SortDirectionEnumAsc, models.SortDirectionEnumDesc} {
+		runWithRollbackTxn(t, string(direction), func(t *testing.T, ctx context.Context) {
+			assert := assert.New(t)
+			sortBy := "date"
+			perPage := totalImages
+			options := models.ImageQueryOptions{
+				QueryOptions: models.QueryOptions{
+					FindFilter: &models.FindFilterType{
+						Sort:      &sortBy,
+						Direction: &direction,
+						PerPage:   &perPage,
+					},
+				},
+			}
+			fast, err := db.Image.Query(ctx, options)
+			if !assert.NoError(err) {
+				return
+			}
+
+			// An ID filter matching every fixture exercises the general query.
+			options.ImageFilter = &models.ImageFilterType{
+				ID: &models.IntCriterionInput{Modifier: models.CriterionModifierGreaterThan, Value: 0},
+			}
+			filtered, err := db.Image.Query(ctx, options)
+			if !assert.NoError(err) {
+				return
+			}
+			assert.Len(fast.IDs, totalImages)
+			assert.Equal(filtered.IDs, fast.IDs)
 		})
 	}
 }

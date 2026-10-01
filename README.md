@@ -185,6 +185,9 @@ GPU-accelerated video encoding with automatic detection:
 
 ## Installation
 
+For x86 Linux servers, use the [GHCR image with Docker Compose](docker/production/README.md).
+The same amd64 image can run under Docker Desktop emulation on Apple Silicon Macs.
+
 Please visit my [Patreon](https://www.patreon.com/c/Creat1veB1te) for all installation details.
 
 ## 🔧 Configuration

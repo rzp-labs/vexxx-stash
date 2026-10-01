@@ -355,7 +355,7 @@ func (db *Anonymiser) anonymiseMarkers(ctx context.Context) error {
 			return queryFunc(ctx, query, single, func(rows *sqlx.Rows) error {
 				var (
 					id    int
-					title string
+					title sql.NullString
 				)
 
 				if err := rows.Scan(
@@ -365,8 +365,10 @@ func (db *Anonymiser) anonymiseMarkers(ctx context.Context) error {
 					return err
 				}
 
-				if err := db.anonymiseText(ctx, table, "title", title); err != nil {
-					return err
+				if title.Valid {
+					if err := db.anonymiseText(ctx, table, "title", title.String); err != nil {
+						return err
+					}
 				}
 
 				lastID = id

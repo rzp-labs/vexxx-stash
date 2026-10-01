@@ -14,7 +14,10 @@ const CURRENT_USER_QUERY = GQL.CurrentUserDocument;
 const USER_COUNT_QUERY = GQL.UserCountDocument;
 
 // Helper to create user count mock
-const createUserCountMock = (count: number, adminCount: number = 0): MockedResponse => ({
+const createUserCountMock = (
+  count: number,
+  adminCount: number = 0
+): MockedResponse => ({
   request: { query: USER_COUNT_QUERY },
   result: {
     data: {
@@ -39,11 +42,7 @@ const createWrapper =
 const createSimpleWrapper =
   (mocks: MockedResponse[]) =>
   ({ children }: { children: React.ReactNode }) =>
-    (
-      <MockedProvider mocks={mocks}>
-        {children}
-      </MockedProvider>
-    );
+    <MockedProvider mocks={mocks}>{children}</MockedProvider>;
 
 describe("UserContext", () => {
   describe("useCurrentUser", () => {
@@ -63,32 +62,30 @@ describe("UserContext", () => {
       expect(result.current.loading).toBe(true);
     });
 
-    it("should grant admin access in no-auth mode (no current user, users exist, no error)", async () => {
-      // When auth is not configured, currentUser returns null without error
-      // but users still exist (admin can't self-delete). This is "no-auth mode".
+    it("should not grant admin access to an anonymous user when accounts exist", async () => {
+      // A null currentUser does not establish an authenticated admin session.
       const mocks: MockedResponse[] = [
         {
           request: { query: CURRENT_USER_QUERY },
           result: { data: { currentUser: null } },
         },
-        createUserCountMock(1, 1), // Has users, but no auth configured
+        createUserCountMock(1, 1),
       ];
 
-      const { result, waitForNextUpdate } = renderHook(() => useCurrentUser(), {
+      const { result, waitFor } = renderHook(() => useCurrentUser(), {
         wrapper: createWrapper(mocks),
       });
 
-      await waitForNextUpdate();
+      await waitFor(() => expect(result.current.loading).toBe(false));
 
       expect(result.current.loading).toBe(false);
       expect(result.current.user).toBeNull();
-      // No-auth mode: should have full admin access
-      expect(result.current.isAdmin).toBe(true);
+      expect(result.current.isAdmin).toBe(false);
       expect(result.current.isViewer).toBe(false);
       expect(result.current.isSetupMode).toBe(false);
       expect(result.current.canModify).toBe(true);
       expect(result.current.canDelete).toBe(true);
-      expect(result.current.canManageUsers).toBe(true);
+      expect(result.current.canManageUsers).toBe(false);
       expect(result.current.canRunTasks).toBe(true);
       expect(result.current.canModifySettings).toBe(true);
     });
@@ -126,7 +123,7 @@ describe("UserContext", () => {
       expect(result.current.canModifySettings).toBe(true);
     });
 
-    // Note: Tests for admin/viewer user permissions require more complex Apollo 
+    // Note: Tests for admin/viewer user permissions require more complex Apollo
     // mock setup. The permission logic is tested indirectly through the null user
     // tests above (backward compatibility defaults) and should be tested with
     // integration tests in a real app context.
@@ -218,31 +215,27 @@ describe("UserContext", () => {
       expect(result.current.canModifySettings).toBe(false);
     });
 
-    it("should grant full admin access when no user and no auth configured (backward compat)", async () => {
-      // Backward compat: single-user system without auth configured.
-      // currentUser is null (no auth) but users exist in DB.
-      // Should grant full admin access since auth is not required.
+    it("should wait for both queries before resolving anonymous permissions", async () => {
       const mocks: MockedResponse[] = [
         {
           request: { query: CURRENT_USER_QUERY },
           result: { data: { currentUser: null } },
         },
-        createUserCountMock(1), // Has users
+        { ...createUserCountMock(1), delay: 50 },
       ];
 
-      const { result, waitForNextUpdate } = renderHook(() => useCurrentUser(), {
+      const { result, waitFor } = renderHook(() => useCurrentUser(), {
         wrapper: createWrapper(mocks),
       });
 
-      await waitForNextUpdate();
+      await waitFor(() => expect(result.current.loading).toBe(false));
 
       expect(result.current.loading).toBe(false);
       expect(result.current.isSetupMode).toBe(false);
-      // No-auth mode: full admin access including user management
-      expect(result.current.isAdmin).toBe(true);
+      expect(result.current.isAdmin).toBe(false);
       expect(result.current.canModify).toBe(true);
       expect(result.current.canDelete).toBe(true);
-      expect(result.current.canManageUsers).toBe(true);
+      expect(result.current.canManageUsers).toBe(false);
       expect(result.current.canRunTasks).toBe(true);
       expect(result.current.canModifySettings).toBe(true);
     });
@@ -250,13 +243,14 @@ describe("UserContext", () => {
 
   describe("useMultiUserEnabled", () => {
     it("should return false when user count is 0", async () => {
-      const mocks: MockedResponse[] = [
-        createUserCountMock(0),
-      ];
+      const mocks: MockedResponse[] = [createUserCountMock(0)];
 
-      const { result, waitForNextUpdate } = renderHook(() => useMultiUserEnabled(), {
-        wrapper: createSimpleWrapper(mocks),
-      });
+      const { result, waitForNextUpdate } = renderHook(
+        () => useMultiUserEnabled(),
+        {
+          wrapper: createSimpleWrapper(mocks),
+        }
+      );
 
       await waitForNextUpdate();
 
@@ -265,13 +259,14 @@ describe("UserContext", () => {
     });
 
     it("should return true when users exist", async () => {
-      const mocks: MockedResponse[] = [
-        createUserCountMock(3, 1),
-      ];
+      const mocks: MockedResponse[] = [createUserCountMock(3, 1)];
 
-      const { result, waitForNextUpdate } = renderHook(() => useMultiUserEnabled(), {
-        wrapper: createSimpleWrapper(mocks),
-      });
+      const { result, waitForNextUpdate } = renderHook(
+        () => useMultiUserEnabled(),
+        {
+          wrapper: createSimpleWrapper(mocks),
+        }
+      );
 
       await waitForNextUpdate();
 

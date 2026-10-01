@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -642,29 +643,6 @@ func TestStringCriterionHandlerNotNull(t *testing.T) {
 	assert.Len(f.whereClauses[0].args, 0)
 }
 
-func TestIsAbsolutePath(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected bool
-	}{
-		{"unix root", "/home/user/videos", true},
-		{"unix slash only", "/", true},
-		{"windows C drive", "C:\\Users\\videos", true},
-		{"windows D drive forward slash", "D:/media", true},
-		{"relative path", "some/path", false},
-		{"empty string", "", false},
-		{"just a name", "videos", false},
-		{"tilde path", "~/videos", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, isAbsolutePath(tt.input))
-		})
-	}
-}
-
 func TestContainsPathSeparator(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -711,7 +689,7 @@ func TestGetPathSearchClause(t *testing.T) {
 			pattern:      "/home/user/videos",
 			addWildcards: true,
 			not:          false,
-			expectSQL:    fmt.Sprintf("%s LIKE ?", pathCol),
+			expectSQL:    fmt.Sprintf("%s || '%s' || %s LIKE ?", pathCol, string(filepath.Separator), baseCol),
 			expectArgs:   []interface{}{"/home/user/videos%"},
 		},
 		{
@@ -719,7 +697,7 @@ func TestGetPathSearchClause(t *testing.T) {
 			pattern:      "user/videos",
 			addWildcards: true,
 			not:          false,
-			expectSQL:    fmt.Sprintf("%s LIKE ?", pathCol),
+			expectSQL:    fmt.Sprintf("%s || '%s' || %s LIKE ?", pathCol, string(filepath.Separator), baseCol),
 			expectArgs:   []interface{}{"%user/videos%"},
 		},
 		{
@@ -743,7 +721,7 @@ func TestGetPathSearchClause(t *testing.T) {
 			pattern:      "/home/user",
 			addWildcards: true,
 			not:          true,
-			expectSQL:    fmt.Sprintf("NOT (%s LIKE ?)", pathCol),
+			expectSQL:    fmt.Sprintf("NOT (%s || '%s' || %s LIKE ?)", pathCol, string(filepath.Separator), baseCol),
 			expectArgs:   []interface{}{"/home/user%"},
 		},
 	}
@@ -753,6 +731,54 @@ func TestGetPathSearchClause(t *testing.T) {
 			clause := getPathSearchClause(pathCol, baseCol, tt.pattern, tt.addWildcards, tt.not)
 			assert.Equal(t, tt.expectSQL, clause.sql)
 			assert.Equal(t, tt.expectArgs, clause.args)
+		})
+	}
+}
+
+func TestPathSearchRootBoundaries(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer db.Close()
+
+	root := string(filepath.Separator)
+	if filepath.Separator == '\\' {
+		root = `C:\`
+	}
+	folder := filepath.Join(root, "media", "films")
+	unrelatedFolder := filepath.Join(root, "mnt", "media", "films")
+	spacedFolder := filepath.Join(root, "media", "my films")
+	unrelatedSpacedFolder := filepath.Join(root, "mnt", "media", "my films")
+	quotedFilename := `"` + filepath.Join(spacedFolder, "a.mp4") + `"`
+
+	tests := []struct {
+		name, folder, basename, pattern string
+		matches                         bool
+	}{
+		{"absolute folder", folder, "a.mp4", folder, true},
+		{"unrelated root", unrelatedFolder, "a.mp4", folder, false},
+		{"absolute filename", folder, "a.mp4", filepath.Join(folder, "a.mp4"), true},
+		{"absolute filename prefix", folder, "a.mp4", filepath.Join(folder, "a"), true},
+		{"filename under unrelated root", unrelatedFolder, "a.mp4", filepath.Join(folder, "a.mp4"), false},
+		{"relative folder", unrelatedFolder, "a.mp4", filepath.Join("media", "films"), true},
+		{"relative filename", unrelatedFolder, "a.mp4", filepath.Join("films", "a.mp4"), true},
+		{"quoted absolute filename", spacedFolder, "a.mp4", quotedFilename, true},
+		{"quoted unrelated root", unrelatedSpacedFolder, "a.mp4", quotedFilename, false},
+		{"windows drive", "C:/media/films", "a.mp4", "C:/media/films", true},
+		{"windows unrelated prefix", "backup/C:/media/films", "a.mp4", "C:/media/films", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, not := range []bool{false, true} {
+				clause := getPathSearchClauseMany("folder_path", "basename", tt.pattern, true, not)
+				args := append(clause.args, tt.folder, tt.basename)
+				var matches bool
+				err := db.QueryRow("SELECT ("+clause.sql+") FROM (SELECT ? AS folder_path, ? AS basename)", args...).Scan(&matches)
+				if assert.NoError(t, err) {
+					assert.Equal(t, tt.matches != not, matches, "negated=%v", not)
+				}
+			}
 		})
 	}
 }

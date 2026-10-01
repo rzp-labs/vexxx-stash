@@ -157,60 +157,34 @@ func pathCriterionHandler(c *models.StringCriterionInput, pathColumn string, bas
 	}
 }
 
-// isAbsolutePath returns true if the pattern looks like an absolute filesystem path.
-// This is used to detect prefix-matchable patterns that can use an index on folders.path.
-func isAbsolutePath(p string) bool {
-	// Unix absolute path
-	if strings.HasPrefix(p, "/") {
-		return true
-	}
-	// Windows absolute path (e.g., C:\, D:/)
-	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
-		return true
-	}
-	return false
-}
-
 // containsPathSeparator returns true if the pattern contains a path separator.
-// If a search pattern contains a separator, it must match within the folder path
-// since basenames never contain path separators.
 func containsPathSeparator(p string) bool {
 	return strings.ContainsRune(p, '/') || strings.ContainsRune(p, '\\')
 }
 
-// getPathSearchClause builds an optimized SQL clause for path filtering.
-//
-// Performance optimizations over the naive (path || '/' || basename) LIKE approach:
-//  1. Decomposes the search: if the pattern contains a path separator, it searches
-//     folders.path directly (avoiding per-row string concatenation)
-//  2. Detects absolute path prefixes to avoid leading wildcards, enabling index use
-//  3. Falls back to OR-based search on both columns for patterns without separators
-func getPathSearchClause(pathColumn, basenameColumn, p string, addWildcards, not bool) sqlClause {
-	if !addWildcards {
-		// Equals/NotEquals: exact match on the full path — must use concatenation
-		filepathColumn := fmt.Sprintf("%s || '%s' || %s", pathColumn, string(filepath.Separator), basenameColumn)
-		ret := makeClause(fmt.Sprintf("%s LIKE ?", filepathColumn), p)
-		if not {
-			ret = ret.not()
-		}
-		return ret
-	}
+// isAbsolutePath recognizes Unix and Windows drive-rooted search patterns.
+func isAbsolutePath(p string) bool {
+	return strings.HasPrefix(p, "/") ||
+		(len(p) >= 3 && p[1] == ':' && (p[2] == '/' || p[2] == '\\'))
+}
 
-	// For wildcard searches (Includes/Excludes), decompose the search to avoid
-	// per-row string concatenation and enable index usage where possible.
-	if containsPathSeparator(p) {
-		// Pattern contains a path separator — it must match within folders.path
-		// since basenames never contain path separators.
-		var pathPattern string
-		if isAbsolutePath(p) {
-			// Absolute path: use as prefix match (no leading wildcard)
-			// This allows SQLite to use the B-tree index on folders.path
-			pathPattern = p + "%"
-		} else {
-			// Relative path fragment: must use leading wildcard
-			pathPattern = "%" + p + "%"
+// getPathSearchClause avoids concatenation for searches confined to a single
+// path component. Searches with separators can span the folder and basename.
+// An empty basenameColumn searches pathColumn alone, as for folder galleries.
+func getPathSearchClause(pathColumn, basenameColumn, p string, addWildcards, not bool) sqlClause {
+	if !addWildcards || containsPathSeparator(p) || basenameColumn == "" {
+		filepathColumn := pathColumn
+		if basenameColumn != "" {
+			filepathColumn = fmt.Sprintf("%s || '%s' || %s", pathColumn, string(filepath.Separator), basenameColumn)
 		}
-		ret := makeClause(fmt.Sprintf("%s LIKE ?", pathColumn), pathPattern)
+		pattern := p
+		if addWildcards {
+			pattern += "%"
+			if !isAbsolutePath(p) {
+				pattern = "%" + pattern
+			}
+		}
+		ret := makeClause(fmt.Sprintf("%s LIKE ?", filepathColumn), pattern)
 		if not {
 			ret = ret.not()
 		}

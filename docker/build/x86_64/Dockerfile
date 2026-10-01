@@ -10,7 +10,7 @@ COPY Makefile /stash/
 COPY ./graphql /stash/graphql/
 COPY ./ui /stash/ui/
 # pnpm install with npm
-RUN npm install -g pnpm@10
+RUN npm install -g pnpm@10.34.4
 RUN make pre-ui
 RUN make generate-ui
 ARG GITHASH
@@ -45,6 +45,7 @@ COPY --from=backend /stash/stash /usr/bin/
 COPY --from=backend /stash/pkg/stashface/client.py /usr/lib/stash/stashface/client.py
 COPY --from=backend /stash/pkg/stashtag/client.py /usr/lib/stash/stashtag/client.py
 COPY --from=backend /stash/pkg/megaface/client.py /usr/lib/stash/megaface/client.py
+RUN mkdir -p /root/.stash
 ENV STASH_CONFIG_FILE=/root/.stash/config.yml
 # Set Docker container environment variable for detection
 ENV DOCKER_CONTAINER=1
