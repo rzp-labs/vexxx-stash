@@ -170,22 +170,19 @@ func isAbsolutePath(p string) bool {
 
 // getPathSearchClause avoids concatenation for searches confined to a single
 // path component. Searches with separators can span the folder and basename.
+// An empty basenameColumn searches pathColumn alone, as for folder galleries.
 func getPathSearchClause(pathColumn, basenameColumn, p string, addWildcards, not bool) sqlClause {
-	if !addWildcards {
-		// Equals/NotEquals: exact match on the full path — must use concatenation
-		filepathColumn := fmt.Sprintf("%s || '%s' || %s", pathColumn, string(filepath.Separator), basenameColumn)
-		ret := makeClause(fmt.Sprintf("%s LIKE ?", filepathColumn), p)
-		if not {
-			ret = ret.not()
+	if !addWildcards || containsPathSeparator(p) || basenameColumn == "" {
+		filepathColumn := pathColumn
+		if basenameColumn != "" {
+			filepathColumn = fmt.Sprintf("%s || '%s' || %s", pathColumn, string(filepath.Separator), basenameColumn)
 		}
-		return ret
-	}
-
-	if containsPathSeparator(p) {
-		filepathColumn := fmt.Sprintf("%s || '%s' || %s", pathColumn, string(filepath.Separator), basenameColumn)
-		pattern := p + "%"
-		if !isAbsolutePath(p) {
-			pattern = "%" + pattern
+		pattern := p
+		if addWildcards {
+			pattern += "%"
+			if !isAbsolutePath(p) {
+				pattern = "%" + pattern
+			}
 		}
 		ret := makeClause(fmt.Sprintf("%s LIKE ?", filepathColumn), pattern)
 		if not {

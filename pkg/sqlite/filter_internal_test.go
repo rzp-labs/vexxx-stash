@@ -742,19 +742,29 @@ func TestPathSearchRootBoundaries(t *testing.T) {
 	}
 	defer db.Close()
 
+	root := string(filepath.Separator)
+	if filepath.Separator == '\\' {
+		root = `C:\`
+	}
+	folder := filepath.Join(root, "media", "films")
+	unrelatedFolder := filepath.Join(root, "mnt", "media", "films")
+	spacedFolder := filepath.Join(root, "media", "my films")
+	unrelatedSpacedFolder := filepath.Join(root, "mnt", "media", "my films")
+	quotedFilename := `"` + filepath.Join(spacedFolder, "a.mp4") + `"`
+
 	tests := []struct {
 		name, folder, basename, pattern string
 		matches                         bool
 	}{
-		{"absolute folder", "/media/films", "a.mp4", "/media/films", true},
-		{"unrelated root", "/mnt/media/films", "a.mp4", "/media/films", false},
-		{"absolute filename", "/media/films", "a.mp4", "/media/films/a.mp4", true},
-		{"absolute filename prefix", "/media/films", "a.mp4", "/media/films/a", true},
-		{"filename under unrelated root", "/mnt/media/films", "a.mp4", "/media/films/a.mp4", false},
-		{"relative folder", "/mnt/media/films", "a.mp4", "media/films", true},
-		{"relative filename", "/mnt/media/films", "a.mp4", "films/a.mp4", true},
-		{"quoted absolute filename", "/media/my films", "a.mp4", `"/media/my films/a.mp4"`, true},
-		{"quoted unrelated root", "/mnt/media/my films", "a.mp4", `"/media/my films/a.mp4"`, false},
+		{"absolute folder", folder, "a.mp4", folder, true},
+		{"unrelated root", unrelatedFolder, "a.mp4", folder, false},
+		{"absolute filename", folder, "a.mp4", filepath.Join(folder, "a.mp4"), true},
+		{"absolute filename prefix", folder, "a.mp4", filepath.Join(folder, "a"), true},
+		{"filename under unrelated root", unrelatedFolder, "a.mp4", filepath.Join(folder, "a.mp4"), false},
+		{"relative folder", unrelatedFolder, "a.mp4", filepath.Join("media", "films"), true},
+		{"relative filename", unrelatedFolder, "a.mp4", filepath.Join("films", "a.mp4"), true},
+		{"quoted absolute filename", spacedFolder, "a.mp4", quotedFilename, true},
+		{"quoted unrelated root", unrelatedSpacedFolder, "a.mp4", quotedFilename, false},
 		{"windows drive", "C:/media/films", "a.mp4", "C:/media/films", true},
 		{"windows unrelated prefix", "backup/C:/media/films", "a.mp4", "C:/media/films", false},
 	}

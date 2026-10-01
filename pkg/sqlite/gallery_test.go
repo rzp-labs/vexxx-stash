@@ -1606,6 +1606,53 @@ func TestGalleryQueryNegativePathWithoutFiles(t *testing.T) {
 	}
 }
 
+func TestGalleryQueryFolderPathRootBoundaries(t *testing.T) {
+	tests := []struct {
+		name, path, query string
+		matches           bool
+	}{
+		{"absolute root", "/media/films", "/media/films", true},
+		{"unrelated root", "/mnt/media/films", "/media/films", false},
+		{"absolute descendant", "/media/films/albums", "/media/films", true},
+		{"relative fragment", "/mnt/media/films", "media/films", true},
+		{"single component", "/mnt/media/films", "films", true},
+		{"quoted absolute", "/media/my films", `"/media/my films"`, true},
+		{"quoted unrelated root", "/mnt/media/my films", `"/media/my films"`, false},
+		{"quoted relative", "/mnt/media/my films", `"media/my films"`, true},
+		{"multiple terms", "/mnt/media/films", "/missing /media/films", false},
+		{"relative alternative", "/mnt/media/films", "/missing media/films", true},
+		{"windows root", "C:/media/films", "C:/media/films", true},
+		{"windows unrelated root", "backup/C:/media/films", "C:/media/films", false},
+	}
+	for _, tt := range tests {
+		for _, modifier := range []models.CriterionModifier{models.CriterionModifierIncludes, models.CriterionModifierExcludes} {
+			runWithRollbackTxn(t, tt.name+"/"+string(modifier), func(t *testing.T, ctx context.Context) {
+				folder := models.Folder{Path: tt.path}
+				if !assert.NoError(t, db.Folder.Create(ctx, &folder)) {
+					return
+				}
+				gallery := models.NewGallery()
+				gallery.FolderID = &folder.ID
+				if !assert.NoError(t, db.Gallery.Create(ctx, &gallery, nil)) {
+					return
+				}
+				perPage := -1
+				galleries, _, err := db.Gallery.Query(ctx, &models.GalleryFilterType{
+					Path: &models.StringCriterionInput{Value: tt.query, Modifier: modifier},
+				}, &models.FindFilterType{PerPage: &perPage})
+				if !assert.NoError(t, err) {
+					return
+				}
+				found := false
+				for _, result := range galleries {
+					found = found || result.ID == gallery.ID
+				}
+				assert.Equal(t, tt.matches != (modifier == models.CriterionModifierExcludes), found)
+			})
+		}
+	}
+}
+
 func TestGalleryQueryPathOr(t *testing.T) {
 	const gallery1Idx = 1
 	const gallery2Idx = 2

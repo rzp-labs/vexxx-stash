@@ -242,12 +242,12 @@ func (qb *galleryFilterHandler) pathCriterionHandler(c *models.StringCriterionIn
 				switch modifier {
 				case models.CriterionModifierIncludes:
 					clause := getPathSearchClauseMany(pathColumn, basenameColumn, c.Value, addWildcards, not)
-					clause2 := getStringSearchClause([]string{folderPathColumn}, c.Value, false)
+					clause2 := getPathSearchClauseMany(folderPathColumn, "", c.Value, addWildcards, not)
 					f.whereClauses = append(f.whereClauses, orClauses(clause, clause2))
 				case models.CriterionModifierExcludes:
 					not = true
 					clause := getPathSearchClauseMany(pathColumn, basenameColumn, c.Value, addWildcards, not)
-					clause2 := getStringSearchClause([]string{folderPathColumn}, c.Value, true)
+					clause2 := getPathSearchClauseMany(folderPathColumn, "", c.Value, addWildcards, not)
 					f.whereClauses = append(f.whereClauses, orClauses(clause, clause2, pathless))
 				case models.CriterionModifierEquals:
 					addWildcards = false
