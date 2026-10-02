@@ -109,6 +109,20 @@ input ConfigGeneralInput {
   videoFileNamingAlgorithm: HashAlgorithm
   "Number of parallel tasks to start during scan/generate"
   parallelTasks: Int
+  "Requested FFmpeg marker preview backend; requires application restart"
+  generationMarkerBackend: String
+  "Requested FFmpeg sprite backend; requires application restart"
+  generationSpriteBackend: String
+  "Explicit Intel render device (for example /dev/dri/renderD128)"
+  generationDevice: String
+  "Enable shared CPU generation limits; hardware selection always enables limits"
+  generationBudgetEnabled: Boolean
+  "Total generation process limit, 0 = conservative auto (1)"
+  generationMaxProcesses: Int
+  "GPU generation process limit, 0 = conservative auto (1)"
+  generationMaxGPUProcesses: Int
+  "FFmpeg generation threads, 0 = conservative auto (1)"
+  generationThreads: Int
   "Include audio stream in previews"
   previewAudio: Boolean
   "Number of segments in a preview file"
@@ -253,6 +267,25 @@ type ConfigGeneralResult {
   videoFileNamingAlgorithm: HashAlgorithm!
   "Number of parallel tasks to start during scan/generate"
   parallelTasks: Int!
+  "Requested FFmpeg marker preview backend; requires application restart"
+  generationMarkerBackend: String!
+  "Requested FFmpeg sprite backend; requires application restart"
+  generationSpriteBackend: String!
+  "Explicit Intel render device (for example /dev/dri/renderD128)"
+  generationDevice: String!
+  "Enable shared CPU generation limits; hardware selection always enables limits"
+  generationBudgetEnabled: Boolean!
+  "Total generation process limit, 0 = conservative auto (1)"
+  generationMaxProcesses: Int!
+  "GPU generation process limit, 0 = conservative auto (1)"
+  generationMaxGPUProcesses: Int!
+  "FFmpeg generation threads, 0 = conservative auto (1)"
+  generationThreads: Int!
+  "Running configuration snapshot, not a claim of GPU use"
+  activeGeneration: GenerationConfiguration!
+  generationRestartRequired: Boolean!
+  "Invalid persisted generation configuration, if present"
+  generationConfigurationError: String
   "Include audio stream in previews"
   previewAudio: Boolean!
   "Number of segments in a preview file"
@@ -658,4 +691,15 @@ input GenerateAPIKeyInput {
 type StashBoxValidationResult {
   valid: Boolean!
   status: String!
+}
+
+"Running FFmpeg generation configuration. Actual job backend/fallback is logged per stage."
+type GenerationConfiguration {
+  markerBackend: String!
+  spriteBackend: String!
+  device: String!
+  budgetEnabled: Boolean!
+  maxProcesses: Int!
+  maxGPUProcesses: Int!
+  threads: Int!
 }

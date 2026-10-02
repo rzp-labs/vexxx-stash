@@ -6,6 +6,8 @@ export default defineConfig({
   plugins: [react(), tsconfigPaths()],
   test: {
     globals: true,
+    // Bundle MUI's ESM imports so React 17 jsx-runtime resolves consistently.
+    server: { deps: { inline: [/@mui/] } },
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.{test,spec}.{ts,tsx}"],

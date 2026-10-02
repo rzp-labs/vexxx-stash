@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "candidate_revision": "639e67c3879f7eaae156b6edae60b456afa58d50",
+  "environment": "ct102",
+  "fixtures": [
+    {
+      "path": "/var/lib/qsv-lab/qsv-h264.mp4",
+      "source_kind": "synthetic",
+      "description": "Existing lab 1080p 8-bit synthetic fixture; verify ffprobe metadata before use"
+    }
+  ],
+  "cases": [
+    {
+      "id": "source-probe",
+      "workload": "probe",
+      "selected_backend": "cpu",
+      "actual_backend": "cpu",
+      "argv": [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_streams",
+        "-show_format",
+        "-of",
+        "json",
+        "/var/lib/qsv-lab/qsv-h264.mp4"
+      ],
+      "timeout_seconds": 10
+    },
+    {
+      "id": "cpu-marker-mp4-r1",
+      "workload": "marker-mp4",
+      "selected_backend": "cpu",
+      "actual_backend": "cpu",
+      "argv": [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "warning",
+        "-n",
+        "-threads",
+        "1",
+        "-i",
+        "/var/lib/qsv-lab/qsv-h264.mp4",
+        "-t",
+        "3",
+        "-an",
+        "-vf",
+        "scale=640:-2",
+        "-c:v",
+        "libx264",
+        "-threads",
+        "1",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+        "cpu-marker-r1.mp4"
+      ],
+      "timeout_seconds": 55,
+      "validation": {
+        "argv": [
+          "ffmpeg",
+          "-hide_banner",
+          "-nostdin",
+          "-v",
+          "error",
+          "-threads",
+          "1",
+          "-i",
+          "cpu-marker-r1.mp4",
+          "-f",
+          "null",
+          "-"
+        ],
+        "timeout_seconds": 10
+      }
+    },
+    {
+      "id": "cpu-marker-webp-r1",
+      "workload": "marker-webp",
+      "selected_backend": "cpu",
+      "actual_backend": "cpu",
+      "argv": [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "warning",
+        "-n",
+        "-threads",
+        "1",
+        "-i",
+        "/var/lib/qsv-lab/qsv-h264.mp4",
+        "-t",
+        "1",
+        "-an",
+        "-vf",
+        "fps=12,scale=320:-2",
+        "-c:v",
+        "libwebp",
+        "-threads",
+        "1",
+        "-lossless",
+        "1",
+        "-compression_level",
+        "6",
+        "-loop",
+        "0",
+        "cpu-marker-r1.webp"
+      ],
+      "timeout_seconds": 55
+    }
+  ],
+  "environment_commands": [
+    {
+      "name": "ffmpeg-version",
+      "argv": [
+        "/usr/bin/ffmpeg",
+        "-version"
+      ]
+    },
+    {
+      "name": "ffprobe-version",
+      "argv": [
+        "/usr/bin/ffprobe",
+        "-version"
+      ]
+    },
+    {
+      "name": "kernel",
+      "argv": [
+        "/usr/bin/uname",
+        "-a"
+      ]
+    },
+    {
+      "name": "python-version",
+      "argv": [
+        "/usr/bin/python3",
+        "--version"
+      ]
+    }
+  ]
+}
