@@ -323,7 +323,10 @@ func (g Generator) previewVideoToImage(input string) generateFn {
 			"-lossless", "1",
 			"-q:v", "70",
 			"-compression_level", "6",
-			"-preset", "default",
+			// libwebp presets reset lossless and compression_level during
+			// encoder initialization, regardless of CLI option order. Disable
+			// the preset to honor the explicit lossless=1 and method=6 contract.
+			"-preset", "none",
 			"-loop", "0",
 			"-threads", "4",
 		)

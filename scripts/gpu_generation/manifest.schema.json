@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bounded media generation benchmark manifest v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "candidate_revision",
+    "environment",
+    "fixtures",
+    "cases"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "candidate_revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "environment": {
+      "enum": [
+        "ct102",
+        "b580",
+        "local-cpu"
+      ]
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "source_kind"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_kind": {
+            "const": "synthetic"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/command"
+          }
+        ],
+        "type": "object",
+        "required": [
+          "id",
+          "selected_backend"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+          },
+          "workload": {
+            "type": "string"
+          },
+          "selected_backend": {
+            "enum": [
+              "cpu",
+              "qsv",
+              "vaapi"
+            ]
+          },
+          "actual_backend": {
+            "description": "Expectation only; actual backend is derived from candidate runtime diagnostics",
+            "enum": [
+              "cpu",
+              "qsv",
+              "vaapi",
+              "unknown"
+            ]
+          },
+          "fallback_reason": {
+            "type": "string",
+            "description": "Expectation only"
+          },
+          "validation": {
+            "$ref": "#/$defs/command"
+          },
+          "gpu_evidence": {
+            "$ref": "#/$defs/gpuEvidence"
+          }
+        }
+      }
+    },
+    "environment_commands": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "allOf": [
+          {
+            "$ref": "#/$defs/command"
+          }
+        ],
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+          },
+          "timeout_seconds": {
+            "type": "number",
+            "minimum": 0.05,
+            "maximum": 3
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "command": {
+      "type": "object",
+      "required": [
+        "argv"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192
+          }
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 55
+        },
+        "env": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "PATH",
+              "LANG",
+              "LC_ALL",
+              "TZ",
+              "TMPDIR",
+              "LIBVA_DRIVER_NAME",
+              "LIBVA_DRIVERS_PATH",
+              "LD_LIBRARY_PATH",
+              "OMP_NUM_THREADS"
+            ]
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "gpuEvidence": {
+      "type": "object",
+      "required": [
+        "path",
+        "case_id",
+        "monitor_start_unix",
+        "monitor_end_unix"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "case_id": {
+          "type": "string"
+        },
+        "monitor_start_unix": {
+          "type": "number"
+        },
+        "monitor_end_unix": {
+          "type": "number"
+        },
+        "candidate_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "command_started_unix": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}
