@@ -358,6 +358,8 @@ type Config struct {
 	certFile string
 	keyFile  string
 	sync.RWMutex
+	generationOnce     sync.Once
+	generationSnapshot generationSettings
 	// deadlock.RWMutex // for deadlock testing/issues
 }
 
@@ -2000,6 +2002,9 @@ func (i *Config) GetScraperPackagePathGetter() packagePathGetter {
 func (i *Config) Validate() error {
 	i.RLock()
 	defer i.RUnlock()
+	if _, err := i.readGenerationSettings(); err != nil {
+		return err
+	}
 	mandatoryPaths := []string{
 		Database,
 		Generated,
