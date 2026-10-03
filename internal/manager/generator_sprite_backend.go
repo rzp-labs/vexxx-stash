@@ -80,8 +80,7 @@ func (g *SpriteGenerator) spriteRequest() spriteRequest {
 // it is enabled and can take the file.
 func (g *SpriteGenerator) spriteTiles(ctx context.Context) ([]image.Image, error) {
 	req := g.spriteRequest()
-
-	if b := nativeSpriteBackend(); b != nil {
+	if b := nativeSpriteBackend(); b != nil && !g.spriteBudgetEnabled() {
 		images, err := b.tiles(ctx, req)
 		if err == nil {
 			logger.Debugf("[generator] %s produced %d sprite tiles for %s", b.name(), len(images), req.path)

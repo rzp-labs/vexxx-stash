@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -214,6 +215,16 @@ func NewFFProbe(path string) *FFProbe {
 
 // NewVideoFile runs ffprobe on the given path and returns a VideoFile.
 func (f *FFProbe) NewVideoFile(videoPath string) (*VideoFile, error) {
+	return f.NewVideoFileContext(context.Background(), videoPath, 0)
+}
+
+// NewVideoFileContext uses the canonical metadata parsing with cancellation and
+// an optional decoder thread request. Zero preserves legacy FFProbe arguments.
+// Admission belongs to the caller, so scan/playback probes remain independent.
+func (f *FFProbe) NewVideoFileContext(ctx context.Context, videoPath string, threads int) (*VideoFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	args := []string{
 		"-v",
 		"quiet",
@@ -221,6 +232,9 @@ func (f *FFProbe) NewVideoFile(videoPath string) (*VideoFile, error) {
 		"-show_format",
 		"-show_streams",
 		"-show_error",
+	}
+	if threads > 0 {
+		args = append(args, "-threads", strconv.Itoa(threads))
 	}
 
 	// show_entries stream_side_data=rotation requires 5.x or later ffprobe
@@ -230,10 +244,13 @@ func (f *FFProbe) NewVideoFile(videoPath string) (*VideoFile, error) {
 
 	args = append(args, videoPath)
 
-	cmd := stashExec.Command(f.path, args...)
+	cmd := stashExec.CommandContext(ctx, f.path, args...)
 	out, err := cmd.Output()
 
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("FFProbe encountered an error with <%s>.\nError JSON:\n%s\nError: %s", videoPath, string(out), err.Error())
 	}
 
@@ -248,10 +265,25 @@ func (f *FFProbe) NewVideoFile(videoPath string) (*VideoFile, error) {
 // GetReadFrameCount counts the actual frames of the video file.
 // Used when the frame count is missing or incorrect.
 func (f *FFProbe) GetReadFrameCount(path string) (int64, error) {
+	return f.GetReadFrameCountContext(context.Background(), path, 0)
+}
+
+// GetReadFrameCountContext provides cancellable frame counting for generation
+// without changing the shared probe's scan/playback settings or default calls.
+func (f *FFProbe) GetReadFrameCountContext(ctx context.Context, path string, threads int) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	args := []string{"-v", "quiet", "-print_format", "json", "-count_frames", "-show_format", "-show_streams", "-show_error", path}
-	out, err := stashExec.Command(f.path, args...).Output()
+	if threads > 0 {
+		args = append(args[:len(args)-1], "-threads", strconv.Itoa(threads), path)
+	}
+	out, err := stashExec.CommandContext(ctx, f.path, args...).Output()
 
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, ctxErr
+		}
 		return 0, fmt.Errorf("FFProbe encountered an error with <%s>.\nError JSON:\n%s\nError: %s", path, string(out), err.Error())
 	}
 
@@ -261,6 +293,9 @@ func (f *FFProbe) GetReadFrameCount(path string) (int64, error) {
 	}
 
 	fc, err := parse(path, probeJSON)
+	if err != nil {
+		return 0, err
+	}
 	return fc.FrameCount, err
 }
 
