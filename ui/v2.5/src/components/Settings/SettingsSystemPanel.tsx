@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import * as GQL from "src/core/generated-graphql";
 import { LoadingIndicator } from "src/components/Shared/LoadingIndicator";
 import { SettingSection } from "./SettingSection";
@@ -26,6 +26,304 @@ import {
 } from "@mui/material";
 import { useToast } from "src/hooks/Toast";
 import { useHistory } from "react-router-dom";
+import {
+  normalizeGenerationSettings,
+  validateGenerationSettings,
+} from "./generationSettingsValidation";
+import { NumberField } from "src/utils/form";
+
+// Save generation requests together, so coupled GPU/total limits are validated
+// as a complete proposal. Running values come only from the server snapshot.
+export const IntelGenerationSettings: React.FC = () => {
+  const intl = useIntl();
+  const { data, client } = GQL.useConfigurationQuery();
+  const persisted = data?.configuration.general;
+  const [draft, setDraft] = useState<GQL.ConfigGeneralInput>({});
+  const [saveError, setSaveError] = useState<string>();
+  const dirtyFields = useRef(new Set<keyof GQL.ConfigGeneralInput>());
+  const previousSaved = useRef<GQL.ConfigGeneralInput>();
+  const [externalChanges, setExternalChanges] = useState(false);
+  const [save, { loading: saving }] = GQL.useConfigureGeneralMutation({
+    refetchQueries: [GQL.ConfigurationDocument],
+    awaitRefetchQueries: true,
+  });
+
+  const generationLoaded = !!persisted;
+  const {
+    generationMarkerBackend,
+    generationSpriteBackend,
+    generationDevice,
+    generationBudgetEnabled,
+    generationMaxProcesses,
+    generationMaxGPUProcesses,
+    generationThreads,
+  } = persisted ?? {};
+  useEffect(() => {
+    if (!generationLoaded) return;
+    const incoming = normalizeGenerationSettings({
+      generationMarkerBackend,
+      generationSpriteBackend,
+      generationDevice,
+      generationBudgetEnabled,
+      generationMaxProcesses,
+      generationMaxGPUProcesses,
+      generationThreads,
+    });
+    if (
+      dirtyFields.current.size &&
+      previousSaved.current &&
+      Object.entries(incoming).some(
+        ([key, value]) =>
+          previousSaved.current![key as keyof GQL.ConfigGeneralInput] !== value
+      )
+    ) {
+      setExternalChanges(true);
+    }
+    previousSaved.current = incoming;
+    setDraft((current) =>
+      Object.fromEntries(
+        Object.entries(incoming).map(([key, value]) => [
+          key,
+          dirtyFields.current.has(key as keyof GQL.ConfigGeneralInput)
+            ? current[key as keyof GQL.ConfigGeneralInput]
+            : value,
+        ])
+      )
+    );
+  }, [
+    generationLoaded,
+    generationMarkerBackend,
+    generationSpriteBackend,
+    generationDevice,
+    generationBudgetEnabled,
+    generationMaxProcesses,
+    generationMaxGPUProcesses,
+    generationThreads,
+  ]);
+
+  if (!persisted) return null;
+  const active = persisted.activeGeneration;
+  const validation = validateGenerationSettings(draft);
+  const changed = Object.entries(draft).some(
+    ([key, value]) => persisted[key as keyof typeof persisted] !== value
+  );
+  const change = (patch: Partial<GQL.ConfigGeneralInput>) => {
+    const savedProposal = normalizeGenerationSettings(persisted);
+    for (const [key, value] of Object.entries(patch)) {
+      const field = key as keyof GQL.ConfigGeneralInput;
+      if (value === savedProposal[field]) dirtyFields.current.delete(field);
+      else dirtyFields.current.add(field);
+    }
+    if (!dirtyFields.current.size) setExternalChanges(false);
+    setDraft((current) => ({ ...current, ...patch }));
+    setSaveError(undefined);
+  };
+  const submit = async () => {
+    if (validation || saving) return;
+    try {
+      await save({ variables: { input: draft } });
+      // The awaited refetch can include a newer external save than the mutation
+      // response. Read its cache directly, even if React has not rendered it yet.
+      const confirmed = client.readQuery<GQL.ConfigurationQuery>({
+        query: GQL.ConfigurationDocument,
+      })?.configuration.general;
+      if (!confirmed)
+        throw new Error(
+          intl.formatMessage({
+            id: "config.general.generation.confirmation_unavailable",
+          })
+        );
+      const saved = normalizeGenerationSettings(confirmed);
+      previousSaved.current = saved;
+      dirtyFields.current.clear();
+      setDraft(saved);
+      setExternalChanges(false);
+      setSaveError(undefined);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <SettingSection headingID="config.general.generation.heading">
+      <Box
+        component="fieldset"
+        disabled={saving}
+        sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}
+      >
+        <Alert
+          severity={
+            persisted.generationConfigurationError
+              ? "error"
+              : persisted.generationRestartRequired
+              ? "warning"
+              : "info"
+          }
+        >
+          <FormattedMessage
+            id={
+              persisted.generationConfigurationError
+                ? "config.general.generation.invalid_saved"
+                : persisted.generationRestartRequired
+                ? "config.general.generation.pending_restart"
+                : "config.general.generation.restart_description"
+            }
+          />
+        </Alert>
+        {externalChanges && (
+          <Alert severity="warning">
+            <FormattedMessage id="config.general.generation.external_change" />
+          </Alert>
+        )}
+        <Typography variant="body2" sx={{ my: 1 }}>
+          <FormattedMessage
+            id="config.general.generation.active"
+            values={{
+              marker: active.markerBackend,
+              sprite: active.spriteBackend,
+              device: active.device,
+              budget: active.budgetEnabled
+                ? intl.formatMessage({
+                    id: "config.general.generation.enabled",
+                  })
+                : intl.formatMessage({
+                    id: "config.general.generation.disabled",
+                  }),
+              processes: active.maxProcesses,
+              gpu: active.maxGPUProcesses,
+              threads: active.threads,
+            }}
+          />
+        </Typography>
+        <Typography variant="body2" sx={{ mb: 1 }}>
+          <FormattedMessage
+            id="config.general.generation.persisted"
+            values={{
+              marker: persisted.generationMarkerBackend,
+              sprite: persisted.generationSpriteBackend,
+            }}
+          />
+        </Typography>
+        {persisted.generationConfigurationError && (
+          <Alert severity="error">
+            {persisted.generationConfigurationError}
+          </Alert>
+        )}
+        <Typography variant="body2" sx={{ mb: 1 }}>
+          <FormattedMessage id="config.general.generation.diagnostics" />
+        </Typography>
+        {(["generationMarkerBackend", "generationSpriteBackend"] as const).map(
+          (key) => (
+            <SelectSetting
+              key={key}
+              id={key}
+              headingID={`config.general.generation.${key}`}
+              value={draft[key] ?? "software"}
+              disabled={saving}
+              onChange={(v) => change({ [key]: v })}
+            >
+              <option value="software">
+                {intl.formatMessage({
+                  id: "config.general.generation.software",
+                })}
+              </option>
+              <option value="vaapi">Intel VAAPI</option>
+              <option value="qsv" disabled={key === "generationMarkerBackend"}>
+                {key === "generationMarkerBackend"
+                  ? intl.formatMessage({
+                      id: "config.general.generation.qsv_marker_pending",
+                    })
+                  : "Intel QSV"}
+              </option>
+            </SelectSetting>
+          )
+        )}
+        {(draft.generationMarkerBackend === "qsv" ||
+          persisted.generationMarkerBackend === "qsv") && (
+          <Alert severity="warning">
+            <FormattedMessage id="config.general.generation.qsv_marker_fallback" />
+          </Alert>
+        )}
+        <StringSetting
+          id="generation-device"
+          headingID="config.general.generation.device"
+          subHeadingID="config.general.generation.device_description"
+          value={draft.generationDevice ?? "/dev/dri/renderD128"}
+          disabled={saving}
+          onChange={(v) => change({ generationDevice: v })}
+        />
+        <BooleanSetting
+          id="generation-budget"
+          headingID="config.general.generation.budget"
+          subHeadingID="config.general.generation.budget_description"
+          checked={draft.generationBudgetEnabled ?? false}
+          disabled={saving}
+          onChange={(v) => change({ generationBudgetEnabled: v })}
+        />
+        {(
+          [
+            "generationMaxProcesses",
+            "generationMaxGPUProcesses",
+            "generationThreads",
+          ] as const
+        ).map((key) => (
+          <ModalSetting<number>
+            key={key}
+            id={key}
+            headingID={`config.general.generation.${key}`}
+            subHeadingID="config.general.generation.limits_description"
+            value={draft[key] ?? 0}
+            disabled={saving}
+            onChange={(v) => change({ [key]: v })}
+            renderValue={(v) => <span>{v}</span>}
+            renderField={(value, setValue) => (
+              <NumberField
+                min={0}
+                max={64}
+                step={1}
+                value={value ?? 0}
+                onChange={(e) => setValue(Number(e.target.value))}
+              />
+            )}
+          />
+        ))}
+        {validation && (
+          <Alert severity="error">
+            <FormattedMessage id={validation} />
+          </Alert>
+        )}
+        {saveError && <Alert severity="error">{saveError}</Alert>}
+        <Box sx={{ display: "flex", gap: 1, mt: 1 }}>
+          <Button
+            variant="contained"
+            disabled={
+              saving ||
+              (!changed &&
+                !dirtyFields.current.size &&
+                !persisted.generationConfigurationError) ||
+              !!validation
+            }
+            onClick={submit}
+          >
+            <FormattedMessage id="config.general.generation.save" />
+          </Button>
+          <Button
+            disabled={saving}
+            onClick={() =>
+              change({
+                generationMarkerBackend: "software",
+                generationSpriteBackend: "software",
+                generationBudgetEnabled: false,
+              })
+            }
+          >
+            <FormattedMessage id="config.general.generation.rollback" />
+          </Button>
+        </Box>
+      </Box>
+    </SettingSection>
+  );
+};
 
 const ResolvedPathHint: React.FC<{ value?: string }> = ({ value }) => {
   if (!value) return null;
@@ -182,7 +480,9 @@ export const SettingsConfigurationPanel: React.FC = () => {
           headingID="config.general.generated_path_head"
           subHeading={
             <>
-              {intl.formatMessage({ id: "config.general.generated_files_location" })}
+              {intl.formatMessage({
+                id: "config.general.generated_files_location",
+              })}
               <ResolvedPathHint value={g.generatedPathAbs} />
             </>
           }
@@ -208,7 +508,9 @@ export const SettingsConfigurationPanel: React.FC = () => {
           headingID="config.general.scrapers_path.heading"
           subHeading={
             <>
-              {intl.formatMessage({ id: "config.general.scrapers_path.description" })}
+              {intl.formatMessage({
+                id: "config.general.scrapers_path.description",
+              })}
               <ResolvedPathHint value={g.scrapersPathAbs} />
             </>
           }
@@ -221,7 +523,9 @@ export const SettingsConfigurationPanel: React.FC = () => {
           headingID="config.general.plugins_path.heading"
           subHeading={
             <>
-              {intl.formatMessage({ id: "config.general.plugins_path.description" })}
+              {intl.formatMessage({
+                id: "config.general.plugins_path.description",
+              })}
               <ResolvedPathHint value={g.pluginsPathAbs} />
             </>
           }
@@ -234,7 +538,9 @@ export const SettingsConfigurationPanel: React.FC = () => {
           headingID="config.general.metadata_path.heading"
           subHeading={
             <>
-              {intl.formatMessage({ id: "config.general.metadata_path.description" })}
+              {intl.formatMessage({
+                id: "config.general.metadata_path.description",
+              })}
               <ResolvedPathHint value={g.metadataPathAbs} />
             </>
           }
@@ -290,7 +596,8 @@ export const SettingsConfigurationPanel: React.FC = () => {
           heading="Vips Status"
           subHeading={
             <>
-              Optional high-performance image processing library. Install libvips on your system to enable 4x-8x faster image thumbnailing.
+              Optional high-performance image processing library. Install
+              libvips on your system to enable 4x-8x faster image thumbnailing.
               {vipsPath && (
                 <Box
                   component="span"
@@ -307,7 +614,13 @@ export const SettingsConfigurationPanel: React.FC = () => {
             </>
           }
         >
-          <Typography variant="body2" sx={{ fontWeight: 600, color: vipsPath ? "success.main" : "text.secondary" }}>
+          <Typography
+            variant="body2"
+            sx={{
+              fontWeight: 600,
+              color: vipsPath ? "success.main" : "text.secondary",
+            }}
+          >
             {vipsPath ? "Found & Active" : "Not Found (Using FFmpeg fallback)"}
           </Typography>
         </Setting>
@@ -536,6 +849,8 @@ export const SettingsConfigurationPanel: React.FC = () => {
           }}
         />
       </SettingSection>
+
+      <IntelGenerationSettings />
 
       <SettingSection headingID="config.general.native_generation">
         <BooleanSetting

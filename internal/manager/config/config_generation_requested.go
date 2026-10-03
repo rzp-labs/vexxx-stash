@@ -63,6 +63,14 @@ func (p GenerationConfigurationPatch) values() map[string]interface{} {
 // proposal without touching either the saved request or running scheduler.
 func (i *Config) readRequestedGeneration(proposal map[string]interface{}) (GenerationConfiguration, error) {
 	s := GenerationConfiguration{MarkerBackend: "software", SpriteBackend: "software", Device: "/dev/dri/renderD128"}
+	// Report invalid configuration without hiding independently readable later
+	// fields from the correction form. Activation and proposals still fail closed.
+	var firstErr error
+	recordError := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
 	get := func(key string) (interface{}, bool) {
 		if v, ok := proposal[key]; ok {
 			return v, true
@@ -90,11 +98,11 @@ func (i *Config) readRequestedGeneration(proposal map[string]interface{}) (Gener
 		switch backend {
 		case "software", "qsv", "vaapi":
 		default:
-			return s, fmt.Errorf("generation backend must be software, qsv or vaapi")
+			recordError(fmt.Errorf("generation backend must be software, qsv or vaapi"))
 		}
 	}
 	if !regexp.MustCompile(`^/dev/dri/renderD[0-9]+$`).MatchString(s.Device) {
-		return s, fmt.Errorf("%s must select an absolute /dev/dri/renderD device", GenerationDevice)
+		recordError(fmt.Errorf("%s must select an absolute /dev/dri/renderD device", GenerationDevice))
 	}
 	if v, ok := get(GenerationBudgetEnabled); ok {
 		switch value := v.(type) {
@@ -102,11 +110,11 @@ func (i *Config) readRequestedGeneration(proposal map[string]interface{}) (Gener
 			s.BudgetEnabled = value
 		case string:
 			if value != "true" && value != "false" {
-				return s, fmt.Errorf("%s must be boolean", GenerationBudgetEnabled)
+				recordError(fmt.Errorf("%s must be boolean", GenerationBudgetEnabled))
 			}
 			s.BudgetEnabled = value == "true"
 		default:
-			return s, fmt.Errorf("%s must be boolean", GenerationBudgetEnabled)
+			recordError(fmt.Errorf("%s must be boolean", GenerationBudgetEnabled))
 		}
 	}
 	for _, field := range []struct {
@@ -118,7 +126,8 @@ func (i *Config) readRequestedGeneration(proposal map[string]interface{}) (Gener
 		if v, ok := get(field.key); ok {
 			switch v.(type) {
 			case float32, float64, bool:
-				return s, fmt.Errorf("%s must be an integer or auto", field.key)
+				recordError(fmt.Errorf("%s must be an integer or auto", field.key))
+				continue
 			}
 			raw := fmt.Sprint(v)
 			if raw == "auto" {
@@ -126,13 +135,15 @@ func (i *Config) readRequestedGeneration(proposal map[string]interface{}) (Gener
 			}
 			parsed, err := strconv.Atoi(raw)
 			if err != nil {
-				return s, fmt.Errorf("%s must be an integer or auto", field.key)
+				recordError(fmt.Errorf("%s must be an integer or auto", field.key))
+				continue
 			}
 			*field.dest = parsed
 		}
 	}
 	_, err := s.Limits().Normalize()
-	return s, err
+	recordError(err)
+	return s, firstErr
 }
 
 func (s GenerationConfiguration) Limits() generationbudget.Settings {

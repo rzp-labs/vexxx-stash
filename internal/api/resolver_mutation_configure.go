@@ -84,6 +84,16 @@ func (r *mutationResolver) setConfigFloat(key string, value *float64) {
 
 func (r *mutationResolver) ConfigureGeneral(ctx context.Context, input ConfigGeneralInput) (*ConfigGeneralResult, error) {
 	c := config.GetInstance()
+	generationPatch := config.GenerationConfigurationPatch{
+		MarkerBackend: input.GenerationMarkerBackend, SpriteBackend: input.GenerationSpriteBackend,
+		Device: input.GenerationDevice, BudgetEnabled: input.GenerationBudgetEnabled,
+		MaxProcesses: input.GenerationMaxProcesses, MaxGPUProcesses: input.GenerationMaxGPUProcesses, Threads: input.GenerationThreads,
+	}
+	// Reject the full proposed generation configuration before applying any part
+	// of this request, including unrelated general settings.
+	if err := c.ValidateGenerationConfigurationPatch(generationPatch); err != nil {
+		return makeConfigGeneralResult(), err
+	}
 
 	existingPaths := c.GetStashPaths()
 	if input.Stashes != nil {
@@ -430,7 +440,7 @@ func (r *mutationResolver) ConfigureGeneral(ctx context.Context, input ConfigGen
 		refreshPluginSource = true
 	}
 
-	if err := c.Write(); err != nil {
+	if err := c.WriteGenerationConfigurationPatch(generationPatch); err != nil {
 		return makeConfigGeneralResult(), err
 	}
 

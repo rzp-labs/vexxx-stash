@@ -332,3 +332,72 @@ func TestGenerationAtomicPersistencePreservesFileModeAndSymlink(t *testing.T) {
 		t.Fatal("saved request did not reach target")
 	}
 }
+
+func TestGenerationInvalidSavedFieldPreservesReadableValues(t *testing.T) {
+	valid := GenerationConfiguration{MarkerBackend: "qsv", SpriteBackend: "vaapi", Device: "/dev/dri/renderD129", BudgetEnabled: true, MaxProcesses: 4, MaxGPUProcesses: 2, Threads: 3}
+	for _, key := range []string{MarkerGenerationBackend, GenerationDevice, GenerationBudgetEnabled, GenerationMaxProcesses, GenerationMaxGPUProcesses, GenerationThreads} {
+		t.Run(key, func(t *testing.T) {
+			c := InitializeEmpty()
+			c.filePath = filepath.Join(t.TempDir(), "config.yml")
+			c.SetString(MarkerGenerationBackend, valid.MarkerBackend)
+			c.SetString(SpriteGenerationBackend, valid.SpriteBackend)
+			c.SetString(GenerationDevice, valid.Device)
+			c.SetBool(GenerationBudgetEnabled, true)
+			c.SetInt(GenerationMaxProcesses, 4)
+			c.SetInt(GenerationMaxGPUProcesses, 2)
+			c.SetInt(GenerationThreads, 3)
+			c.SetInterface(key, "bad")
+			requested, err := c.GetRequestedGenerationConfiguration()
+			if err == nil {
+				t.Fatal("invalid saved value not reported")
+			}
+			want := valid
+			switch key {
+			case MarkerGenerationBackend:
+				want.MarkerBackend = "bad"
+			case GenerationDevice:
+				want.Device = "bad"
+			case GenerationBudgetEnabled:
+				want.BudgetEnabled = false
+			case GenerationMaxProcesses:
+				want.MaxProcesses = 0
+			case GenerationMaxGPUProcesses:
+				want.MaxGPUProcesses = 0
+			case GenerationThreads:
+				want.Threads = 0
+			}
+			if requested != want {
+				t.Fatalf("invalid %s hid readable saved values: got %+v, want %+v", key, requested, want)
+			}
+			if c.GetIntelMarkerGeneration() != nil || c.GetIntelSpriteGeneration() != nil || c.GetGenerationBudget().Settings().Threads != 1 {
+				t.Fatal("invalid saved config escaped conservative CPU fallback")
+			}
+			// Simulate the complete form correcting only its invalid value.
+			switch key {
+			case MarkerGenerationBackend:
+				requested.MarkerBackend = valid.MarkerBackend
+			case GenerationDevice:
+				requested.Device = valid.Device
+			case GenerationBudgetEnabled:
+				requested.BudgetEnabled = valid.BudgetEnabled
+			case GenerationMaxProcesses:
+				requested.MaxProcesses = valid.MaxProcesses
+			case GenerationMaxGPUProcesses:
+				requested.MaxGPUProcesses = valid.MaxGPUProcesses
+			case GenerationThreads:
+				requested.Threads = valid.Threads
+			}
+			patch := GenerationConfigurationPatch{MarkerBackend: &requested.MarkerBackend, SpriteBackend: &requested.SpriteBackend, Device: &requested.Device, BudgetEnabled: &requested.BudgetEnabled, MaxProcesses: &requested.MaxProcesses, MaxGPUProcesses: &requested.MaxGPUProcesses, Threads: &requested.Threads}
+			if err := c.WriteGenerationConfigurationPatch(patch); err != nil {
+				t.Fatal(err)
+			}
+			reloaded := InitializeEmpty()
+			if err := reloaded.load(c.filePath); err != nil {
+				t.Fatal(err)
+			}
+			if saved, err := reloaded.GetRequestedGenerationConfiguration(); err != nil || saved != valid {
+				t.Fatalf("correction reset valid saved values: %+v %v", saved, err)
+			}
+		})
+	}
+}

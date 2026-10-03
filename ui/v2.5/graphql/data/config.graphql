@@ -26,6 +26,24 @@ fragment ConfigGeneralData on ConfigGeneralResult {
   calculateMD5
   videoFileNamingAlgorithm
   parallelTasks
+  generationMarkerBackend
+  generationSpriteBackend
+  generationDevice
+  generationBudgetEnabled
+  generationMaxProcesses
+  generationMaxGPUProcesses
+  generationThreads
+  generationRestartRequired
+  generationConfigurationError
+  activeGeneration {
+    markerBackend
+    spriteBackend
+    device
+    budgetEnabled
+    maxProcesses
+    maxGPUProcesses
+    threads
+  }
   previewAudio
   previewSegments
   previewSegmentDuration
