@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/stashapp/stash/pkg/generationbudget"
 	"github.com/stashapp/stash/pkg/hash/videophash"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/models"
@@ -35,6 +36,8 @@ func (t *GeneratePhashTask) Start(ctx context.Context) error {
 		options.FFProbePath = instance.FFProbe.Path()
 	}
 	options.Native = NativePhashEnabled()
+	options.Context = ctx
+	options.Budget = instance.Config.GetGenerationBudget()
 	isSegment := false
 	if t.Scene != nil && (t.Scene.StartPoint != nil || t.Scene.EndPoint != nil) {
 		isSegment = true
@@ -63,7 +66,21 @@ func (t *GeneratePhashTask) Start(ctx context.Context) error {
 	}
 
 	if !set {
-		generated, err := videophash.Generate(instance.FFMpeg, t.File, options)
+		// The legacy hash implementation runs outside scene generation wrappers.
+		// Reserve once for the entire hash, then release before the database write.
+		// CPU extraction threads and cancellation use the same controls.
+		class := generationbudget.CPU
+		if options.Native && options.Budget == nil {
+			class = generationbudget.GPU
+		}
+		release, err := options.Budget.Acquire(ctx, class)
+		if err != nil {
+			return err
+		}
+		generated, err := func() (*uint64, error) {
+			defer release()
+			return videophash.Generate(instance.FFMpeg, t.File, options)
+		}()
 		if err != nil {
 			logger.Errorf("Error generating phash for %q: %v", t.File.Path, err)
 			logErrorOutput(err)

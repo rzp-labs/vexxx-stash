@@ -16,6 +16,7 @@ import (
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/ffmpeg/transcoder"
+	"github.com/stashapp/stash/pkg/generationbudget"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/models"
 	"github.com/stashapp/stash/pkg/nativegen"
@@ -51,6 +52,12 @@ type PhashOptions struct {
 	Start    float64
 	Duration float64
 
+	// Context cancels canonical CPU extraction. Nil retains historical behavior.
+	Context context.Context
+	// Budget controls CPU decoder/filter/encoder threads. The task coordinator
+	// owns the shared permit for the whole hash, so helpers must not reacquire it.
+	Budget *generationbudget.Budget
+
 	// FFProbePath locates ffprobe, which the native path needs in order to read
 	// the source's colour tags. Empty falls back to looking on PATH, and a probe
 	// that cannot be run makes the native path decline rather than guess.
@@ -68,8 +75,14 @@ type PhashOptions struct {
 }
 
 func Generate(encoder *ffmpeg.FFMpeg, videoFile *models.VideoFile, options PhashOptions) (*uint64, error) {
+	if err := options.context().Err(); err != nil {
+		return nil, err
+	}
 	sprite, err := generateSprite(encoder, videoFile, options)
 	if err != nil {
+		return nil, err
+	}
+	if err := options.context().Err(); err != nil {
 		return nil, err
 	}
 
@@ -111,7 +124,10 @@ func generateSprite(encoder *ffmpeg.FFMpeg, videoFile *models.VideoFile, options
 	// indistinguishable from a slow success -- there is no wrong output to notice.
 	// Not being asked is not logged as a fallback, though: that is a setting doing
 	// what it says, not a file the native path could not handle.
-	if options.Native {
+	if options.Native && options.Budget != nil {
+		logger.Infof("[generator] native phash bypassed for %s: shared generation budget requires canonical CPU extraction", videoFile.Path)
+	}
+	if options.Native && options.Budget == nil {
 		started := time.Now()
 		images, err := tryNativePhash(encoder, videoFile, times, options.FFProbePath)
 		if err == nil {
@@ -126,7 +142,7 @@ func generateSprite(encoder *ffmpeg.FFMpeg, videoFile *models.VideoFile, options
 	// of the result -- see phash_batch.go for why that is safe and why the batch
 	// size depends on the frame size.
 	images, err := generateSpriteScreenshots(encoder, videoFile.Path, times,
-		batchSizeFor(videoFile.Width, videoFile.Height))
+		batchSizeFor(videoFile.Width, videoFile.Height), options)
 	if err != nil {
 		return nil, fmt.Errorf("generating sprite screenshot: %w", err)
 	}
@@ -219,7 +235,11 @@ func probeColorTags(ffprobePath, path string) (colorspace, colorRange string, er
 	return colorspace, colorRange, nil
 }
 
-func generateSpriteScreenshot(encoder *ffmpeg.FFMpeg, input string, t float64) (image.Image, error) {
+func generateSpriteScreenshot(encoder *ffmpeg.FFMpeg, input string, t float64, controls ...PhashOptions) (image.Image, error) {
+	control := cpuControls(controls)
+	if err := control.context().Err(); err != nil {
+		return nil, err
+	}
 	options := transcoder.ScreenshotOptions{
 		Width:      screenshotSize,
 		OutputPath: "-",
@@ -227,8 +247,11 @@ func generateSpriteScreenshot(encoder *ffmpeg.FFMpeg, input string, t float64) (
 	}
 
 	args := transcoder.ScreenshotTime(input, t, options)
-	data, err := encoder.GenerateOutput(context.Background(), args, nil)
+	data, err := encoder.GenerateOutput(control.context(), control.Budget.FFMpegArgs(args), nil)
 	if err != nil {
+		if ctxErr := control.context().Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 
@@ -240,6 +263,20 @@ func generateSpriteScreenshot(encoder *ffmpeg.FFMpeg, input string, t float64) (
 	}
 
 	return img, nil
+}
+
+func (o PhashOptions) context() context.Context {
+	if o.Context != nil {
+		return o.Context
+	}
+	return context.Background()
+}
+
+func cpuControls(options []PhashOptions) PhashOptions {
+	if len(options) > 0 {
+		return options[0]
+	}
+	return PhashOptions{}
 }
 
 func combineImages(images []image.Image) image.Image {

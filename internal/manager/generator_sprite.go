@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/disintegration/imaging"
-
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/logger"
@@ -52,8 +50,13 @@ func NewSpriteGenerator(ctx context.Context, videoFile ffmpeg.VideoFile, videoCh
 		logger.Warnf("[generator] video %s too short (%.3fs, %d frames), using frame seeking", videoFile.Path, videoFile.VideoStreamDuration, videoFile.FrameCount)
 		slowSeek = true
 		// do an actual frame count of the file ( number of frames = read frames)
-		ffprobe := GetInstance().FFProbe
-		fc, err := ffprobe.GetReadFrameCount(videoFile.Path)
+		fc, err := GetInstance().generationReadFrameCount(ctx, videoFile.Path)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
 		if err == nil {
 			if fc != videoFile.FrameCount {
 				logger.Warnf("[generator] updating framecount (%d) for %s with read frames count (%d)", videoFile.FrameCount, videoFile.Path, fc)
@@ -112,7 +115,7 @@ func (g *SpriteGenerator) generateSpriteImage(ctx context.Context) error {
 		return fmt.Errorf("images slice is empty, failed to generate sprite images for %s", g.Info.VideoFile.Path)
 	}
 
-	return imaging.Save(g.g.CombineSpriteImages(images), g.ImageOutputPath)
+	return g.g.SaveSprite(ctx, images, g.ImageOutputPath)
 }
 
 func (g *SpriteGenerator) generateSpriteVTT(ctx context.Context) error {
