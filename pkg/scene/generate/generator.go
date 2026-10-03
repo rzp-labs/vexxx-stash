@@ -53,7 +53,10 @@ type FFMpegConfig interface {
 }
 
 type Generator struct {
-	Encoder *ffmpeg.FFMpeg
+	Probe           *ffmpeg.FFProbe
+	IntelMarker     *ffmpeg.IntelGenerationConfig
+	IntelDiagnostic func(ffmpeg.IntelGenerationDiagnostic)
+	Encoder         *ffmpeg.FFMpeg
 	// Budget optionally overrides the application's shared generation budget.
 	Budget       *generationbudget.Budget
 	FFMpegConfig FFMpegConfig
@@ -156,7 +159,13 @@ func (g Generator) generateBytes(lockCtx *fsutil.LockContext, p Paths, pattern s
 // generate runs ffmpeg with the given args and waits for it to finish.
 // Returns an error if the command fails. If the command fails, the return
 // value will be of type *exec.ExitError.
-func (g Generator) generate(ctx *fsutil.LockContext, args []string) error {
+func (g Generator) generate(lockCtx *fsutil.LockContext, args []string) error {
+	return g.generateWithContext(lockCtx, lockCtx, args)
+}
+
+// The execution context can carry a probe timeout while command ownership stays
+// on the registered source lock used by scene deletion.
+func (g Generator) generateWithContext(ctx context.Context, lockCtx *fsutil.LockContext, args []string) error {
 	args, release, err := g.acquireGeneration(ctx, args)
 	if err != nil {
 		return err
@@ -168,12 +177,13 @@ func (g Generator) generate(ctx *fsutil.LockContext, args []string) error {
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	done := make(chan struct{})
+	defer close(done)
+	lockCtx.AttachCommandWithCompletion(cmd, done)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("error starting command: %w", err)
 	}
-
-	ctx.AttachCommand(cmd)
 
 	if err := cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError
@@ -203,12 +213,13 @@ func (g Generator) generateOutput(lockCtx *fsutil.LockContext, args []string) ([
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	done := make(chan struct{})
+	defer close(done)
+	lockCtx.AttachCommandWithCompletion(cmd, done)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("error starting command: %w", err)
 	}
-
-	lockCtx.AttachCommand(cmd)
 
 	if err := cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError

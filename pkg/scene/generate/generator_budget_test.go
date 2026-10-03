@@ -184,10 +184,10 @@ func TestGeneratorProbeTimeoutStartsAfterBudgetAdmission(t *testing.T) {
 	}
 	defer release()
 	probeCtx := ffmpeg.WithIntelProbeTimeout(ctx, 20*time.Millisecond)
-	lock := fsutil.NewReadLockManager().ReadLock(probeCtx, "synthetic.mp4")
+	lock := fsutil.NewReadLockManager().ReadLock(ctx, "synthetic.mp4")
 	defer lock.Cancel()
 	done := make(chan error, 1)
-	go func() { done <- g.generate(lock, []string{"-hwaccel", "vaapi", "out.mp4"}) }()
+	go func() { done <- g.generateWithContext(probeCtx, lock, []string{"-hwaccel", "vaapi", "out.mp4"}) }()
 	timer := time.NewTimer(60 * time.Millisecond)
 	defer timer.Stop()
 	select {
