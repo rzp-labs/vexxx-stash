@@ -53,10 +53,11 @@ type FFMpegConfig interface {
 }
 
 type Generator struct {
+	Encoder         *ffmpeg.FFMpeg
 	Probe           *ffmpeg.FFProbe
 	IntelMarker     *ffmpeg.IntelGenerationConfig
+	IntelSprites    *ffmpeg.IntelGenerationConfig
 	IntelDiagnostic func(ffmpeg.IntelGenerationDiagnostic)
-	Encoder         *ffmpeg.FFMpeg
 	// Budget optionally overrides the application's shared generation budget.
 	Budget       *generationbudget.Budget
 	FFMpegConfig FFMpegConfig

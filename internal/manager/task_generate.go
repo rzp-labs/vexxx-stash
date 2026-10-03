@@ -129,6 +129,7 @@ func (j *GenerateJob) Execute(ctx context.Context, progress *job.Progress) error
 		g := &generate.Generator{
 			Probe:        instance.FFProbe,
 			IntelMarker:  instance.Config.GetIntelMarkerGeneration(),
+			IntelSprites: instance.Config.GetIntelSpriteGeneration(),
 			Encoder:      instance.FFMpeg,
 			FFMpegConfig: instance.Config,
 			LockManager:  instance.ReadLockManager,
