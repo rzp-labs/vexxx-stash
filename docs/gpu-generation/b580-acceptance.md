@@ -36,6 +36,30 @@ Compare original and generated marker MP4/WebP playback side by side using autho
 
 For sprites, compare canonical timestamp lists, selected source frames, count/order, tile geometry/montage, VTT start/end intervals and coordinates exactly where canonical semantics demand equality. Open the actual scrubber and inspect boundaries, seeking through long-GOP/VFR and the final tile. Check no duplicates, missing tiles, timestamp drift or stale files after cancel/restart. Recheck marker paths in the same candidate.
 
+### QSV single-frame timestamp regression
+
+QSV sprite screenshots set the input decoder's `-async_depth 1`. In the bounded
+B580 H.264 experiment, FFmpeg 8.1.2's default depth returned source pixels at
+1.900 seconds while reporting the timestamp for 2.000 seconds. The discrepancy
+was present in a full-resolution downloaded frame before hardware scaling.
+Depth one returned the intended 2.000-second frame in both the scaled screenshot
+and decode/download controls, with the same software control. This validates
+one synthetic 1080p 8-bit seek, not all QSV media or complete sprite acceptance.
+
+When the next bounded hardware regression is authorized, retain lossless
+software and QSV captures plus decoder/filter timestamp diagnostics at the same
+requested seek. Check actual source-frame pixel identity before and after the
+QSV scaler, using neighboring canonical source frames as references. Restore
+the input seek offset when interpreting normalized PTS; VPP can change the
+output timebase. Matching VTT bytes or timestamp labels alone cannot establish
+correct frame selection. Keep the decoder option scoped to QSV screenshots;
+shared capability probes and marker/software/VAAPI paths retain their settings.
+
+Before broader acceptance, repeat on approved seek positions and codec/fixture
+classes and compare the complete 81-tile sequence. If source-frame identity
+fails, select software fallback for QSV sprites. Do not compensate with a fixed
+seek offset or sprite re-indexing. Keep the independent pHash gate closed.
+
 pHash is gated separately. Capture canonical and candidate decoded/scaled/grayscale frames with timestamps/order and diagnostic pixel hashes. Require exact final hash equality on every approved corpus case across repeated runs, preserving seek/frame order/montage/color semantics and current algorithm. No jitter tolerance, substituted last frames, library rehash, changed algorithm or stored-hash migration. If any mismatch or no worthwhile resource savings is observed, retain canonical CPU pHash. Only proven combinations can receive opt-in acceleration; other combinations visibly use canonical CPU fallback.
 
 ## Rollback and evidence handoff
