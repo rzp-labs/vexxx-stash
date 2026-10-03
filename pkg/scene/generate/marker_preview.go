@@ -156,7 +156,9 @@ func (g Generator) sceneMarkerWebp(input string, options sceneMarkerOptions) gen
 			"-lossless", "1",
 			"-q:v", "70",
 			"-compression_level", "6",
-			"-preset", "default",
+			// A named libwebp preset overrides lossless and compression level.
+			// Keep both explicitly requested settings effective.
+			"-preset", "none",
 			"-loop", "0",
 			"-threads", "4",
 		)
