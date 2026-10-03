@@ -80,6 +80,10 @@ func (g *SpriteGenerator) spriteRequest() spriteRequest {
 // it is enabled and can take the file.
 func (g *SpriteGenerator) spriteTiles(ctx context.Context) ([]image.Image, error) {
 	req := g.spriteRequest()
+	if images, handled, err := g.intelSpriteTiles(ctx, req); handled {
+		return images, err
+	}
+
 	if b := nativeSpriteBackend(); b != nil && !g.spriteBudgetEnabled() {
 		images, err := b.tiles(ctx, req)
 		if err == nil {

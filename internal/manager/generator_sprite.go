@@ -84,6 +84,9 @@ func NewSpriteGenerator(ctx context.Context, videoFile ffmpeg.VideoFile, videoCh
 		Columns:         cols,
 		g: &generate.Generator{
 			Encoder:      instance.FFMpeg,
+			Probe:        instance.FFProbe,
+			IntelMarker:  instance.Config.GetIntelMarkerGeneration(),
+			IntelSprites: instance.Config.GetIntelSpriteGeneration(),
 			FFMpegConfig: instance.Config,
 			LockManager:  instance.ReadLockManager,
 			ScenePaths:   instance.Paths.Scene,
