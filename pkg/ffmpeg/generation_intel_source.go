@@ -12,6 +12,25 @@ import (
 // IntelSource inspects all streams with a bounded, cancellable ffprobe process.
 // Multiple video streams fall back rather than changing FFmpeg's stream choice.
 func (f *FFProbe) IntelSource(ctx context.Context, input string) (IntelSource, error) {
+	result, err := f.intelSource(ctx, input, true)
+	if err != nil {
+		return result, err
+	}
+	return result, result.Validate()
+}
+
+// IntelSpriteSource keeps sprite eligibility separate from marker validation.
+// Sprites explicitly map video and disable audio, so audio stream count cannot
+// change their output or introduce ambiguous automatic audio selection.
+func (f *FFProbe) IntelSpriteSource(ctx context.Context, input, backend string) (IntelSource, error) {
+	result, err := f.intelSource(ctx, input, false)
+	if err != nil {
+		return result, err
+	}
+	return result, result.ValidateSprite(backend)
+}
+
+func (f *FFProbe) intelSource(ctx context.Context, input string, requireUnambiguousAudio bool) (IntelSource, error) {
 	var result IntelSource
 	if f == nil {
 		return result, fmt.Errorf("ffprobe unavailable for generation eligibility")
@@ -51,15 +70,15 @@ func (f *FFProbe) IntelSource(ctx context.Context, input string) (IntelSource, e
 				rotation = sd.Rotation
 			}
 		}
-		result = IntelSource{Codec: s.CodecName, PixelFormat: s.PixFmt, Width: s.Width, Height: s.Height, Rotation: rotation, StreamIndex: s.Index, ColorTransfer: s.ColorTransfer, ColorPrimaries: s.ColorPrimaries, ColorSpace: s.ColorSpace, ColorRange: s.ColorRange, FrameRate: s.RFrameRate, AverageFrameRate: s.AvgFrameRate, Duration: s.Duration, SampleAspectRatio: s.SampleAspectRatio}
+		result = IntelSource{Profile: s.Profile, Codec: s.CodecName, PixelFormat: s.PixFmt, Width: s.Width, Height: s.Height, Rotation: rotation, StreamIndex: s.Index, ColorTransfer: s.ColorTransfer, ColorPrimaries: s.ColorPrimaries, ColorSpace: s.ColorSpace, ColorRange: s.ColorRange, FrameRate: s.RFrameRate, AverageFrameRate: s.AvgFrameRate, Duration: s.Duration, SampleAspectRatio: s.SampleAspectRatio}
 	}
-	if audioCount > 1 {
+	if requireUnambiguousAudio && audioCount > 1 {
 		return result, fmt.Errorf("multiple audio streams require software generation to preserve automatic audio selection")
 	}
 	if count != 1 {
 		return result, fmt.Errorf("generation requires exactly one video stream; found %d", count)
 	}
-	return result, result.Validate()
+	return result, nil
 }
 
 // GenerationOutputError identifies an artifact that cannot be published, even

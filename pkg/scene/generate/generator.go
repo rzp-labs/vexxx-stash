@@ -81,6 +81,21 @@ func (g Generator) generationBudget() *generationbudget.Budget {
 	return nil
 }
 
+// WithIntelGenerationBudget scopes mandatory Intel admission to the selected
+// workload and its fallback. The original generator keeps ordinary CPU settings.
+// Explicit overrides and the application's optional shared budget take priority.
+func (g Generator) WithIntelGenerationBudget() Generator {
+	if g.generationBudget() != nil {
+		return g
+	}
+	if config, ok := g.FFMpegConfig.(interface {
+		GetIntelGenerationBudget() *generationbudget.Budget
+	}); ok {
+		g.Budget = config.GetIntelGenerationBudget()
+	}
+	return g
+}
+
 // acquireGeneration reserves only a subprocess stage, never a parent scene
 // task. Hardware attempts release their permits before a software fallback.
 func (g Generator) acquireGeneration(ctx context.Context, args []string) ([]string, func(), error) {

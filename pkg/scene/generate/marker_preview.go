@@ -155,6 +155,7 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 		}
 		return err
 	}
+	g = g.WithIntelGenerationBudget()
 	softwareAttempt := func(ctx context.Context) error {
 		if err := g.generateWithContext(ctx, lockCtx, software); err != nil {
 			return err

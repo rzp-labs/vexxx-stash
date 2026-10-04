@@ -19,16 +19,23 @@ import (
 // It has to be both turned on and usable on this machine, and a caller has no
 // reason to tell those apart: either way the ffmpeg path is what runs.
 func nativeGenerationEnabled() bool {
+	return nativeGenerationAllowed() && nativegen.Available()
+}
+
+// nativeGenerationAllowed keeps the Windows pools out of mandatory Intel or
+// explicit shared-budget work. Intel-only admission does not constrain CPU pHash,
+// but it still cannot safely schedule this separate native pipeline.
+func nativeGenerationAllowed() bool {
 	if instance == nil || instance.Config == nil || !instance.Config.GetNativeGeneration() {
 		return false
 	}
 	// The Windows native pipeline has its own device pools and does not acquire
-	// this FFmpeg generation budget. An explicit shared budget uses the bounded
-	// software/Intel paths until that pipeline has a matching scheduler.
-	if instance.Config.GetGenerationBudget() != nil {
+	// this FFmpeg generation budget. Intel selection or explicit shared mode uses
+	// the bounded software/Intel paths until that pipeline has a matching scheduler.
+	if instance.Config.GetIntelGenerationBudget() != nil {
 		return false
 	}
-	return nativegen.Available()
+	return true
 }
 
 // nativeGenerationBackend names the backend the native pipeline would use on

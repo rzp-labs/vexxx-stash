@@ -7,8 +7,8 @@ import (
 )
 
 // IntelSpriteScreenshot preserves ScreenshotTime's independent input seek.
-// Scaling happens before downloading the reduced frame; BMP conversion and
-// montage composition remain on the CPU. The plan must have download enabled.
+// The plan supplies either hardware scale/download or 10-bit download/CPU scale;
+// BMP conversion and montage composition remain on the CPU.
 func IntelSpriteScreenshot(input string, seconds float64, plan ffmpeg.IntelGenerationPlan) ffmpeg.Args {
 	args := ffmpeg.Args{"-v", "error", "-y", "-nostdin"}
 	args = append(args, plan.InputArgs...)

@@ -18,7 +18,7 @@ import (
 
 func TestIntelSpriteEligibilityConservative(t *testing.T) {
 	valid := ffmpeg.IntelSource{Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, SampleAspectRatio: "1:1", FrameRate: "30/1", AverageFrameRate: "60/2", Duration: "10"}
-	if err := intelSpriteEligibility(valid); err != nil {
+	if err := intelSpriteEligibility(valid, "vaapi"); err != nil {
 		t.Fatal(err)
 	}
 	tests := []struct {
@@ -27,7 +27,7 @@ func TestIntelSpriteEligibilityConservative(t *testing.T) {
 	}{
 		{"short", func(s *ffmpeg.IntelSource) { s.Duration = "4.9" }},
 		{"duration unknown", func(s *ffmpeg.IntelSource) { s.Duration = "N/A" }},
-		{"VFR", func(s *ffmpeg.IntelSource) { s.AverageFrameRate = "29/1" }},
+		{"unequal rates", func(s *ffmpeg.IntelSource) { s.AverageFrameRate = "29/1" }},
 		{"frame rate unknown", func(s *ffmpeg.IntelSource) { s.FrameRate = "0/0" }},
 		{"rotation", func(s *ffmpeg.IntelSource) { s.Rotation = 90 }},
 		{"10-bit", func(s *ffmpeg.IntelSource) { s.PixelFormat = "yuv420p10le" }},
@@ -39,7 +39,7 @@ func TestIntelSpriteEligibilityConservative(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := valid
 			tt.change(&s)
-			if err := intelSpriteEligibility(s); err == nil {
+			if err := intelSpriteEligibility(s, "vaapi"); err == nil {
 				t.Fatal("unsupported input accepted")
 			}
 		})
@@ -170,5 +170,28 @@ func TestIntelSpriteMetadataDeletionWaitsForOwner(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("cancelled sprite failed to return")
+	}
+}
+
+func TestIntelSpriteMain10ActualMetadataCadence(t *testing.T) {
+	source := ffmpeg.IntelSource{Codec: "hevc", Profile: "Main 10", PixelFormat: "yuv420p10le", Width: 8192, Height: 4096, ColorRange: "tv", ColorTransfer: "bt709", ColorPrimaries: "bt709", ColorSpace: "bt709", SampleAspectRatio: "1:1", FrameRate: "60000/1001", AverageFrameRate: "998386873/16659228", Duration: "2669.015617"}
+	if err := intelSpriteEligibility(source, "vaapi"); err != nil {
+		t.Fatal(err)
+	}
+	if err := intelSpriteEligibility(source, "qsv"); err == nil {
+		t.Fatal("10-bit QSV accepted")
+	}
+	for _, change := range []func(*ffmpeg.IntelSource){
+		func(s *ffmpeg.IntelSource) { s.Duration = "4.9" },
+		func(s *ffmpeg.IntelSource) { s.Rotation = 90 },
+		func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "2:1" },
+		func(s *ffmpeg.IntelSource) { s.FrameRate = "0/0" },
+		func(s *ffmpeg.IntelSource) { s.AverageFrameRate = "-1/1" },
+	} {
+		s := source
+		change(&s)
+		if err := intelSpriteEligibility(s, "vaapi"); err == nil {
+			t.Fatalf("unsafe sprite metadata accepted: %+v", s)
+		}
 	}
 }

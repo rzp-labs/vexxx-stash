@@ -45,6 +45,18 @@ func TestConfigGeneralGenerationResultSeparatesActiveAndRequested(t *testing.T) 
 	}
 }
 
+func TestConfigGeneralIntelOnlyBudgetScope(t *testing.T) {
+	c := config.InitializeEmpty()
+	c.SetString(config.SpriteGenerationBackend, "vaapi")
+	got := makeConfigGeneralResult()
+	if got.GenerationBudgetEnabled || got.ActiveGeneration.BudgetEnabled || got.ActiveGeneration.Threads != 1 || got.GenerationRestartRequired {
+		t.Fatalf("Intel-only active CPU budget misreported: %+v", got.ActiveGeneration)
+	}
+	if c.GetGenerationBudget() != nil || c.GetIntelGenerationBudget() == nil {
+		t.Fatal("active API state does not match actual CPU/Intel admission")
+	}
+}
+
 func TestGenerationGraphQLRejectsNonBooleanAndFractionalLimits(t *testing.T) {
 	schema := NewExecutableSchema(Config{}).Schema()
 	for _, operation := range []string{

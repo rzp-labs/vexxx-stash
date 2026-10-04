@@ -160,7 +160,7 @@ func (i *Config) GetActiveGenerationConfiguration() GenerationConfiguration {
 	s := i.generation()
 	active := s.requested
 	active.MarkerBackend, active.SpriteBackend, active.Device = s.marker, s.sprite, s.device
-	active.BudgetEnabled = s.budget != nil
+	active.BudgetEnabled = s.requested.BudgetEnabled || s.fallback
 	if s.budget != nil {
 		limits := s.budget.Settings()
 		active.MaxProcesses, active.MaxGPUProcesses, active.Threads = limits.MaxProcesses, limits.MaxGPUProcesses, limits.Threads
