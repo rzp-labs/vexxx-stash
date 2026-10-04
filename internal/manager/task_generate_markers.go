@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -64,7 +65,9 @@ func (t *GenerateMarkersTask) GetDescription() string {
 
 func (t *GenerateMarkersTask) Start(ctx context.Context) error {
 	if t.Scene != nil {
-		t.generateSceneMarkers(ctx)
+		if err := t.generateSceneMarkers(ctx); err != nil {
+			return err
+		}
 	}
 
 	if t.Marker != nil {
@@ -82,8 +85,7 @@ func (t *GenerateMarkersTask) Start(ctx context.Context) error {
 
 			return scene.LoadPrimaryFile(ctx, r.File)
 		}); err != nil {
-			logger.Errorf("error finding scene for marker generation: %v", err)
-			return nil
+			return fmt.Errorf("finding scene for marker generation: %w", err)
 		}
 
 		videoFile := scene.Files.Primary()
@@ -93,17 +95,31 @@ func (t *GenerateMarkersTask) Start(ctx context.Context) error {
 			return nil
 		}
 
+		if err := t.ensureMarkerDirectory(scene.GetHash(t.fileNamingAlgorithm)); err != nil {
+			return err
+		}
+
 		// A single marker still asks for two assets (preview, screenshot), so
 		// opening once here still saves a redundant reparse between them.
 		native := openNativeMarkerSession(ctx, videoFile.Path)
 		defer native.close()
 
-		t.generateMarker(ctx, videoFile, scene, t.Marker, native, false)
+		return t.generateMarker(ctx, videoFile, scene, t.Marker, native, false)
 	}
 	return nil
 }
 
-func (t *GenerateMarkersTask) generateSceneMarkers(ctx context.Context) {
+// Both entry paths need the destination before native generation or an atomic
+// ffmpeg temp-file move. Derive it from the generator rather than global paths.
+func (t *GenerateMarkersTask) ensureMarkerDirectory(sceneHash string) error {
+	folder := filepath.Dir(t.generator.MarkerPaths.GetVideoPreviewPath(sceneHash, 0))
+	if err := fsutil.EnsureDirAll(folder); err != nil {
+		return fmt.Errorf("creating marker directory %s: %w", folder, err)
+	}
+	return nil
+}
+
+func (t *GenerateMarkersTask) generateSceneMarkers(ctx context.Context) error {
 	var sceneMarkers []*models.SceneMarker
 	r := t.repository
 	if err := r.WithReadTxn(ctx, func(ctx context.Context) error {
@@ -111,22 +127,19 @@ func (t *GenerateMarkersTask) generateSceneMarkers(ctx context.Context) {
 		sceneMarkers, err = r.SceneMarker.FindBySceneID(ctx, t.Scene.ID)
 		return err
 	}); err != nil {
-		logger.Errorf("error getting scene markers: %s", err.Error())
-		return
+		return fmt.Errorf("getting scene markers: %w", err)
 	}
 
 	videoFile := t.Scene.Files.Primary()
 
 	if len(sceneMarkers) == 0 || videoFile == nil {
-		return
+		return nil
 	}
 
 	sceneHash := t.Scene.GetHash(t.fileNamingAlgorithm)
 
-	// Make the folder for the scenes markers
-	markersFolder := filepath.Join(instance.Paths.Generated.Markers, sceneHash)
-	if err := fsutil.EnsureDir(markersFolder); err != nil {
-		logger.Warnf("could not create the markers folder (%v): %v", markersFolder, err)
+	if err := t.ensureMarkerDirectory(sceneHash); err != nil {
+		return err
 	}
 
 	// Opened once for every marker cut from this scene, rather than once per
@@ -146,12 +159,18 @@ func (t *GenerateMarkersTask) generateSceneMarkers(ctx context.Context) {
 	// markers than there is any GPU session capacity for, and the semaphore
 	// caps how many run at once without capping how many exist.
 	var wg sync.WaitGroup
+	markerErrors := make([]error, len(sceneMarkers))
 	sem := make(chan struct{}, markerConcurrency)
 
 	for i, sceneMarker := range sceneMarkers {
 		index := i + 1
 
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return errors.Join(errors.Join(markerErrors...), ctx.Err())
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -162,23 +181,35 @@ func (t *GenerateMarkersTask) generateSceneMarkers(ctx context.Context) {
 			// scheduler rather than the list.
 			logger.Progressf("[generator] <%s> scene marker %d of %d", sceneHash, index, len(sceneMarkers))
 
-			t.generateMarker(ctx, videoFile, t.Scene, sceneMarker, native, nativeScreenshots[sceneMarker.ID])
+			markerErrors[i] = t.generateMarker(ctx, videoFile, t.Scene, sceneMarker, native, nativeScreenshots[sceneMarker.ID])
 		}()
 	}
 	wg.Wait()
+	return errors.Join(markerErrors...)
 }
 
-func (t *GenerateMarkersTask) generateMarker(ctx context.Context, videoFile *models.VideoFile, scene *models.Scene, sceneMarker *models.SceneMarker, native *nativeMarkerSession, screenshotDone bool) {
+func (t *GenerateMarkersTask) generateMarker(ctx context.Context, videoFile *models.VideoFile, scene *models.Scene, sceneMarker *models.SceneMarker, native *nativeMarkerSession, screenshotDone bool) error {
 	sceneHash := scene.GetHash(t.fileNamingAlgorithm)
 	seconds := float64(sceneMarker.Seconds)
 
 	// check if marker past duration
 	if seconds > float64(videoFile.Duration) {
 		logger.Warnf("[generator] scene marker at %.2f seconds exceeds video duration of %.2f seconds, skipping", seconds, float64(videoFile.Duration))
-		return
+		return nil
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	g := t.generator
+	var assetErrors []error
+	// Keep successful assets and attempt the remaining ones after a failure;
+	// report partial generation as failed instead of silently claiming success.
+	recordFailure := func(asset string, err error) {
+		logger.Errorf("[generator] failed to generate marker %s: %v", asset, err)
+		logErrorOutput(err)
+		assetErrors = append(assetErrors, fmt.Errorf("marker %d %s: %w", sceneMarker.ID, asset, err))
+	}
 
 	vrModeStr := ""
 	if scene.VRMode != nil {
@@ -205,19 +236,23 @@ func (t *GenerateMarkersTask) generateMarker(ctx context.Context, videoFile *mod
 
 		if !t.markerPreviewVideo(ctx, previewReq) {
 			if err := g.MarkerPreviewVideo(ctx, videoFile.Path, sceneHash, seconds, sceneMarker.EndSeconds, instance.Config.GetPreviewAudio(), vrModeStr); err != nil {
-				logger.Errorf("[generator] failed to generate marker video: %v", err)
-				logErrorOutput(err)
+				recordFailure("video", err)
 			}
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return errors.Join(errors.Join(assetErrors...), err)
+	}
 	if t.ImagePreview {
 		if err := g.SceneMarkerWebp(ctx, videoFile.Path, sceneHash, seconds, vrModeStr); err != nil {
-			logger.Errorf("[generator] failed to generate marker image: %v", err)
-			logErrorOutput(err)
+			recordFailure("image", err)
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return errors.Join(errors.Join(assetErrors...), err)
+	}
 	if t.Screenshot && !screenshotDone {
 		shotReq := req
 		shotReq.output = g.MarkerPaths.GetScreenshotPath(sceneHash, int(seconds))
@@ -225,11 +260,11 @@ func (t *GenerateMarkersTask) generateMarker(ctx context.Context, videoFile *mod
 
 		if !t.markerScreenshot(ctx, shotReq) {
 			if err := g.SceneMarkerScreenshot(ctx, videoFile.Path, sceneHash, seconds, videoFile.Width, vrModeStr); err != nil {
-				logger.Errorf("[generator] failed to generate marker screenshot: %v", err)
-				logErrorOutput(err)
+				recordFailure("screenshot", err)
 			}
 		}
 	}
+	return errors.Join(assetErrors...)
 }
 
 func (t *GenerateMarkersTask) markersNeeded(ctx context.Context) int {
