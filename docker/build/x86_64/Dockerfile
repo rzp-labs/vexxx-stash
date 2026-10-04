@@ -7,21 +7,28 @@ RUN apk add --no-cache make git
 COPY ./ui/v2.5/package.json ./ui/v2.5/pnpm-lock.yaml ./ui/v2.5/pnpm-workspace.yaml /stash/ui/v2.5/
 WORKDIR /stash
 COPY Makefile /stash/
-COPY ./graphql /stash/graphql/
-COPY ./ui /stash/ui/
 # pnpm install with npm
 RUN npm install -g pnpm@10.34.4
 RUN make pre-ui
+COPY ./graphql /stash/graphql/
+COPY ./ui /stash/ui/
 RUN make generate-ui
 ARG GITHASH
 ARG STASH_VERSION
-RUN BUILD_DATE=$(date +"%Y-%m-%d %H:%M:%S") make ui-only
+ARG BUILD_DATE
+# Vite exceeds Node's default ~2 GiB heap; keep its allowance explicit and bounded.
+RUN NODE_OPTIONS=--max-old-space-size=4096 \
+    BUILD_DATE="${BUILD_DATE:-$(date +"%Y-%m-%d %H:%M:%S")}" make ui-only
 
 # Build Backend
 FROM golang:1.26-alpine3.24 AS backend
+# Bound compilation/code generation while the frontend stage also runs.
+ENV GOMAXPROCS=4 GOFLAGS=-p=4 GOMEMLIMIT=2GiB
 RUN apk add --no-cache make alpine-sdk
 WORKDIR /stash
-COPY ./go* ./*.go Makefile gqlgen.yml .gqlgenc.yml /stash/
+COPY go.mod go.sum /stash/
+RUN go mod download
+COPY ./*.go Makefile gqlgen.yml .gqlgenc.yml /stash/
 COPY ./graphql /stash/graphql/
 COPY ./scripts /stash/scripts/
 COPY ./pkg /stash/pkg/
@@ -33,7 +40,8 @@ RUN make generate-backend generate-login-locale
 COPY --from=frontend /stash /stash/
 ARG GITHASH
 ARG STASH_VERSION
-RUN make flags-release flags-pie stash
+ARG BUILD_DATE
+RUN BUILD_DATE="${BUILD_DATE:-$(date +"%Y-%m-%d %H:%M:%S")}" make flags-release flags-pie stash
 
 # Final Runnable Image
 FROM alpine:3.24
