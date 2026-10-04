@@ -1,11 +1,14 @@
 name: Validate and deliberately publish Docker images
 
-# A glob prefilters normal releases; plan also validates exact SemVer syntax.
+# Plan validates exact normal-release syntax after the trigger prefilter.
 "on":
   pull_request:
     branches: [master, "codex/ct102-stack-*"]
   push:
     branches: [master]
+    # GitHub's + repeats the preceding digit class; v1.2.3 matches this glob.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#filter-pattern-cheat-sheet
+    # This is a numeric prefilter; plan rejects leading zeros and suffixes.
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
@@ -27,6 +30,12 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # These job outputs reference the classifier (id: plan), not the test step.
+    # Each step has its own GITHUB_OUTPUT file; writes to the test step's file
+    # do not set steps.plan.outputs below.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/variables#default-environment-variables
+    # This scopes outputs, not arbitrary code: tests and planner share a
+    # workspace; malicious edits or background processes are not sandboxed.
     outputs:
       run_tests: ${{ steps.plan.outputs.run_tests }}
       build_image: ${{ steps.plan.outputs.build_image }}
