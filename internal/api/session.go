@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"html/template"
@@ -9,9 +10,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/posthog/posthog-go"
+	"github.com/stashapp/stash/internal/analytics"
 	"github.com/stashapp/stash/internal/manager"
 	"github.com/stashapp/stash/internal/manager/config"
 	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/models"
 	"github.com/stashapp/stash/pkg/session"
 	"github.com/stashapp/stash/pkg/utils"
 	"github.com/stashapp/stash/ui"
@@ -139,8 +143,48 @@ func handleLoginPost() http.HandlerFunc {
 			return
 		}
 
+		identifyLoggedInUser(r)
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// identifyLoggedInUser binds PostHog identity at the successful login boundary.
+// The session contains a username, but the database primary key is the stable
+// distinct ID used for PostHog. Username and role remain person properties.
+func identifyLoggedInUser(r *http.Request) {
+	client := analytics.Client()
+	if client == nil {
+		return
+	}
+
+	username := r.FormValue("username")
+	if username == "" {
+		return
+	}
+
+	mgr := manager.GetInstance()
+	var user *models.User
+	if err := mgr.Repository.WithReadTxn(r.Context(), func(ctx context.Context) error {
+		var err error
+		user, err = mgr.Repository.User.FindByUsername(ctx, username)
+		return err
+	}); err != nil {
+		logger.Errorf("Error finding logged-in user for PostHog identification: %v", err)
+		return
+	}
+	if user == nil {
+		// Legacy single-user authentication has no database-backed stable ID.
+		return
+	}
+
+	client.Enqueue(posthog.Capture{
+		DistinctId: fmt.Sprint(user.ID),
+		Event:      "user_logged_in",
+		Properties: posthog.NewProperties().Set("$set", map[string]any{
+			"username":  user.Username,
+			"user_role": user.Role.String(),
+		}),
+	})
 }
 
 func handleLogout() http.HandlerFunc {

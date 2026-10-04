@@ -26,6 +26,9 @@ services:
       - STASH_CACHE=/cache/
       ## Change STASH_PORT to move the internal listening port (also update ports mapping above).
       - STASH_PORT=${STASH_PORT:-9999}
+      ## Runtime PostHog configuration read by internal/analytics/posthog.go.
+      - POSTHOG_PROJECT_TOKEN=${POSTHOG_PROJECT_TOKEN}
+      - POSTHOG_HOST=${POSTHOG_HOST}
     volumes:
       - /etc/localtime:/etc/localtime:ro
       ## Adjust below paths (the left part) to your liking.

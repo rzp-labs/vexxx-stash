@@ -95,6 +95,7 @@ func (r *mutationResolver) TagCreate(ctx context.Context, input TagCreateInput) 
 	}
 
 	r.hookExecutor.ExecutePostHooks(ctx, newTag.ID, hook.TagCreatePost, input, nil)
+	captureAuthenticatedEvent(ctx, "tag_created")
 	return r.getTag(ctx, newTag.ID)
 }
 
