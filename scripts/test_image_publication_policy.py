@@ -163,6 +163,26 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy.changed_paths("push", {"before": "--option", "after": SHA}, Path.cwd())
 
+    def test_pr_merge_accepts_pending_or_stale_webhook_metadata(self):
+        merge = 'c' * 40
+        for metadata in (None, 'd' * 40, merge):
+            pr = {'base': {'sha': BASE}, 'head': {'sha': SHA}, 'merge_commit_sha': metadata}
+            with patch.object(policy.subprocess, 'check_output',
+                              return_value=f'{merge} {BASE} {SHA}\n'.encode()) as run:
+                policy.validate_pr_merge(Path.cwd(), pr, merge)
+            self.assertEqual(run.call_args.args[0], ['git', 'rev-list', '--parents', '-n', '1', merge])
+
+    def test_pr_merge_rejects_wrong_head_base_or_nonmerge_checkout(self):
+        merge = 'c' * 40
+        pr = {'base': {'sha': BASE}, 'head': {'sha': SHA}, 'merge_commit_sha': merge}
+        for parents in (f'{merge} {BASE}', f'{merge} {BASE} ' + 'd' * 40,
+                        f'{merge} ' + 'd' * 40 + f' {SHA}', f'{SHA} {BASE} {SHA}'):
+            with patch.object(policy.subprocess, 'check_output', return_value=(parents + '\n').encode()):
+                with self.assertRaises(ValueError):
+                    policy.validate_pr_merge(Path.cwd(), pr, merge)
+        with self.assertRaises(ValueError):
+            policy.validate_pr_merge(Path.cwd(), pr, '--option')
+
     def test_push_range_and_initial_push_keep_all_changed_names(self):
         for base, expected_command in (
                 (BASE, ['git', 'diff', '--no-renames', '--name-only', '-z', BASE, SHA]),

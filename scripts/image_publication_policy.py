@@ -134,13 +134,26 @@ def checkout_identity(cwd, expected):
     return tree
 
 
+def validate_pr_merge(cwd, pr, checkout):
+    base, head = pr["base"]["sha"], pr["head"]["sha"]
+    if any(not isinstance(value, str) or not SHA.fullmatch(value) for value in (base, head, checkout)):
+        raise ValueError("invalid PR merge identity")
+    # merge_commit_sha in the webhook can lag GitHub's background mergeability
+    # computation. Verify the immutable Actions checkout and its actual parents
+    # instead; a missing/stale metadata field must not reject a valid PR run.
+    parents = subprocess.check_output(
+        ["git", "rev-list", "--parents", "-n", "1", checkout], cwd=cwd, timeout=60).decode().split()
+    if parents != [checkout, base, head]:
+        raise ValueError("checkout is not the expected PR base/head merge")
+
+
 def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     name, kind = os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF_TYPE"]
     sha = os.environ["GITHUB_SHA"]
     tree = checkout_identity(Path.cwd(), sha)
-    if name == "pull_request" and event["pull_request"]["merge_commit_sha"] != sha:
-        raise ValueError("checkout is not the expected PR merge revision")
+    if name == "pull_request":
+        validate_pr_merge(Path.cwd(), event["pull_request"], sha)
     if name == "push" and kind == "branch" and not event.get("deleted") and event["after"] != sha:
         raise ValueError("checkout is not the landed revision")
     if name == "push" and kind == "tag" and not event.get("deleted"):
