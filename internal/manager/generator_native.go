@@ -22,6 +22,12 @@ func nativeGenerationEnabled() bool {
 	if instance == nil || instance.Config == nil || !instance.Config.GetNativeGeneration() {
 		return false
 	}
+	// The Windows native pipeline has its own device pools and does not acquire
+	// this FFmpeg generation budget. An explicit shared budget uses the bounded
+	// software/Intel paths until that pipeline has a matching scheduler.
+	if instance.Config.GetGenerationBudget() != nil {
+		return false
+	}
 	return nativegen.Available()
 }
 

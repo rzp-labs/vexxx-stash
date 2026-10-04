@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/stashapp/stash/internal/manager"
+	"github.com/stashapp/stash/pkg/generationbudget"
 	"github.com/stashapp/stash/pkg/hash/videophash"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/models"
@@ -40,7 +41,11 @@ func (r *mutationResolver) GeneratePhash(ctx context.Context, fileID string, sta
 		return "", err
 	}
 
-	options := videophash.PhashOptions{Native: manager.NativePhashEnabled()}
+	options := videophash.PhashOptions{
+		Native:  manager.NativePhashEnabled(),
+		Context: ctx,
+		Budget:  manager.GetInstance().Config.GetGenerationBudget(),
+	}
 	if probe := manager.GetInstance().FFProbe; probe != nil {
 		options.FFProbePath = probe.Path()
 	}
@@ -51,7 +56,16 @@ func (r *mutationResolver) GeneratePhash(ctx context.Context, fileID string, sta
 		options.Duration = *duration
 	}
 
-	hash, err := videophash.Generate(manager.GetInstance().FFMpeg, file, options)
+	// Wait only after releasing the database read transaction. This is the same
+	// shared CPU admission and canonical extraction policy as queued generation.
+	release, err := options.Budget.Acquire(ctx, generationbudget.CPU)
+	if err != nil {
+		return "", fmt.Errorf("waiting for phash generation budget: %w", err)
+	}
+	hash, err := func() (*uint64, error) {
+		defer release()
+		return videophash.Generate(manager.GetInstance().FFMpeg, file, options)
+	}()
 	if err != nil {
 		return "", fmt.Errorf("generating phash: %w", err)
 	}

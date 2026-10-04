@@ -2,7 +2,6 @@ package videophash
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"image"
 	"image/draw"
@@ -68,20 +67,37 @@ func batchSizeFor(width, height int) int {
 // time, so a file whose filter graph ffmpeg will not build still gets a phash
 // rather than an error. The fallback is per batch, not per file, so one awkward
 // stretch does not cost the rest their batching.
-func generateSpriteScreenshots(encoder *ffmpeg.FFMpeg, input string, times []float64, batch int) ([]image.Image, error) {
+func generateSpriteScreenshots(encoder *ffmpeg.FFMpeg, input string, times []float64, batch int, controls ...PhashOptions) ([]image.Image, error) {
+	control := cpuControls(controls)
+	if batch < 1 {
+		return nil, fmt.Errorf("phash batch size must be positive")
+	}
+	if control.Budget != nil {
+		// A multi-input batch opens one decoder per seek. Per-decoder thread
+		// limits alone would still allow 25 decoders to consume CPU together.
+		// Sequential canonical frames give the opt-in budget a bounded decoder
+		// count without changing timestamps, filters, pixels or hash arithmetic.
+		batch = 1
+	}
 	images := make([]image.Image, 0, len(times))
 
 	for start := 0; start < len(times); start += batch {
+		if err := control.context().Err(); err != nil {
+			return nil, err
+		}
 		end := start + batch
 		if end > len(times) {
 			end = len(times)
 		}
 		chunk := times[start:end]
 
-		got, err := spriteBatch(encoder, input, chunk)
+		got, err := spriteBatch(encoder, input, chunk, control)
 		if err != nil {
+			if ctxErr := control.context().Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			for _, t := range chunk {
-				img, err := generateSpriteScreenshot(encoder, input, t)
+				img, err := generateSpriteScreenshot(encoder, input, t, control)
 				if err != nil {
 					return nil, err
 				}
@@ -101,13 +117,17 @@ func generateSpriteScreenshots(encoder *ffmpeg.FFMpeg, input string, times []flo
 // The frames come back stacked vertically as one image because ffmpeg writes a
 // single output stream to stdout; splitting them apart here is a plain copy, so
 // each tile is the standalone screenshot of its timestamp.
-func spriteBatch(encoder *ffmpeg.FFMpeg, input string, times []float64) ([]image.Image, error) {
+func spriteBatch(encoder *ffmpeg.FFMpeg, input string, times []float64, controls ...PhashOptions) ([]image.Image, error) {
+	control := cpuControls(controls)
+	if err := control.context().Err(); err != nil {
+		return nil, err
+	}
 	switch len(times) {
 	case 0:
 		return nil, nil
 	case 1:
 		// vstack needs two inputs, and a single seek has nothing to batch.
-		img, err := generateSpriteScreenshot(encoder, input, times[0])
+		img, err := generateSpriteScreenshot(encoder, input, times[0], control)
 		if err != nil {
 			return nil, err
 		}
@@ -139,8 +159,11 @@ func spriteBatch(encoder *ffmpeg.FFMpeg, input string, times []float64) ([]image
 	args = args.AppendArgs(transcoder.ScreenshotOutputTypeBMP)
 	args = args.Output("-")
 
-	data, err := encoder.GenerateOutput(context.Background(), args, nil)
+	data, err := encoder.GenerateOutput(control.context(), control.Budget.FFMpegArgs(args), nil)
 	if err != nil {
+		if ctxErr := control.context().Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, err
 	}
 

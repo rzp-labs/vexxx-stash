@@ -3,6 +3,7 @@ package generate
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/fsutil"
+	"github.com/stashapp/stash/pkg/generationbudget"
 )
 
 const (
@@ -51,12 +53,43 @@ type FFMpegConfig interface {
 }
 
 type Generator struct {
-	Encoder      *ffmpeg.FFMpeg
+	Encoder         *ffmpeg.FFMpeg
+	Probe           *ffmpeg.FFProbe
+	IntelMarker     *ffmpeg.IntelGenerationConfig
+	IntelSprites    *ffmpeg.IntelGenerationConfig
+	IntelDiagnostic func(ffmpeg.IntelGenerationDiagnostic)
+	// Budget optionally overrides the application's shared generation budget.
+	Budget       *generationbudget.Budget
 	FFMpegConfig FFMpegConfig
 	LockManager  *fsutil.ReadLockManager
 	MarkerPaths  MarkerPaths
 	ScenePaths   ScenePaths
 	Overwrite    bool
+}
+
+type generationBudgetConfig interface {
+	GetGenerationBudget() *generationbudget.Budget
+}
+
+func (g Generator) generationBudget() *generationbudget.Budget {
+	if g.Budget != nil {
+		return g.Budget
+	}
+	if config, ok := g.FFMpegConfig.(generationBudgetConfig); ok {
+		return config.GetGenerationBudget()
+	}
+	return nil
+}
+
+// acquireGeneration reserves only a subprocess stage, never a parent scene
+// task. Hardware attempts release their permits before a software fallback.
+func (g Generator) acquireGeneration(ctx context.Context, args []string) ([]string, func(), error) {
+	budget := g.generationBudget()
+	release, err := budget.Acquire(ctx, generationbudget.ClassifyFFMpeg(args))
+	if err != nil {
+		return nil, nil, fmt.Errorf("waiting for generation budget: %w", err)
+	}
+	return budget.FFMpegArgs(args), release, nil
 }
 
 type generateFn func(lockCtx *fsutil.LockContext, tmpFn string) error
@@ -127,17 +160,31 @@ func (g Generator) generateBytes(lockCtx *fsutil.LockContext, p Paths, pattern s
 // generate runs ffmpeg with the given args and waits for it to finish.
 // Returns an error if the command fails. If the command fails, the return
 // value will be of type *exec.ExitError.
-func (g Generator) generate(ctx *fsutil.LockContext, args []string) error {
-	cmd := g.Encoder.Command(ctx, args)
+func (g Generator) generate(lockCtx *fsutil.LockContext, args []string) error {
+	return g.generateWithContext(lockCtx, lockCtx, args)
+}
+
+// The execution context can carry a probe timeout while command ownership stays
+// on the registered source lock used by scene deletion.
+func (g Generator) generateWithContext(ctx context.Context, lockCtx *fsutil.LockContext, args []string) error {
+	args, release, err := g.acquireGeneration(ctx, args)
+	if err != nil {
+		return err
+	}
+	defer release()
+	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(ctx)
+	defer cancel()
+	cmd := g.Encoder.Command(execCtx, args)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	done := make(chan struct{})
+	defer close(done)
+	lockCtx.AttachCommandWithCompletion(cmd, done)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("error starting command: %w", err)
 	}
-
-	ctx.AttachCommand(cmd)
 
 	if err := cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError
@@ -153,19 +200,27 @@ func (g Generator) generate(ctx *fsutil.LockContext, args []string) error {
 
 // GenerateOutput runs ffmpeg with the given args and returns it standard output.
 func (g Generator) generateOutput(lockCtx *fsutil.LockContext, args []string) ([]byte, error) {
-	cmd := g.Encoder.Command(lockCtx, args)
+	args, release, err := g.acquireGeneration(lockCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(lockCtx)
+	defer cancel()
+	cmd := g.Encoder.Command(execCtx, args)
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	done := make(chan struct{})
+	defer close(done)
+	lockCtx.AttachCommandWithCompletion(cmd, done)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("error starting command: %w", err)
 	}
-
-	lockCtx.AttachCommand(cmd)
 
 	if err := cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError
