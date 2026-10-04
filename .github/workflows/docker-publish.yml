@@ -120,6 +120,18 @@ jobs:
           build-args: |
             GITHASH=${{ github.sha }}
             STASH_VERSION=${{ needs.plan.outputs.version }}
+            POSTHOG_UPLOAD_REQUIRED=${{ needs.plan.outputs.publish }}
+            POSTHOG_CLI_PROJECT_ID=${{ vars.POSTHOG_CLI_PROJECT_ID }}
+            POSTHOG_CLI_HOST=${{ vars.POSTHOG_CLI_HOST }}
+            VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=${{ vars.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN }}
+            VITE_PUBLIC_POSTHOG_HOST=${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
+            GITHUB_ACTIONS=true
+            GITHUB_SHA=${{ github.sha }}
+            GITHUB_REF_NAME=${{ github.ref_name }}
+            GITHUB_REPOSITORY=${{ github.repository }}
+            GITHUB_SERVER_URL=${{ github.server_url }}
+          secrets: |
+            POSTHOG_CLI_API_KEY=${{ secrets.POSTHOG_CLI_API_KEY }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test container
