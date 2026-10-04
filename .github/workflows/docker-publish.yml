@@ -1,24 +1,71 @@
-name: Test and publish Docker image
+name: Validate and deliberately publish Docker images
 
-on:
+# Plan validates exact normal-release syntax after the trigger prefilter.
+"on":
   pull_request:
-    branches: [master]
+    branches: [master, "codex/ct102-stack-*"]
   push:
     branches: [master]
-    tags: ["v*"]
+    # GitHub's + repeats the preceding digit class; v1.2.3 matches this glob.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#filter-pattern-cheat-sheet
+    # This is a numeric prefilter; plan rejects leading zeros and suffixes.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
+    inputs:
+      publish_test_image:
+        description: Publish the tested image to the separate test package
+        type: boolean
+        default: false
+        required: true
+      test_label:
+        description: Test label (1..32 lowercase letters/digits and internal hyphens)
+        type: string
+        default: ""
+        required: false
 
 permissions:
   contents: read
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # These job outputs reference the classifier (id: plan), not the test step.
+    # Each step has its own GITHUB_OUTPUT file; writes to the test step's file
+    # do not set steps.plan.outputs below.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/variables#default-environment-variables
+    # This scopes outputs, not arbitrary code: tests and planner share a
+    # workspace; malicious edits or background processes are not sandboxed.
+    outputs:
+      run_tests: ${{ steps.plan.outputs.run_tests }}
+      build_image: ${{ steps.plan.outputs.build_image }}
+      publish: ${{ steps.plan.outputs.publish }}
+      local_ref: ${{ steps.plan.outputs.local_ref }}
+      image_ref: ${{ steps.plan.outputs.image_ref }}
+      sha_ref: ${{ steps.plan.outputs.sha_ref }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publication policy and packaging tests
+        run: |
+          python3 -m unittest discover -s scripts -p test_image_publication_policy.py
+          python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
+      - name: Classify changed inputs and deliberate publication
+        id: plan
+        run: python3 scripts/image_publication_policy.py
+
   test:
+    needs: plan
+    if: needs.plan.outputs.run_tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Intel runtime packaging check tests
-        run: python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -48,73 +95,104 @@ jobs:
           pnpm run check
 
   image:
-    needs: test
+    needs: [plan, test]
+    if: needs.plan.outputs.build_image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Image name and build version
-        id: image
-        shell: bash
-        run: |
-          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=edge-${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Image metadata
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
-          images: ${{ steps.image.outputs.name }}
-          flavor: latest=false
-          tags: |
-            type=raw,value=edge,enable={{is_default_branch}}
-            type=sha,format=long
-            type=ref,event=tag
-      - name: Build Linux amd64 image
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build Linux amd64 image locally
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/build/x86_64/Dockerfile
           platforms: linux/amd64
           load: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: false
+          tags: ${{ needs.plan.outputs.local_ref }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
           build-args: |
             GITHASH=${{ github.sha }}
-            STASH_VERSION=${{ steps.image.outputs.version }}
+            STASH_VERSION=${{ needs.plan.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test container
         env:
-          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          LOCAL_IMAGE: ${{ needs.plan.outputs.local_ref }}
         run: |
           docker run --detach --name vexxx-smoke \
             --publish 127.0.0.1:9999:9999 \
             --env STASH_HOST=0.0.0.0 \
-            "$IMAGE_NAME:sha-$GITHUB_SHA"
+            "$LOCAL_IMAGE"
           trap 'docker logs vexxx-smoke; docker rm --force vexxx-smoke' EXIT
           curl --fail --silent --show-error --retry 30 \
             --retry-all-errors --retry-delay 2 --max-time 5 \
             http://127.0.0.1:9999/ > /dev/null
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+      - name: Save the exact smoke-tested image
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          LOCAL_IMAGE: ${{ needs.plan.outputs.local_ref }}
+        run: |
+          docker save "$LOCAL_IMAGE" --output image.tar
+          sha256sum image.tar > image.tar.sha256
+      - name: Transfer tested image to publication job
+        if: needs.plan.outputs.publish == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tested-image
+          path: |
+            image.tar
+            image.tar.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    needs: [plan, image]
+    # Defense in depth: PR/master events never receive a publishing job token.
+    if: >-
+      needs.plan.outputs.publish == 'true' &&
+      ((github.event_name == 'push' && github.ref_type == 'tag') ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish_test_image))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      packages: write
+    steps:
+      # No checkout or execution of repository scripts with the write token.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tested-image
+      - name: Load and verify tested source identity
+        env:
+          LOCAL_IMAGE: ${{ needs.plan.outputs.local_ref }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          sha256sum --check image.tar.sha256
+          docker load --input image.tar
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$LOCAL_IMAGE")" = "$EXPECTED_SHA"
+      - name: Log in to GHCR for deliberate publication
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish tested image
-        if: github.event_name != 'pull_request'
+      - name: Publish the tested image without rebuilding
         env:
-          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          LOCAL_IMAGE: ${{ needs.plan.outputs.local_ref }}
+          IMAGE_REF: ${{ needs.plan.outputs.image_ref }}
+          SHA_REF: ${{ needs.plan.outputs.sha_ref }}
         run: |
-          while IFS= read -r tag; do
-            docker push "$tag"
-          done <<< "$IMAGE_TAGS"
+          docker tag "$LOCAL_IMAGE" "$IMAGE_REF"
+          docker push "$IMAGE_REF"
+          if test -n "$SHA_REF"; then
+            docker tag "$LOCAL_IMAGE" "$SHA_REF"
+            docker push "$SHA_REF"
+          fi

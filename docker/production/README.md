@@ -24,19 +24,27 @@ blobs, and generated content on persistent mounts.
 Select an image in `.env`:
 
 ```dotenv
-# Latest tested build from master:
+# Existing edge image (no longer updated by master pushes):
 IMAGE_TAG=edge
 
-# Or select a published release or commit:
+# Select an actually published normal release or its commit tag:
+# These examples show the naming format, not available versions.
 # IMAGE_TAG=v1.2.3
 # IMAGE_TAG=sha-<full 40-character commit SHA>
 
 # For an immutable reference, override the entire image instead:
 # STASH_IMAGE=ghcr.io/rzp-labs/vexxx-stash@sha256:<digest>
+
+# Deliberately published manual test images use a separate package:
+# STASH_IMAGE=ghcr.io/rzp-labs/vexxx-stash-test:test-candidate-123456789-1
 ```
 
 `STASH_IMAGE` takes precedence over `IMAGE_TAG`. A digest is immutable; release
-and commit tags identify builds but can be overwritten if republished.
+and commit tags identify builds but can be overwritten if republished. Multiple
+release tags for the same commit can overwrite its SHA tag with a different
+embedded version. The existing `edge` default is retained for compatibility;
+it stops updating under the publication policy below. Choose an actually
+published release, test image, or digest explicitly when upgrading.
 
 Public packages need no login. For private packages, log in on the server with a
 GitHub personal access token (classic) with `read:packages` and package access.
@@ -79,21 +87,36 @@ named volumes.
 
 ## Building and publishing
 
-[The GitHub Actions workflow](../../.github/workflows/docker-publish.yml) runs Go
-unit/integration tests, frontend tests, and the TypeScript check, then builds and
-smoke-tests the Linux amd64 container. Only successful builds are published:
+[The GitHub Actions workflow](../../.github/workflows/docker-publish.yml) always
+checks the publication policy and Intel packaging tests. Changes to runtime or
+build inputs also run Go unit/integration tests, frontend tests, and the
+TypeScript check, then build and smoke-test the Linux amd64 container. Test-only
+changes retain validation without an image build; unrelated repository docs
+and tools skip the heavy checks. Markdown bundled into the UI and shared build
+scripts remain image inputs.
 
-- Pushes to `master` publish `edge` and `sha-<full commit SHA>`.
-- Pushes of `v*` tags publish the exact tag and a SHA tag.
-- Manual runs publish a SHA tag, plus `edge` when run on `master`.
-- Pull requests run the checks and container smoke test without publishing.
+Publication requires a deliberate release tag or manual choice:
 
-The workflow authenticates with `GITHUB_TOKEN` using `packages: write`; no PAT is
-needed in repository secrets. After the first successful publication, set the
-package's visibility in GitHub's package settings. Packages may initially be
-private even when the repository is public. Organization settings must allow
-the workflow to create/write packages. The source label links the image to the
-repository.
+- Pushes to `master` and pull requests validate relevant changes and never publish.
+- Normal release tags must be exactly `vMAJOR.MINOR.PATCH`, with no leading zeros,
+  prerelease suffix, or build metadata (for example, the format `v1.2.3`). After
+  full validation, they publish the exact tag and `sha-<full commit SHA>` in
+  `ghcr.io/rzp-labs/vexxx-stash`.
+- Manual runs validate and smoke-test by default. To publish a test image,
+  deliberately enable `publish_test_image` and supply `test_label`: 1–32 lowercase
+  letters/digits separated by single hyphens. These runs publish only to
+  `ghcr.io/rzp-labs/vexxx-stash-test:test-<label>-<run ID>-<attempt>`, never the
+  release package, `edge`, or `latest`.
+
+Validation and image construction use a read-only `GITHUB_TOKEN`. Only the
+separate publication job gets `packages: write` (plus `actions: read` for the
+tested artifact); it checks the image archive checksum and source revision,
+then uploads the exact smoke-tested image without rebuilding or executing
+repository scripts. No PAT is needed in repository secrets. After the first
+successful publication of either package, set its visibility in GitHub's package
+settings. Packages may initially be private even when the repository is public.
+Organization settings must allow the workflow to create/write packages. The
+source label links each image to the repository.
 
 For a local build on Linux or an Apple Silicon Mac:
 
