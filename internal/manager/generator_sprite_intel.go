@@ -28,7 +28,8 @@ func (g *SpriteGenerator) intelSpriteTiles(ctx context.Context, req spriteReques
 		if g.g.IntelDiagnostic != nil {
 			g.g.IntelDiagnostic(ffmpeg.IntelGenerationDiagnostic{Selected: g.g.IntelSprites.Backend, Actual: "software", Stage: "eligibility", Reason: reason})
 		}
-		images, err := (ffmpegSprites{gen: g.g}).tiles(ctx, req)
+		intelGenerator := g.g.WithIntelGenerationBudget()
+		images, err := (ffmpegSprites{gen: &intelGenerator}).tiles(ctx, req)
 		return images, true, err
 	}
 	duration := req.streamDuration

@@ -22,6 +22,7 @@ type IntelGenerationConfig struct {
 }
 
 type IntelSource struct {
+	Profile                                                                   string
 	Codec, PixelFormat, ColorTransfer, ColorPrimaries, ColorSpace, ColorRange string
 	Width, Height, Rotation, StreamIndex                                      int
 	FrameRate, AverageFrameRate, Duration, SampleAspectRatio                  string

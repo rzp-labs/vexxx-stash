@@ -33,7 +33,8 @@ func (i *Config) readGenerationSettings() (generationSettings, error) {
 		return generationSettings{requested: requested}, err
 	}
 	s := generationSettings{marker: requested.MarkerBackend, sprite: requested.SpriteBackend, device: requested.Device, requested: requested}
-	// Explicit hardware selection always uses the conservative shared budget.
+	// Intel stages always have bounded admission. Ordinary CPU generation shares
+	// this scheduler only when the caller explicitly enables the shared budget.
 	if requested.BudgetEnabled || s.marker != "software" || s.sprite != "software" {
 		s.budget, err = generationbudget.New(requested.Limits())
 		if err != nil {
@@ -60,10 +61,26 @@ func (i *Config) generation() generationSettings {
 	return i.generationSnapshot
 }
 
-func (i *Config) GetGenerationBudget() *generationbudget.Budget { return i.generation().budget }
-func (i *Config) GetMarkerGenerationBackend() string            { return i.generation().marker }
-func (i *Config) GetSpriteGenerationBackend() string            { return i.generation().sprite }
-func (i *Config) GetGenerationDevice() string                   { return i.generation().device }
+// GetGenerationBudget controls ordinary CPU generation, including pHash. An
+// Intel backend request must not implicitly change those workloads' threading,
+// batching or admission. Invalid in-memory settings retain conservative fallback.
+func (i *Config) GetGenerationBudget() *generationbudget.Budget {
+	s := i.generation()
+	if !s.requested.BudgetEnabled && !s.fallback {
+		return nil
+	}
+	return s.budget
+}
+
+// GetIntelGenerationBudget bounds Intel probes, execution and software fallback.
+// Explicit shared mode uses this same scheduler, never an independent budget.
+func (i *Config) GetIntelGenerationBudget() *generationbudget.Budget {
+	return i.generation().budget
+}
+
+func (i *Config) GetMarkerGenerationBackend() string { return i.generation().marker }
+func (i *Config) GetSpriteGenerationBackend() string { return i.generation().sprite }
+func (i *Config) GetGenerationDevice() string        { return i.generation().device }
 func (i *Config) GetIntelMarkerGeneration() *ffmpeg.IntelGenerationConfig {
 	s := i.generation()
 	if s.marker == "software" {

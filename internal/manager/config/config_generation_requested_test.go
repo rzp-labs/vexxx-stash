@@ -64,7 +64,7 @@ func TestGenerationRequestedActivePersistenceAndRollback(t *testing.T) {
 	if restarted.GenerationRestartRequired() {
 		t.Fatal("persisted request still pending after restart")
 	}
-	if got := restarted.GetActiveGenerationConfiguration(); got.MarkerBackend != "qsv" || got.SpriteBackend != "vaapi" || !got.BudgetEnabled || got.Threads != 2 {
+	if got := restarted.GetActiveGenerationConfiguration(); got.MarkerBackend != "qsv" || got.SpriteBackend != "vaapi" || got.BudgetEnabled || got.Threads != 2 {
 		t.Fatalf("active persisted settings: %#v", got)
 	}
 	if err := restarted.ApplyGenerationConfigurationPatch(GenerationConfigurationPatch{MarkerBackend: ptr("software"), SpriteBackend: ptr("software"), BudgetEnabled: ptr(false)}); err != nil {
@@ -185,7 +185,7 @@ func TestGenerationSuccessfulPersistenceWritesRequestedOnly(t *testing.T) {
 	if err := restarted.load(c.filePath); err != nil {
 		t.Fatal(err)
 	}
-	if restarted.GenerationRestartRequired() || restarted.GetIntelMarkerGeneration() == nil || restarted.GetGenerationBudget().Settings().Threads != 2 {
+	if restarted.GenerationRestartRequired() || restarted.GetIntelMarkerGeneration() == nil || restarted.GetIntelGenerationBudget().Settings().Threads != 2 {
 		t.Fatal("saved settings did not activate after restart")
 	}
 }

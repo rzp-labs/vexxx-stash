@@ -14,8 +14,9 @@ import (
 )
 
 // IntelSpriteTiles is an opt-in, time-seeking path. It keeps the exact requested
-// timestamps and downloads only scaled frames. Any failed tile discards the
-// hardware sheet and runs the complete canonical software sheet once.
+// timestamps. VAAPI downloads before canonical CPU scaling.
+// Any failed tile discards the hardware sheet and runs the complete canonical
+// software sheet once.
 func (g Generator) IntelSpriteTiles(ctx context.Context, input string, times []float64) (images []image.Image, d ffmpeg.IntelGenerationDiagnostic, err error) {
 	ctx, cancelCaller := context.WithCancel(ctx)
 	defer cancelCaller()
@@ -48,6 +49,7 @@ func (g Generator) IntelSpriteTiles(ctx context.Context, input string, times []f
 		images, err := software(ctx)
 		return images, d, err
 	}
+	g = g.WithIntelGenerationBudget()
 	done := make(chan struct{})
 	lockCtx := g.LockManager.ReadLockWithCompletion(ctx, input, done)
 	defer lockCtx.Cancel()
@@ -69,26 +71,18 @@ func (g Generator) IntelSpriteTiles(ctx context.Context, input string, times []f
 	if err != nil {
 		return nil, d, err
 	}
-	source, err := g.Probe.IntelSource(workCtx, input)
+	source, err := g.Probe.IntelSpriteSource(workCtx, input, g.IntelSprites.Backend)
 	release()
 	if err != nil {
 		return fallback("metadata", err)
 	}
-	if err := intelSpriteEligibility(source); err != nil {
+	if err := intelSpriteEligibility(source, g.IntelSprites.Backend); err != nil {
 		return fallback("eligibility", err)
 	}
-	plan, err := ffmpeg.NewIntelGenerationPlan(*g.IntelSprites, source, input, times[0], spriteScreenshotWidth, true)
+	plan, err := ffmpeg.NewIntelSpritePlan(*g.IntelSprites, source, input, times[0], spriteScreenshotWidth)
 	if err != nil {
 		return fallback("plan", err)
 	}
-	// BMP is a CPU image encoder. A hardware H.264 encode probe is unrelated.
-	probes := plan.Probes[:0]
-	for _, probe := range plan.Probes {
-		if probe.Stage != "encode" {
-			probes = append(probes, probe)
-		}
-	}
-	plan.Probes = probes
 	height := int(math.Round(float64(source.Height)*spriteScreenshotWidth/float64(source.Width)/2)) * 2
 	if height < 2 {
 		height = 2
@@ -114,8 +108,8 @@ func (g Generator) IntelSpriteTiles(ctx context.Context, input string, times []f
 	return images, d, err
 }
 
-func intelSpriteEligibility(source ffmpeg.IntelSource) error {
-	if err := source.Validate(); err != nil {
+func intelSpriteEligibility(source ffmpeg.IntelSource, backend string) error {
+	if err := source.ValidateSprite(backend); err != nil {
 		return err
 	}
 	if source.SampleAspectRatio != "1:1" && source.SampleAspectRatio != "1/1" && source.SampleAspectRatio != "1" {
@@ -123,8 +117,15 @@ func intelSpriteEligibility(source ffmpeg.IntelSource) error {
 	}
 	frameRate, ok := new(big.Rat).SetString(source.FrameRate)
 	averageRate, avgOK := new(big.Rat).SetString(source.AverageFrameRate)
-	if !ok || !avgOK || frameRate.Sign() <= 0 || frameRate.Cmp(averageRate) != 0 {
-		return fmt.Errorf("variable or unknown frame rate requires canonical software sprites")
+	if !ok || !avgOK || frameRate.Sign() <= 0 || averageRate.Sign() <= 0 {
+		return fmt.Errorf("unknown frame rate requires canonical software sprites")
+	}
+	// Unequal declarations alone do not establish VFR. This path uses each
+	// requested timestamp in an independent accurate input seek, with no FPS
+	// resampling or frame-index arithmetic. Keep the prior cadence gate for
+	// all existing 8-bit/QSV eligibility pending their own cadence evidence.
+	if !(source.PixelFormat == "yuv420p10le" && source.UsesCanonicalSpriteScale(backend)) && frameRate.Cmp(averageRate) != 0 {
+		return fmt.Errorf("unequal frame-rate declarations require canonical software sprites outside the Main 10 VAAPI path")
 	}
 	duration, err := strconv.ParseFloat(source.Duration, 64)
 	if err != nil || math.IsNaN(duration) || math.IsInf(duration, 0) || duration < 5 {

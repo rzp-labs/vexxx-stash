@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +34,40 @@ func TestIntelSourceMetadata(t *testing.T) {
 			}
 			if !c.fail && (s.SampleAspectRatio != "1:1" || s.Codec != "hevc" || s.ColorTransfer != "bt709") {
 				t.Fatal(s)
+			}
+		})
+	}
+}
+
+func TestIntelSpriteSourceIgnoresAudioCountOnly(t *testing.T) {
+	video8 := `{"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":3840,"height":2160,"index":2,"sample_aspect_ratio":"1:1","r_frame_rate":"25/1","avg_frame_rate":"25/1","duration":"1290.400000"}`
+	video10 := `{"codec_type":"video","codec_name":"hevc","profile":"Main 10","pix_fmt":"yuv420p10le","width":8192,"height":4096,"index":2,"color_range":"tv","color_space":"bt709","color_transfer":"bt709","color_primaries":"bt709"}`
+	audio := `{"codec_type":"audio","codec_name":"aac","index":0},{"codec_type":"audio","codec_name":"aac","index":1},{"codec_type":"audio","codec_name":"aac","index":3},{"codec_type":"audio","codec_name":"aac","index":4},{"codec_type":"audio","codec_name":"aac","index":5},{"codec_type":"audio","codec_name":"aac","index":6}`
+	for _, c := range []struct {
+		name, video, backend string
+		wantError            bool
+	}{
+		{"8bit VAAPI", video8, "vaapi", false},
+		{"8bit QSV", video8, "qsv", false},
+		{"10bit VAAPI", video10, "vaapi", false},
+		{"10bit QSV remains rejected", video10, "qsv", true},
+		{"multiple video remains rejected", video8 + "," + video8, "vaapi", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fixture := `{"streams":[` + audio + "," + c.video + `]}`
+			path := filepath.Join(t.TempDir(), "ffprobe")
+			if err := os.WriteFile(path, []byte("#!/bin/sh\ncat <<'JSON'\n"+fixture+"\nJSON\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			p := &FFProbe{path: path}
+			s, err := p.IntelSpriteSource(context.Background(), "silent-sprite.mp4", c.backend)
+			if (err != nil) != c.wantError || (!c.wantError && s.StreamIndex != 2) {
+				t.Fatalf("sprite source=%+v err=%v", s, err)
+			}
+			// Check the audio guard specifically, before codec/pixel validation,
+			// so a 10-bit rejection cannot disguise a marker audio regression.
+			if _, err := p.IntelSource(context.Background(), "marker.mp4"); err == nil || !strings.Contains(err.Error(), "multiple audio streams") {
+				t.Fatalf("marker automatic-audio selection guard changed: %v", err)
 			}
 		})
 	}
@@ -69,5 +104,24 @@ func TestValidateVideoOutputCancellation(t *testing.T) {
 	probe := &FFProbe{path: "must-not-execute"}
 	if err := probe.ValidateVideoOutput(ctx, "header.mp4"); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+func TestIntelSpriteSourceKeepsMarkerAndQSVGates(t *testing.T) {
+	fixture := `{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Main 10","pix_fmt":"yuv420p10le","width":8192,"height":4096,"index":0,"color_range":"tv","color_space":"bt709","color_transfer":"bt709","color_primaries":"bt709","sample_aspect_ratio":"1:1","avg_frame_rate":"998386873/16659228","r_frame_rate":"60000/1001","duration":"2669.015617"},{"codec_type":"audio","codec_name":"aac"}]}`
+	path := filepath.Join(t.TempDir(), "ffprobe")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\ncat <<'JSON'\n"+fixture+"\nJSON\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := &FFProbe{path: path}
+	s, err := p.IntelSpriteSource(context.Background(), "actual.mp4", "vaapi")
+	if err != nil || s.Profile != "Main 10" || s.Width != 8192 || s.Duration != "2669.015617" {
+		t.Fatalf("source=%+v err=%v", s, err)
+	}
+	if _, err := p.IntelSource(context.Background(), "actual.mp4"); err == nil {
+		t.Fatal("marker source broadened")
+	}
+	if _, err := p.IntelSpriteSource(context.Background(), "actual.mp4", "qsv"); err == nil {
+		t.Fatal("QSV source broadened")
 	}
 }
