@@ -115,11 +115,23 @@ func TestIntelSpriteMain10SeekAndCanonicalConversion(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	// FFmpeg 4.x has only -vsync; newer versions eventually removed that option.
+	// Choose the supported passthrough spelling without skipping parity checks.
+	help, err := exec.CommandContext(ctx, bin, "-h", "full").Output()
+	if err != nil {
+		t.Fatalf("ffmpeg options: %v", err)
+	}
+	syncArgs := []string{"-vsync", "0"}
+	if bytes.Contains(help, []byte("-fps_mode")) {
+		syncArgs = []string{"-fps_mode", "passthrough"}
+	}
 	input := filepath.Join(t.TempDir(), "10bit.mkv")
 	// Preserve low 10-bit values and vary every frame. Uneven PTS exercises
 	// independent non-keyframe seeks without inferring cadence from declarations.
 	fixture := "nullsrc=size=320x180:rate=10,format=yuv420p10le,geq=lum='64+mod(X*13+Y*7+N*11,876)':cb='64+mod(X*5+N*17,876)':cr='64+mod(Y*3+N*19,876)',setpts='(N+floor(N/3))/10/TB'"
-	if out, err := exec.CommandContext(ctx, bin, "-v", "error", "-nostdin", "-f", "lavfi", "-i", fixture, "-frames:v", "30", "-fps_mode", "passthrough", "-c:v", "ffv1", "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709", "-color_primaries", "bt709", input).CombinedOutput(); err != nil {
+	fixtureArgs := append([]string{"-v", "error", "-nostdin", "-f", "lavfi", "-i", fixture, "-frames:v", "30"}, syncArgs...)
+	fixtureArgs = append(fixtureArgs, "-c:v", "ffv1", "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709", "-color_primaries", "bt709", input)
+	if out, err := exec.CommandContext(ctx, bin, fixtureArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v: %s", err, out)
 	}
 	for _, at := range []float64{0, 0.19, 1.9876543209876543, 3.49} {
