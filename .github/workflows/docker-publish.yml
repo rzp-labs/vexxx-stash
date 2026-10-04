@@ -4,6 +4,7 @@ name: Validate and deliberately publish Docker images
 "on":
   pull_request:
     branches: [master, "codex/ct102-stack-*"]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   push:
     branches: [master]
     # GitHub's + repeats the preceding digit class; v1.2.3 matches this glob.
@@ -17,14 +18,28 @@ name: Validate and deliberately publish Docker images
         type: boolean
         default: false
         required: true
+      publish_latest:
+        description: Deliberately publish the tested master candidate to the application package and latest
+        type: boolean
+        default: false
+        required: true
       test_label:
-        description: Test label (1..32 lowercase letters/digits and internal hyphens)
+        description: Candidate/test label (1..32 lowercase letters/digits and internal hyphens)
         type: string
         default: ""
         required: false
 
 permissions:
   contents: read
+
+# Only superseded PR runs are cancelled. Landings/releases/manual runs are distinct.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Validation must remain local even when PostHog upload credentials exist.
+  POSTHOG_UPLOAD_REQUIRED: 'false'
 
 jobs:
   plan:
@@ -38,12 +53,18 @@ jobs:
     # workspace; malicious edits or background processes are not sandboxed.
     outputs:
       run_tests: ${{ steps.plan.outputs.run_tests }}
+      backend: ${{ steps.plan.outputs.backend }}
+      frontend: ${{ steps.plan.outputs.frontend }}
+      python: ${{ steps.plan.outputs.python }}
+      deferred: ${{ steps.plan.outputs.deferred }}
       build_image: ${{ steps.plan.outputs.build_image }}
       publish: ${{ steps.plan.outputs.publish }}
       local_ref: ${{ steps.plan.outputs.local_ref }}
       image_ref: ${{ steps.plan.outputs.image_ref }}
       sha_ref: ${{ steps.plan.outputs.sha_ref }}
+      latest_ref: ${{ steps.plan.outputs.latest_ref }}
       version: ${{ steps.plan.outputs.version }}
+      build_date: ${{ steps.plan.outputs.build_date }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -60,43 +81,79 @@ jobs:
   test:
     needs: plan
     if: needs.plan.outputs.run_tests == 'true'
+    env:
+      BUILD_DATE: ${{ needs.plan.outputs.build_date }}
+      GITHASH: ${{ github.sha }}
+      STASH_VERSION: ${{ needs.plan.outputs.version }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - if: needs.plan.outputs.backend == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - if: needs.plan.outputs.frontend == 'true'
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 10.34.4
       - name: Configure pnpm store before restoring cache
+        if: needs.plan.outputs.frontend == 'true'
         # Keep setup-node's cache path aligned with make pre-ui in CI.
         run: pnpm config set store-dir ~/.pnpm-store
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - if: needs.plan.outputs.frontend == 'true'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: ui/v2.5/pnpm-lock.yaml
       - name: Install media tools
+        if: needs.plan.outputs.backend == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg libvips-tools
-      - name: Install dependencies and generate code
-        run: make pre-ui generate generate-login-locale
+      - name: Install frozen frontend dependencies and generate operations
+        if: needs.plan.outputs.frontend == 'true'
+        run: make pre-ui generate-ui
+      - name: Generate backend and login locales
+        if: needs.plan.outputs.backend == 'true'
+        run: make generate-backend generate-login-locale
       - name: Go unit and integration tests
-        run: make test it
+        if: needs.plan.outputs.backend == 'true'
+        # Keep build/module caches, but execute tests again against this tree.
+        run: |
+          go test -count=1 ./...
+          go test -count=1 -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
       - name: Frontend tests and type check
+        if: needs.plan.outputs.frontend == 'true'
         working-directory: ui/v2.5
         run: |
           pnpm test
           pnpm run check
+      - name: Production frontend compilation
+        if: needs.plan.outputs.frontend == 'true'
+        run: make ui-only
+      - name: Production backend compilation
+        if: needs.plan.outputs.backend == 'true'
+        # When frontend is selected this embeds its real production assets.
+        run: make flags-release flags-pie stash
+      - name: Python regression tests
+        if: needs.plan.outputs.python == 'true'
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          if test -d scripts/gpu_generation; then
+            python3 -m unittest discover -s scripts/gpu_generation -p 'test_*.py'
+          fi
 
   image:
     needs: [plan, test]
-    if: needs.plan.outputs.build_image == 'true'
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      needs.plan.outputs.build_image == 'true' &&
+      ((needs.plan.outputs.run_tests == 'true' && needs.test.result == 'success') ||
+       (needs.plan.outputs.run_tests == 'false' && needs.test.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -120,6 +177,7 @@ jobs:
           build-args: |
             GITHASH=${{ github.sha }}
             STASH_VERSION=${{ needs.plan.outputs.version }}
+            BUILD_DATE=${{ needs.plan.outputs.build_date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test container
@@ -153,13 +211,57 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+  ci-required:
+    needs: [plan, test, image]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # Fixed inline logic: never checkout or execute repository code here.
+      - name: Verify every selected obligation
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+          RUN_TESTS: ${{ needs.plan.outputs.run_tests }}
+          BUILD_IMAGE: ${{ needs.plan.outputs.build_image }}
+          DEFERRED: ${{ needs.plan.outputs.deferred }}
+          BACKEND: ${{ needs.plan.outputs.backend }}
+          FRONTEND: ${{ needs.plan.outputs.frontend }}
+          PYTHON: ${{ needs.plan.outputs.python }}
+        run: |
+          python3 - <<'PYCODE'
+          import os
+          from pathlib import Path
+          e = os.environ
+          errors = []
+          if e['PLAN_RESULT'] != 'success':
+              errors.append('Planner did not succeed')
+          if e['DEFERRED'] != 'false':
+              errors.append('Draft: substantive validation deferred; not merge eligible')
+          groups = [e[key] for key in ('BACKEND', 'FRONTEND', 'PYTHON')]
+          if any(value not in ('true', 'false') for value in groups):
+              errors.append('Invalid planner domain')
+          elif (e['RUN_TESTS'] == 'true') != ('true' in groups):
+              errors.append('Test obligation does not match selected domains')
+          for selected, result in [('RUN_TESTS', 'TEST_RESULT'), ('BUILD_IMAGE', 'IMAGE_RESULT')]:
+              if e[selected] not in ('true', 'false'):
+                  errors.append('Invalid planner obligation: ' + selected)
+              elif e[result] != ('success' if e[selected] == 'true' else 'skipped'):
+                  errors.append(selected + ': unexpected job result ' + e[result])
+          Path(e['GITHUB_STEP_SUMMARY']).write_text(
+              '\n'.join(errors) if errors else 'All selected validation obligations passed.')
+          if errors:
+              raise SystemExit('\n'.join(errors))
+          PYCODE
+
   publish:
-    needs: [plan, image]
+    needs: [plan, image, ci-required]
     # Defense in depth: PR/master events never receive a publishing job token.
     if: >-
-      needs.plan.outputs.publish == 'true' &&
+      needs.ci-required.result == 'success' && needs.plan.outputs.publish == 'true' &&
       ((github.event_name == 'push' && github.ref_type == 'tag') ||
-       (github.event_name == 'workflow_dispatch' && inputs.publish_test_image))
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && (inputs.publish_test_image || inputs.publish_latest)))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -174,10 +276,13 @@ jobs:
         env:
           LOCAL_IMAGE: ${{ needs.plan.outputs.local_ref }}
           EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ needs.plan.outputs.version }}
         run: |
           sha256sum --check image.tar.sha256
           docker load --input image.tar
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$LOCAL_IMAGE")" = "$EXPECTED_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$LOCAL_IMAGE")" = "$EXPECTED_VERSION"
+          test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "$LOCAL_IMAGE")" = 'linux/amd64'
       - name: Log in to GHCR for deliberate publication
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -189,6 +294,7 @@ jobs:
           LOCAL_IMAGE: ${{ needs.plan.outputs.local_ref }}
           IMAGE_REF: ${{ needs.plan.outputs.image_ref }}
           SHA_REF: ${{ needs.plan.outputs.sha_ref }}
+          LATEST_REF: ${{ needs.plan.outputs.latest_ref }}
         run: |
           docker tag "$LOCAL_IMAGE" "$IMAGE_REF"
           docker push "$IMAGE_REF"
@@ -196,3 +302,12 @@ jobs:
             docker tag "$LOCAL_IMAGE" "$SHA_REF"
             docker push "$SHA_REF"
           fi
+          if test -n "$LATEST_REF"; then
+            docker tag "$LOCAL_IMAGE" "$LATEST_REF"
+            docker push "$LATEST_REF"
+          fi
+          {
+            echo "Published tested candidate: $IMAGE_REF"
+            if test -n "$LATEST_REF"; then echo "Compose reference: $LATEST_REF"; fi
+            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$LOCAL_IMAGE"
+          } >> "$GITHUB_STEP_SUMMARY"
