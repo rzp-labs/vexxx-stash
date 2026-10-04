@@ -300,6 +300,9 @@ func markerExpectedDuration(ctx context.Context, probe, input string, start, dur
 	if value == "" || value == "N/A" {
 		// Container duration may end with a longer audio track. Establish the
 		// selected video endpoint from packets instead; never infer it from audio.
+		// Marker seconds use the container-relative input -ss timeline in
+		// transcoder.Transcode. A delayed first video packet is not time zero;
+		// subtracting video start here would undercount valid near-EOF markers.
 		origin := result.Format.Start
 		if origin == "" || origin == "N/A" {
 			origin = result.Streams[0].Start

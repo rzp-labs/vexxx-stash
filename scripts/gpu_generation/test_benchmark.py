@@ -14,6 +14,28 @@ import benchmark
 
 
 class BenchmarkTests(unittest.TestCase):
+    def assert_process_terminated(self, pid, timeout=.5):
+        # Signals and init's orphan reaper are asynchronous. A missing stat file
+        # after a successful PID probe requires another probe, not an assertion
+        # on the now-vanished proc entry or permission to accept a live child.
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            if sys.platform.startswith("linux"):
+                try:
+                    raw = Path(f"/proc/{pid}/stat").read_text()
+                except FileNotFoundError:
+                    pass
+                else:
+                    if raw.rsplit(") ", 1)[1].split()[0] == "Z":
+                        return
+            if time.monotonic() >= deadline:
+                self.fail(f"process {pid} is still live after cleanup")
+            time.sleep(.01)
+
     def command(self, code, timeout=2):
         return {"argv": [sys.executable, "-c", code], "timeout_seconds": timeout}
 
@@ -98,14 +120,30 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(result["status"], "timed_out")
             self.assertLess(time.monotonic() - start, 4)
             pid = int(pidfile.read_text())
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                pass
-            else:
-                # A dead Linux zombie can remain for the init reaper.
-                stat = Path(f"/proc/{pid}/stat")
-                self.assertTrue(stat.exists() and stat.read_text().split(") ")[1][0] == "Z")
+            self.assert_process_terminated(pid)
+
+    def test_cleanup_assertion_rechecks_pid_when_proc_entry_disappears(self):
+        with mock.patch.object(sys, "platform", "linux"), \
+             mock.patch.object(os, "kill", side_effect=[None, ProcessLookupError]) as probe, \
+             mock.patch.object(Path, "read_text", side_effect=FileNotFoundError):
+            self.assert_process_terminated(12345)
+        self.assertEqual(probe.call_count, 2)
+
+    def test_cleanup_assertion_accepts_terminated_linux_zombie(self):
+        with mock.patch.object(sys, "platform", "linux"), \
+             mock.patch.object(os, "kill", return_value=None), \
+             mock.patch.object(Path, "read_text", return_value="12345 (worker with ) spaces) Z 1 12345"):
+            self.assert_process_terminated(12345, timeout=0)
+
+    def test_cleanup_assertion_rejects_live_process(self):
+        with self.assertRaisesRegex(AssertionError, "still live"):
+            self.assert_process_terminated(os.getpid(), timeout=0)
+        # Missing procfs evidence alone cannot excuse a PID that stays live.
+        with mock.patch.object(sys, "platform", "linux"), \
+             mock.patch.object(os, "kill", return_value=None), \
+             mock.patch.object(Path, "read_text", side_effect=FileNotFoundError), \
+             self.assertRaisesRegex(AssertionError, "still live"):
+            self.assert_process_terminated(12345, timeout=0)
 
     def test_output_is_bounded(self):
         result = benchmark.run_command(self.command("import sys; sys.stdout.write('x'*1000000); sys.stdout.flush()"), Path.cwd())

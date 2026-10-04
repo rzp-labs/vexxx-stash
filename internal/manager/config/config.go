@@ -2002,6 +2002,10 @@ func (i *Config) GetScraperPackagePathGetter() packagePathGetter {
 func (i *Config) Validate() error {
 	i.RLock()
 	defer i.RUnlock()
+	// Startup requires a valid persisted generation request, just like the
+	// mandatory application paths below. The generation snapshot fallback is
+	// defense in depth for callers reaching invalid in-memory settings after
+	// initialization; it does not bypass startup validation of malformed YAML.
 	if _, err := i.readGenerationSettings(); err != nil {
 		return err
 	}
