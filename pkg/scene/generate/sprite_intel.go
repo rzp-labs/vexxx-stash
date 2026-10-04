@@ -41,7 +41,7 @@ func (g Generator) IntelSpriteTiles(ctx context.Context, input string, times []f
 		}
 	}
 	software := func(ctx context.Context) ([]image.Image, error) {
-		return captureSpriteSequence(ctx, times, spriteScreenshotWidth, 0, func(ctx context.Context, at float64) (image.Image, error) {
+		return captureSpriteSequence(ctx, times, g.spriteWorkers(generationbudget.CPU, len(times)), spriteScreenshotWidth, 0, func(ctx context.Context, at float64) (image.Image, error) {
 			return g.SpriteScreenshot(ctx, input, at, "")
 		})
 	}
@@ -90,7 +90,7 @@ func (g Generator) IntelSpriteTiles(ctx context.Context, input string, times []f
 	d, err = ffmpeg.RunIntelGenerationWork(workCtx, plan,
 		func(ctx context.Context) error {
 			var captureErr error
-			images, captureErr = captureSpriteSequence(ctx, times, spriteScreenshotWidth, height, func(ctx context.Context, at float64) (image.Image, error) {
+			images, captureErr = captureSpriteSequence(ctx, times, g.spriteWorkers(generationbudget.GPU, len(times)), spriteScreenshotWidth, height, func(ctx context.Context, at float64) (image.Image, error) {
 				tileCtx := g.LockManager.ReadLock(ctx, input)
 				defer tileCtx.Cancel()
 				return g.generateImage(tileCtx, transcoder.IntelSpriteScreenshot(input, at, plan))
@@ -132,34 +132,4 @@ func intelSpriteEligibility(source ffmpeg.IntelSource, backend string) error {
 		return fmt.Errorf("short or unknown-duration input requires canonical software sprites")
 	}
 	return nil
-}
-
-// captureSpriteSequence preserves order and rejects partial or inconsistent
-// hardware results before a sheet is composed or a VTT is published.
-func captureSpriteSequence(ctx context.Context, times []float64, width, height int, capture func(context.Context, float64) (image.Image, error)) ([]image.Image, error) {
-	images := make([]image.Image, 0, len(times))
-	for i, at := range times {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		img, err := capture(ctx, at)
-		if err != nil {
-			return nil, fmt.Errorf("sprite screenshot at index %d: %w", i, err)
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if img == nil {
-			return nil, fmt.Errorf("sprite screenshot at index %d is empty", i)
-		}
-		size := img.Bounds().Size()
-		if i == 0 && height == 0 {
-			height = size.Y
-		}
-		if size.X != width || size.Y != height || height <= 0 {
-			return nil, fmt.Errorf("sprite screenshot at index %d has unexpected dimensions %v (want %dx%d)", i, size, width, height)
-		}
-		images = append(images, img)
-	}
-	return images, nil
 }

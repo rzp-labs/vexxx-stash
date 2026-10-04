@@ -49,7 +49,7 @@ func TestIntelSpriteEligibilityConservative(t *testing.T) {
 func TestSpriteSequenceOrderFailureAndCancellation(t *testing.T) {
 	times := []float64{2.5, 3.125, 5.75}
 	var seen []float64
-	images, err := captureSpriteSequence(context.Background(), times, 160, 90, func(_ context.Context, at float64) (image.Image, error) {
+	images, err := captureSpriteSequence(context.Background(), times, 1, 160, 90, func(_ context.Context, at float64) (image.Image, error) {
 		seen = append(seen, at)
 		return image.NewNRGBA(image.Rect(0, 0, 160, 90)), nil
 	})
@@ -61,7 +61,7 @@ func TestSpriteSequenceOrderFailureAndCancellation(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			calls := 0
-			images, err := captureSpriteSequence(ctx, times, 160, 90, func(_ context.Context, _ float64) (image.Image, error) {
+			images, err := captureSpriteSequence(ctx, times, 1, 160, 90, func(_ context.Context, _ float64) (image.Image, error) {
 				calls++
 				if calls == 2 {
 					switch mode {
