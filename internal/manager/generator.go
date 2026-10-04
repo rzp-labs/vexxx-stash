@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -49,8 +50,14 @@ func (g *generatorInfo) calculateFrameRate(ctx context.Context, videoStream *ffm
 
 	// If we are missing the frame count or frame rate then seek through the file and extract the info with regex
 	if numberOfFrames == 0 || !isValidFloat64(framerate) {
-		info, err := instance.FFMpeg.CalculateFrameRate(ctx, &g.VideoFile)
+		info, err := instance.generationFrameRate(ctx, &g.VideoFile)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
 			logger.Errorf("error calculating frame rate: %v", err)
 		} else {
 			if numberOfFrames == 0 {

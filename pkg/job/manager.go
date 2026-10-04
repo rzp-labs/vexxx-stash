@@ -275,7 +275,13 @@ func (m *Manager) executeJob(ctx context.Context, j *Job, done chan struct{}) {
 	progress := m.newProgress(j)
 	if err := j.exec.Execute(ctx, progress); err != nil {
 		logger.Errorf("task failed due to error: %v", err)
-		j.error(err)
+		m.mutex.Lock()
+		// Cancellation can arrive after Execute's last context check. Preserve
+		// STOPPING so onJobFinish records CANCELLED rather than a late failure.
+		if j.Status != StatusStopping {
+			j.error(err)
+		}
+		m.mutex.Unlock()
 	}
 }
 

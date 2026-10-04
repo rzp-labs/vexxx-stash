@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/stashapp/stash/pkg/fsutil"
@@ -41,9 +42,14 @@ func (t *GeneratePreviewTask) Start(ctx context.Context) error {
 			t.Options.LimitEnd = t.Scene.EndPoint
 		}
 
-		ffprobe := instance.FFProbe
-		videoFile, err := ffprobe.NewVideoFile(t.Scene.Path)
+		videoFile, err := instance.generationVideoFile(ctx, t.Scene.Path)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
 			logger.Errorf("error reading video file: %v", err)
 			return nil
 		}

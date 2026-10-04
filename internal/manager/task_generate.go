@@ -2,7 +2,9 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/remeh/sizedwaitgroup"
@@ -127,6 +129,9 @@ func (j *GenerateJob) Execute(ctx context.Context, progress *job.Progress) error
 		}
 
 		g := &generate.Generator{
+			Probe:        instance.FFProbe,
+			IntelMarker:  instance.Config.GetIntelMarkerGeneration(),
+			IntelSprites: instance.Config.GetIntelSpriteGeneration(),
 			Encoder:      instance.FFMpeg,
 			FFMpegConfig: instance.Config,
 			LockManager:  instance.ReadLockManager,
@@ -252,6 +257,8 @@ func (j *GenerateJob) Execute(ctx context.Context, progress *job.Progress) error
 	}()
 
 	wg := sizedwaitgroup.New(parallelTasks)
+	var taskErrors []error
+	var taskErrorsMu sync.Mutex
 
 	// Start measuring how long the generate has taken. (consider moving this up)
 	start := time.Now()
@@ -277,9 +284,13 @@ func (j *GenerateJob) Execute(ctx context.Context, progress *job.Progress) error
 		// where f is changed when the goroutine runs
 		localTask := f
 		go progress.ExecuteTask(localTask.GetDescription(), func() {
-			localTask.Start(ctx)
-			wg.Done()
-			progress.Increment()
+			defer wg.Done()
+			defer progress.Increment()
+			if err := localTask.Start(ctx); err != nil {
+				taskErrorsMu.Lock()
+				taskErrors = append(taskErrors, fmt.Errorf("%s: %w", localTask.GetDescription(), err))
+				taskErrorsMu.Unlock()
+			}
 		})
 	}
 
@@ -292,7 +303,10 @@ func (j *GenerateJob) Execute(ctx context.Context, progress *job.Progress) error
 
 	elapsed := time.Since(start)
 	logger.Info(fmt.Sprintf("Generate finished (%s)", elapsed))
-	return nil
+	// Drain all admitted work and retain successful assets, but let the job
+	// manager mark partial generation FAILED. Explicit user cancellation keeps
+	// its existing CANCELLED status via the branch above.
+	return errors.Join(taskErrors...)
 }
 
 func (j *GenerateJob) queueTasks(ctx context.Context, g *generate.Generator, paths []string, queue chan<- Task) {
