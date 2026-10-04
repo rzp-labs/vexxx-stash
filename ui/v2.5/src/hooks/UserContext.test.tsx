@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook } from "@testing-library/react-hooks";
 import { MockedProvider, MockedResponse } from "@apollo/client/testing";
 import {
@@ -8,6 +8,16 @@ import {
   useMultiUserEnabled,
 } from "./UserContext";
 import * as GQL from "src/core/generated-graphql";
+import posthog from "posthog-js";
+
+vi.mock("posthog-js", () => ({
+  default: {
+    __loaded: false,
+    identify: vi.fn(),
+    reset: vi.fn(),
+    get_property: vi.fn(),
+  },
+}));
 
 // Mock the CurrentUser query document
 const CURRENT_USER_QUERY = GQL.CurrentUserDocument;
@@ -45,6 +55,95 @@ const createSimpleWrapper =
     <MockedProvider mocks={mocks}>{children}</MockedProvider>;
 
 describe("UserContext", () => {
+  describe("PostHog identity", () => {
+    beforeEach(() => {
+      vi.resetAllMocks();
+      posthog.__loaded = true;
+    });
+
+    afterEach(() => {
+      posthog.__loaded = false;
+    });
+
+    const user = {
+      __typename: "CurrentUser" as const,
+      id: "42",
+      username: "test-admin",
+      role: GQL.UserRole.Admin,
+      permissions: {
+        __typename: "UserPermissions" as const,
+        can_modify: true,
+        can_delete: true,
+        can_manage_users: true,
+        can_run_tasks: true,
+        can_modify_settings: true,
+      },
+    };
+
+    const mocksForUser = (
+      currentUser: typeof user | null
+    ): MockedResponse[] => [
+      {
+        request: { query: CURRENT_USER_QUERY },
+        result: { data: { currentUser } },
+      },
+      createUserCountMock(1),
+    ];
+
+    it("keeps the anonymous identity on an initially anonymous page load", async () => {
+      const { result, waitFor } = renderHook(() => useCurrentUser(), {
+        wrapper: createWrapper(mocksForUser(null)),
+      });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(posthog.reset).not.toHaveBeenCalled();
+      expect(posthog.identify).not.toHaveBeenCalled();
+    });
+
+    it("identifies a restored session using the same user ID as backend events", async () => {
+      const { waitFor } = renderHook(() => useCurrentUser(), {
+        wrapper: createWrapper(mocksForUser(user)),
+      });
+      await waitFor(() =>
+        expect(posthog.identify).toHaveBeenCalledWith("42", {
+          username: "test-admin",
+          user_role: GQL.UserRole.Admin,
+        })
+      );
+      expect(posthog.reset).not.toHaveBeenCalled();
+    });
+
+    it("resets the previous account before identifying a different account", async () => {
+      vi.mocked(posthog.get_property).mockReturnValue("previous-user");
+      const { waitFor } = renderHook(() => useCurrentUser(), {
+        wrapper: createWrapper(mocksForUser(user)),
+      });
+      await waitFor(() => expect(posthog.identify).toHaveBeenCalled());
+      expect(posthog.reset).toHaveBeenCalledOnce();
+      expect(vi.mocked(posthog.reset).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(posthog.identify).mock.invocationCallOrder[0]
+      );
+    });
+
+    it("clears a persisted account after the server confirms an anonymous session", async () => {
+      vi.mocked(posthog.get_property).mockReturnValue("previous-user");
+      const { waitFor } = renderHook(() => useCurrentUser(), {
+        wrapper: createWrapper(mocksForUser(null)),
+      });
+      await waitFor(() => expect(posthog.reset).toHaveBeenCalledOnce());
+      expect(posthog.identify).not.toHaveBeenCalled();
+    });
+
+    it("does not identify when the SDK is disabled", async () => {
+      posthog.__loaded = false;
+      const { result, waitFor } = renderHook(() => useCurrentUser(), {
+        wrapper: createWrapper(mocksForUser(user)),
+      });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(posthog.identify).not.toHaveBeenCalled();
+      expect(posthog.reset).not.toHaveBeenCalled();
+    });
+  });
+
   describe("useCurrentUser", () => {
     it("should return loading state initially", () => {
       const mocks: MockedResponse[] = [

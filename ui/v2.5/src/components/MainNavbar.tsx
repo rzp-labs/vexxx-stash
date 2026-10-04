@@ -41,6 +41,7 @@ import EnterVRHomeButton from "src/components/ScenePlayer/VR/EnterVRHomeButton";
 import Mousetrap from "mousetrap";
 
 import SessionUtils from "src/utils/session";
+import posthog from "posthog-js";
 import { Icon } from "src/components/Shared/Icon";
 import { useConfigurationContext } from "src/hooks/Config";
 import { ManualStateContext } from "./Help/context";
@@ -430,6 +431,9 @@ export const MainNavbar: React.FC = () => {
             <MenuItem
               component="a"
               href={`${baseURL}logout`}
+              onClick={() => {
+                if (posthog.__loaded) posthog.reset();
+              }}
             >
               <ListItemIcon sx={{ minWidth: 32 }}>
                 <Icon icon={faSignOutAlt} />
@@ -452,6 +456,9 @@ export const MainNavbar: React.FC = () => {
           <IconButton
             className="minimal logout-button"
             href={`${baseURL}logout`}
+            onClick={() => {
+              if (posthog.__loaded) posthog.reset();
+            }}
             color="inherit"
             size="small"
           >
