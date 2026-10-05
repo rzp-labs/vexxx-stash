@@ -95,8 +95,12 @@ checks the publication policy and Intel packaging tests. Ready application PRs
 and master landings run affected backend/frontend/Python checks and production
 compilation. Ordinary application edits do not build images. Actual packaging
 inputs and explicit manual/release candidates build and smoke-test Linux amd64
-images. Drafts defer substantive validation; the always-present `ci-required`
-aggregate checks every planned obligation and fails deferred drafts. See
+images. Drafts report a separate informational `validation-deferred` context.
+Ready runs start `ci-required` immediately and keep it pending until all planned
+obligations pass. Deliberate release/manual runs reuse only individually proven
+tests from successful exact-SHA master validation with matching workflow revision;
+unavailable or incomplete evidence runs normally. Image candidates compile once
+in Docker with release maps/symbols and publish the exact smoke-tested image. See
 [local validation before push](../../docs/LOCAL_FIRST_CI.md) for the existing
 commands and classification rules.
 

@@ -22,11 +22,30 @@ history or a checkout mismatch fails planning. Master pushes classify the whole
 `before..after` range. The summary records base/head/merge/tree identities and
 selected groups. Unknown paths select all test domains, not an image.
 
-Drafts defer substantive checks and deliberately fail `ci-required` with a clear
-summary. Becoming ready runs fresh confirmation. The aggregate verifies planner
-success, valid domain selections, and success of selected jobs; an unselected job
-must be skipped. Superseded PR runs alone are cancelled. This check is not yet a
-required branch-protection check; repository settings are unchanged.
+Drafts defer substantive checks and report the separate informational
+`validation-deferred` context. Becoming ready starts the real `ci-required` job
+immediately, before planning and tests, so the required context stays pending
+through validation rather than waiting on a dependent aggregate. It verifies
+planner success, valid domain coverage, generation, selected tests and compilation,
+and any required image build/smoke. Skipped selected steps, failures and cancelled
+runs cannot satisfy it. Superseded PR runs alone are cancelled. Master protection
+requires `ci-required`; this patch does not change repository settings.
+
+Deliberate release/manual runs can reuse backend, frontend or Python tests from
+one successful master push at the exact commit and workflow revision. The probe
+compares immutable workflow bytes, repository/ref/event identity, completed run
+attempt, and successful classifier/aggregate/domain steps. The summary records
+source run/attempt, commit/workflow revision, workflow digest and domain coverage.
+Unproven domains execute normally; missing, pending, failed, stale, mismatched or
+inaccessible evidence triggers normal execution. PR checks, tree equality and
+nearby commits are insufficient. Ordinary PR/master validation does not reuse
+results.
+
+For image candidates, the existing Docker stages compile each production output
+once and use those outputs in the final image. Host production compilation is
+omitted in that case; ordinary non-image validation still compiles on the host.
+An ordinary validation binary is never promoted into a release: release metadata,
+hidden source maps/chunk IDs and unstripped native symbols remain release-specific.
 
 ## Existing commands
 
@@ -36,6 +55,7 @@ installation is needed for these fast offline checks:
 ```sh
 python3 -m unittest discover -s scripts -p test_image_publication_policy.py
 python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
+python3 -m unittest discover -s scripts -p test_reuse_master_validation.py
 ```
 
 For a candidate affecting both application domains, the existing commands are:
@@ -95,9 +115,8 @@ commit must be reachable from master. Release/manual versions are baked before
 the build; retagging a development image cannot change its application version.
 Until a trusted local-to-CI artifact intake exists, deliberate CI publication
 keeps the existing same-run build/smoke/archive/checksum handoff. The isolated
-publisher checks revision/version/platform and publishes those bytes without
-checkout or rebuilding. No cross-run result cache or arbitrary artifact intake
-is introduced.
+publisher checks the smoke-tested image ID, checksums and revision/version/platform, then publishes those bytes without
+checkout or rebuilding. No arbitrary build artifact intake or general cache framework is introduced.
 
 ## PostHog branch integration
 
