@@ -202,6 +202,8 @@ class RequiredContextTests(unittest.TestCase):
                 if domain != 'PYTHON':
                     env.setdefault(domain + '_GENERATE_RESULT', 'success' if selected else 'skipped')
                     env.setdefault(domain + '_COMPILE_RESULT', 'success' if selected and env['BUILD_IMAGE'] == 'false' and env[domain + '_RESULT'] == 'success' else 'skipped')
+            env.setdefault('PACKAGING_REUSED', 'false')
+            env.setdefault('EXECUTE_IMAGE', env['BUILD_IMAGE'])
             result = subprocess.run(['bash'], input=self.aggregate, text=True, env=env, capture_output=True)
             self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
 
@@ -263,6 +265,28 @@ class RequiredContextTests(unittest.TestCase):
             image = {**selected, 'BUILD_IMAGE': 'true', 'IMAGE_RESULT': 'success'}
             self.gate(True, **image)  # Docker supplies compile coverage.
             self.gate(False, **{**image, domain + '_COMPILE_RESULT': 'success'})
+
+    def test_equivalent_pr_packaging_requires_proof_and_cannot_replace_release_image(self):
+        proof = dict(BUILD_IMAGE='true', EXECUTE_IMAGE='false', PACKAGING_REUSED='true',
+                     PACKAGING_REUSE_ALLOWED='true', PACKAGING_SOURCE_RUN='123', PACKAGING_SOURCE_ATTEMPT='2',
+                     PACKAGING_CANDIDATE='c' * 40, PACKAGING_LANDED=SHA, PACKAGING_TREE='e' * 40,
+                     EXPECTED_TREE='e' * 40, PACKAGING_WORKFLOW_DIGEST='d' * 64, PACKAGING_INPUT_DIGEST='f' * 64)
+        self.gate(True, **proof)
+        for change in (dict(PACKAGING_REUSE_ALLOWED='false'), dict(PACKAGING_SOURCE_RUN=''),
+                       dict(PACKAGING_SOURCE_ATTEMPT=''), dict(PACKAGING_CANDIDATE=''),
+                       dict(PACKAGING_LANDED='b' * 40), dict(PACKAGING_TREE='b' * 40),
+                       dict(PACKAGING_WORKFLOW_DIGEST=''), dict(PACKAGING_INPUT_DIGEST=''),
+                       dict(EXECUTE_IMAGE='true'), dict(IMAGE_RESULT='success'), dict(BUILD_IMAGE='false'),
+                       dict(DRAFT_EVENT='true', DEFERRED='true'), dict(PACKAGING_REUSED='false'),
+                       dict(PACKAGING_REUSED='invalid')):
+            with self.subTest(change=change):
+                self.gate(False, **{**proof, **change})
+        # Packaging evidence never authorizes skipped master test obligations.
+        selected = dict(REQUIRED_TESTS='true', RUN_TESTS='true', REQUIRED_BACKEND='true', BACKEND='true',
+                        BACKEND_RESULT='success', BACKEND_GENERATE_RESULT='success')
+        self.gate(True, **{**proof, **selected})
+        for result in ('skipped', 'failure', 'cancelled'):
+            self.gate(False, **{**proof, **selected, 'BACKEND_RESULT': result})
 
 
 if __name__ == '__main__':

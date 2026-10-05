@@ -272,6 +272,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                                    'REQUIRED_FRONTEND': 'false', 'REQUIRED_PYTHON': 'false',
                                    'REUSED_BACKEND': 'false', 'REUSED_FRONTEND': 'false', 'REUSED_PYTHON': 'false',
                                    'BUILD_IMAGE': image_selected, 'IMAGE_RESULT': image_result,
+                                   'PACKAGING_REUSED': 'false', 'EXECUTE_IMAGE': image_selected,
                                    'BACKEND': selected, 'FRONTEND': 'false', 'PYTHON': 'false',
                                    'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary')}
                             env.update(BACKEND_RESULT=test_result,
@@ -292,6 +293,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                        'REQUIRED_FRONTEND': 'false', 'REQUIRED_PYTHON': 'false',
                        'REUSED_BACKEND': 'false', 'REUSED_FRONTEND': 'false', 'REUSED_PYTHON': 'false',
                        'IMAGE_RESULT': 'skipped', 'BACKEND': 'false', 'FRONTEND': 'false', 'PYTHON': 'false',
+                       'PACKAGING_REUSED': 'false', 'EXECUTE_IMAGE': 'false',
                        'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary'), **override}
                 env.update(BACKEND_RESULT='skipped', BACKEND_GENERATE_RESULT='skipped', BACKEND_COMPILE_RESULT='skipped',
                            FRONTEND_RESULT='skipped', FRONTEND_GENERATE_RESULT='skipped', FRONTEND_COMPILE_RESULT='skipped',
