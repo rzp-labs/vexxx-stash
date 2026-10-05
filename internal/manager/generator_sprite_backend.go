@@ -80,8 +80,8 @@ func (g *SpriteGenerator) spriteRequest() spriteRequest {
 // it is enabled and can take the file.
 func (g *SpriteGenerator) spriteTiles(ctx context.Context) ([]image.Image, error) {
 	req := g.spriteRequest()
-	if images, handled, err := g.intelSpriteTiles(ctx, req); handled {
-		return images, err
+	if g.g.IntelSprites != nil && g.g.IntelSprites.Enabled() {
+		return nil, fmt.Errorf("selected GPU sprites require direct sheet rendering")
 	}
 
 	if b := nativeSpriteBackend(); b != nil && !g.spriteBudgetEnabled() {

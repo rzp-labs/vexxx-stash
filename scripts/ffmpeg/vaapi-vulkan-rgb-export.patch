@@ -1,0 +1,164 @@
+--- a/libavutil/hwcontext_vulkan.c
++++ b/libavutil/hwcontext_vulkan.c
+@@ -167,6 +167,9 @@
+
+     /* Maximum queues */
+     int limit_queues;
++
++    /* Native packed RGB pools must be exportable to the parent VAAPI device. */
++    int vaapi_derived;
+ } VulkanDevicePriv;
+
+ typedef struct VulkanFramesPriv {
+@@ -2202,7 +2205,10 @@
+                 dev_select.vendor_id = 0x1002;
+         }
+
+-        return vulkan_device_create_internal(ctx, &dev_select, 0, opts, flags);
++        int err = vulkan_device_create_internal(ctx, &dev_select, 0, opts, flags);
++        if (!err)
++            ((VulkanDevicePriv *)ctx->hwctx)->vaapi_derived = 1;
++        return err;
+     }
+ #endif
+ #if CONFIG_LIBDRM
+@@ -2670,7 +2676,7 @@
+ static int prepare_frame(AVHWFramesContext *hwfc, FFVkExecPool *ectx,
+                          AVVkFrame *frame, enum PrepMode pmode)
+ {
+-    int err = 0;
++    int err = AVERROR(ENOTSUP);
+     AVVulkanFramesContext *hwfc_vk = hwfc->hwctx;
+     if (hwfc_vk->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT &&
+         (pmode != PREP_MODE_EXTERNAL_EXPORT) &&
+@@ -2963,6 +2969,8 @@
+     VulkanFramesPriv *fp = hwfc->hwctx;
+
+     if (fp->modifier_info) {
++        if (fp->p.create_pnext == fp->modifier_info)
++            fp->p.create_pnext = fp->modifier_info->pNext;
+         if (fp->modifier_info->pDrmFormatModifiers)
+             av_freep(&fp->modifier_info->pDrmFormatModifiers);
+         av_freep(&fp->modifier_info);
+@@ -2991,6 +2999,32 @@
+     int is_lone_dpb = ((hwctx->usage & VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR) ||
+                        ((hwctx->usage & VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR) &&
+                         !(hwctx->usage & VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR)));
++
++#if CONFIG_VAAPI && CONFIG_LIBDRM
++    /* Packed RGB on a VAAPI-derived device is a single-object GPU bridge.
++     * OPTIMAL images have no valid DRM plane descriptors. Select an explicit
++     * uncompressed modifier before allocation so both import and export agree. */
++    if (p->vaapi_derived &&
++        (hwfc->sw_format == AV_PIX_FMT_BGRA || hwfc->sw_format == AV_PIX_FMT_X2RGB10) &&
++        !ffhwframesctx(hwfc)->source_frames &&
++        hwctx->tiling == VK_IMAGE_TILING_OPTIMAL &&
++        !ff_vk_find_struct(hwctx->create_pnext,
++                           VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT)) {
++        uint64_t *modifier = av_malloc(sizeof(*modifier));
++        fp->modifier_info = av_mallocz(sizeof(*fp->modifier_info));
++        if (!modifier || !fp->modifier_info) {
++            av_free(modifier);
++            return AVERROR(ENOMEM);
++        }
++        *modifier = DRM_FORMAT_MOD_LINEAR;
++        fp->modifier_info->sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
++        fp->modifier_info->pNext = hwctx->create_pnext;
++        fp->modifier_info->drmFormatModifierCount = 1;
++        fp->modifier_info->pDrmFormatModifiers = modifier;
++        hwctx->create_pnext = fp->modifier_info;
++        hwctx->tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
++    }
++#endif
+
+     /* Defaults */
+     if (!hwctx->nb_layers)
+@@ -4160,11 +4194,13 @@
+     wait_info.pSemaphores = f->sem;
+     wait_info.pValues     = f->sem_value;
+
+-    vk->WaitSemaphores(hwctx->act_dev, &wait_info, UINT64_MAX);
+-
+-    err = ff_hwframe_map_create(src->hw_frames_ctx, dst, src, &vulkan_unmap_to_drm, drm_desc);
+-    if (err < 0)
++    ret = vk->WaitSemaphores(hwctx->act_dev, &wait_info, UINT64_MAX);
++    if (ret != VK_SUCCESS) {
++        av_log(hwfc, AV_LOG_ERROR, "Failed to wait for Vulkan frame export: %s\n",
++               ff_vk_ret2str(ret));
++        err = AVERROR_EXTERNAL;
+         goto end;
++    }
+
+     ret = vk->GetImageDrmFormatModifierPropertiesEXT(hwctx->act_dev, f->img[0],
+                                                      &drm_mod);
+@@ -4198,7 +4234,10 @@
+     for (int i = 0; i < drm_desc->nb_layers; i++) {
+         VkFormat plane_vkfmt = av_vkfmt_from_pixfmt(hwfc->sw_format)[i];
+
+-        drm_desc->layers[i].format = vulkan_fmt_to_drm(plane_vkfmt);
++        /* Packed X2RGB10 has no alpha and VAAPI imports XRGB2101010. */
++        drm_desc->layers[i].format = hwfc->sw_format == AV_PIX_FMT_X2RGB10
++                                    ? DRM_FORMAT_XRGB2101010
++                                    : vulkan_fmt_to_drm(plane_vkfmt);
+         drm_desc->layers[i].nb_planes = fp->drm_format_modifier_properties[i].drmFormatModifierPlaneCount;
+
+         if (drm_desc->layers[i].nb_planes > MAX_MEMORY_PLANES) {
+@@ -4232,6 +4271,11 @@
+
+     }
+
++    /* Transfer descriptor ownership only after all exports and checks pass. */
++    err = ff_hwframe_map_create(src->hw_frames_ctx, dst, src, &vulkan_unmap_to_drm, drm_desc);
++    if (err < 0)
++        goto end;
++
+     dst->width   = src->width;
+     dst->height  = src->height;
+     dst->data[0] = (uint8_t *)drm_desc;
+@@ -4241,6 +4285,8 @@
+     return 0;
+
+ end:
++    for (int i = 0; i < drm_desc->nb_objects; i++)
++        close(drm_desc->objects[i].fd);
+     av_free(drm_desc);
+     return err;
+ }
+@@ -4250,6 +4296,7 @@
+                                const AVFrame *src, int flags)
+ {
+     int err;
++    AVBufferRef *drm_map = NULL;
+     AVFrame *tmp = av_frame_alloc();
+     if (!tmp)
+         return AVERROR(ENOMEM);
+@@ -4264,9 +4311,29 @@
+     if (err < 0)
+         goto fail;
+
++    /* Keep the DRM export callback alive until after the VAAPI import is
++     * destroyed. Flattening the source alone releases it before VAAPI use. */
++    if (dst->buf[1]) {
++        err = AVERROR(EINVAL);
++        goto fail;
++    }
++    drm_map = av_buffer_ref(tmp->buf[0]);
++    if (!drm_map) {
++        err = AVERROR(ENOMEM);
++        goto fail;
++    }
++
+     err = ff_hwframe_map_replace(dst, src);
++    if (err < 0)
++        goto fail;
++
++    /* AVFrame releases buf[0] (VAAPI unmap) before buf[1] (DRM unmap).
++     * The DRM map retains the Vulkan source through the final fence import. */
++    dst->buf[1] = drm_map;
++    drm_map = NULL;
+
+ fail:
++    av_buffer_unref(&drm_map);
+     av_frame_free(&tmp);
+     return err;
+ }

@@ -1,0 +1,105 @@
+--- a/libavformat/avformat.h
++++ b/libavformat/avformat.h
+@@ -1434,6 +1434,7 @@
+ #define AVFMT_FLAG_SORT_DTS    0x10000 ///< try to interleave outputted packets by dts (using this flag can slow demuxing down)
+ #define AVFMT_FLAG_FAST_SEEK   0x80000 ///< Enable fast, but inaccurate seeks for some formats
+ #define AVFMT_FLAG_AUTO_BSF   0x200000 ///< Add bitstream filters as requested by the muxer
++#define AVFMT_FLAG_NO_PIXEL_PROBE 0x400000 ///< Probe video headers without reconstructing software pixels
+ 
+     /**
+      * Maximum number of bytes read from input in order to determine stream
+--- a/libavformat/options_table.h
++++ b/libavformat/options_table.h
+@@ -52,6 +52,7 @@
+ {"nobuffer", "reduce the latency introduced by optional buffering", 0, AV_OPT_TYPE_CONST, {.i64 = AVFMT_FLAG_NOBUFFER }, 0, INT_MAX, D, .unit = "fflags"},
+ {"bitexact", "do not write random/volatile data", 0, AV_OPT_TYPE_CONST, { .i64 = AVFMT_FLAG_BITEXACT }, 0, 0, E, .unit = "fflags" },
+ {"autobsf", "add needed bsfs automatically", 0, AV_OPT_TYPE_CONST, { .i64 = AVFMT_FLAG_AUTO_BSF }, 0, 0, E, .unit = "fflags" },
++{"no_pixel_probe", "probe video headers without software pixel decoding", 0, AV_OPT_TYPE_CONST, { .i64 = AVFMT_FLAG_NO_PIXEL_PROBE }, INT_MIN, INT_MAX, D, .unit = "fflags"},
+ {"seek2any", "allow seeking to non-keyframes on demuxer level when supported", OFFSET(seek2any), AV_OPT_TYPE_BOOL, {.i64 = 0 }, 0, 1, D},
+ {"analyzeduration", "specify how many microseconds are analyzed to probe the input", OFFSET(max_analyze_duration), AV_OPT_TYPE_INT64, {.i64 = 0 }, 0, (double)INT64_MAX, D},
+ {"cryptokey", "decryption key", OFFSET(key), AV_OPT_TYPE_BINARY, {.dbl = 0}, 0, 0, D},
+--- a/libavformat/demux.c
++++ b/libavformat/demux.c
+@@ -2134,6 +2134,13 @@
+     return 1;
+ }
+ 
++/* Only these native decoders have a verified ALL path before reconstruction.
++ * Other video decoders may ignore ALL or still reconstruct key frames. */
++static int no_pixel_probe_decoder(const AVCodec *codec)
++{
++    return codec && (!strcmp(codec->name, "h264") || !strcmp(codec->name, "hevc"));
++}
++
+ /* returns 1 or 0 if or if not decoded data was returned, or a negative error */
+ static int try_decode_frame(AVFormatContext *s, AVStream *st,
+                             const AVPacket *pkt, AVDictionary **options)
+@@ -2158,7 +2165,9 @@
+ 
+         codec = find_probe_decoder(s, st, st->codecpar->codec_id);
+ 
+-        if (!codec) {
++        if (!codec || ((s->flags & AVFMT_FLAG_NO_PIXEL_PROBE) &&
++                       avctx->codec_type == AVMEDIA_TYPE_VIDEO &&
++                       !no_pixel_probe_decoder(codec))) {
+             sti->info->found_decoder = -st->codecpar->codec_id;
+             ret                     = -1;
+             goto fail;
+@@ -2189,7 +2198,14 @@
+         goto fail;
+     }
+ 
+-    if (avpriv_codec_get_cap_skip_frame_fill_param(avctx->codec)) {
++    if ((s->flags & AVFMT_FLAG_NO_PIXEL_PROBE) &&
++        avctx->codec_type == AVMEDIA_TYPE_VIDEO &&
++        !no_pixel_probe_decoder(avctx->codec))
++        goto fail;
++
++    if (avpriv_codec_get_cap_skip_frame_fill_param(avctx->codec) ||
++        ((s->flags & AVFMT_FLAG_NO_PIXEL_PROBE) &&
++         avctx->codec_type == AVMEDIA_TYPE_VIDEO)) {
+         do_skip_frame = 1;
+         skip_frame = avctx->skip_frame;
+         avctx->skip_frame = AVDISCARD_ALL;
+@@ -2673,6 +2689,12 @@
+             sti->avctx_inited = 1;
+ 
+         codec = find_probe_decoder(ic, st, st->codecpar->codec_id);
++        if ((ic->flags & AVFMT_FLAG_NO_PIXEL_PROBE) &&
++            avctx->codec_type == AVMEDIA_TYPE_VIDEO &&
++            !no_pixel_probe_decoder(codec)) {
++            sti->info->found_decoder = -st->codecpar->codec_id;
++            codec = NULL;
++        }
+ 
+         /* Force thread count to 1 since the H.264 decoder will not extract
+          * SPS and PPS to extradata during multi-threaded decoding. */
+@@ -2949,6 +2971,10 @@
+             AVCodecContext *const avctx = ffstream(st)->avctx;
+             if (!has_codec_parameters(st, NULL)) {
+                 const AVCodec *codec = find_probe_decoder(ic, st, st->codecpar->codec_id);
++                if ((ic->flags & AVFMT_FLAG_NO_PIXEL_PROBE) &&
++                    avctx->codec_type == AVMEDIA_TYPE_VIDEO &&
++                    !no_pixel_probe_decoder(codec))
++                    codec = NULL;
+                 if (codec && !avctx->codec) {
+                     AVDictionary *opts = NULL;
+                     if (ic->codec_whitelist)
+--- a/libavformat/concatdec.c
++++ b/libavformat/concatdec.c
+@@ -356,6 +356,15 @@
+     ret = av_dict_copy(&options, file->options, 0);
+     if (ret < 0)
+         return ret;
++
++    /* Preserve this opt-in policy even if child options override fflags.
++     * Append before open: a nested concat can probe inside read_header. */
++    if ((avf->flags & AVFMT_FLAG_NO_PIXEL_PROBE) &&
++        (ret = av_dict_set(&options, "fflags", "+no_pixel_probe", AV_DICT_APPEND)) < 0) {
++        av_dict_free(&options);
++        avformat_close_input(&cat->avf);
++        return ret;
++    }
+ 
+     if ((ret = avformat_open_input(&cat->avf, file->url, NULL, &options)) < 0 ||
+         (ret = avformat_find_stream_info(cat->avf, NULL)) < 0) {

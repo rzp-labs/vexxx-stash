@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"image"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -13,55 +15,26 @@ import (
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/fsutil"
-	"golang.org/x/image/bmp"
 )
 
-func TestIntelSpriteEligibilityConservative(t *testing.T) {
-	valid := ffmpeg.IntelSource{Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, SampleAspectRatio: "1:1", FrameRate: "30/1", AverageFrameRate: "60/2", Duration: "10"}
-	if err := intelSpriteEligibility(valid, "vaapi"); err != nil {
-		t.Fatal(err)
+func TestIntelSpriteEligibilityGPU(t *testing.T) {
+	source := ffmpeg.IntelSource{Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, SampleAspectRatio: "1:1", FrameRate: "30/1", AverageFrameRate: "29/1", Duration: "10"}
+	if err := intelSpriteEligibility(source, "vaapi"); err != nil {
+		t.Fatal("timestamp-based VFR seeking rejected", err)
 	}
-	tests := []struct {
-		name   string
-		change func(*ffmpeg.IntelSource)
-	}{
-		{"short", func(s *ffmpeg.IntelSource) { s.Duration = "4.9" }},
-		{"duration unknown", func(s *ffmpeg.IntelSource) { s.Duration = "N/A" }},
-		{"unequal rates", func(s *ffmpeg.IntelSource) { s.AverageFrameRate = "29/1" }},
-		{"frame rate unknown", func(s *ffmpeg.IntelSource) { s.FrameRate = "0/0" }},
-		{"rotation", func(s *ffmpeg.IntelSource) { s.Rotation = 90 }},
-		{"10-bit", func(s *ffmpeg.IntelSource) { s.PixelFormat = "yuv420p10le" }},
-		{"HDR", func(s *ffmpeg.IntelSource) { s.ColorTransfer = "smpte2084" }},
-		{"anamorphic", func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "4:3" }},
-		{"SAR malformed", func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "0:0" }},
+	for _, sar := range []string{"", "N/A", "0:1", "1:1"} {
+		s := source
+		s.SampleAspectRatio = sar
+		if err := intelSpriteEligibility(s, "vaapi"); err != nil {
+			t.Fatal(sar, err)
+		}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := valid
-			tt.change(&s)
-			if err := intelSpriteEligibility(s, "vaapi"); err == nil {
-				t.Fatal("unsupported input accepted")
-			}
-		})
-	}
-}
-
-func TestIntelSpriteUnspecifiedSARRequiresCanonicalVAAPIScale(t *testing.T) {
-	for _, sar := range []string{"", "N/A", "0:1", "0/1"} {
-		t.Run(sar, func(t *testing.T) {
-			s := ffmpeg.IntelSource{Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080,
-				SampleAspectRatio: sar, FrameRate: "60/1", AverageFrameRate: "60/1", Duration: "10"}
-			if err := intelSpriteEligibility(s, "vaapi"); err != nil {
-				t.Fatal(err)
-			}
-			if err := intelSpriteEligibility(s, "qsv"); err == nil {
-				t.Fatal("QSV hardware scaler's unspecified-SAR guard changed")
-			}
-			s.DisplayAspectRatio = "4:3"
-			if err := intelSpriteEligibility(s, "vaapi"); err == nil {
-				t.Fatal("non-square display geometry accepted with absent SAR")
-			}
-		})
+	for _, change := range []func(*ffmpeg.IntelSource){func(s *ffmpeg.IntelSource) { s.Rotation = 45 }, func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "4:3" }, func(s *ffmpeg.IntelSource) { s.ColorTransfer = "smpte2084" }} {
+		s := source
+		change(&s)
+		if err := intelSpriteEligibility(s, "vaapi"); err == nil {
+			t.Fatalf("accepted %+v", s)
+		}
 	}
 }
 
@@ -106,34 +79,14 @@ func TestSpriteSequenceOrderFailureAndCancellation(t *testing.T) {
 	}
 }
 
-func TestIntelSpriteFallbackDoesNotCancelSheetAfterFirstTile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test fixture uses POSIX shell")
-	}
-	dir := t.TempDir()
-	tilePath := filepath.Join(dir, "tile.bmp")
-	f, err := os.Create(tilePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := bmp.Encode(f, image.NewNRGBA(image.Rect(0, 0, 160, 90))); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	command := filepath.Join(dir, "ffmpeg")
-	if err := os.WriteFile(command, []byte("#!/bin/sh\ncat '"+tilePath+"'\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	var diagnostics []ffmpeg.IntelGenerationDiagnostic
-	g := Generator{Encoder: ffmpeg.NewEncoder(command), LockManager: fsutil.NewReadLockManager(), IntelSprites: &ffmpeg.IntelGenerationConfig{Backend: "qsv", Device: "/dev/dri/renderD128"}, IntelDiagnostic: func(d ffmpeg.IntelGenerationDiagnostic) { diagnostics = append(diagnostics, d) }}
-	images, d, err := g.IntelSpriteTiles(context.Background(), "input.mp4", []float64{0, 1})
-	if err != nil || len(images) != 2 {
-		t.Fatalf("tiles=%d error=%v", len(images), err)
-	}
-	if d.Selected != "qsv" || d.Actual != "software" || d.Stage != "metadata" || len(diagnostics) != 1 || diagnostics[0] != d {
-		t.Fatalf("diagnostic=%+v callbacks=%+v", d, diagnostics)
+func TestIntelSpriteTileAPIRefusesGPUDownloads(t *testing.T) {
+	for _, backend := range []string{"vaapi", "qsv"} {
+		var called int
+		g := Generator{IntelSprites: &ffmpeg.IntelGenerationConfig{Backend: backend}, IntelDiagnostic: func(ffmpeg.IntelGenerationDiagnostic) { called++ }}
+		images, d, err := g.IntelSpriteTiles(context.Background(), "input.mp4", []float64{0, 1})
+		if err == nil || images != nil || d.Actual != "none" || called != 1 {
+			t.Fatalf("images=%v diagnostic=%+v error=%v callbacks=%d", images, d, err, called)
+		}
 	}
 }
 
@@ -143,24 +96,21 @@ func TestIntelSpriteMetadataDeletionWaitsForOwner(t *testing.T) {
 	}
 	dir := t.TempDir()
 	started := filepath.Join(dir, "started")
-	pipeReleased := filepath.Join(dir, "pipe-released")
+	released := filepath.Join(dir, "released")
 	binary := filepath.Join(dir, "ffprobe")
-	script := "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'ffprobe version 7.1'; exit 0; fi\n(sleep 0.3; : > '" + pipeReleased + "') &\n: > '" + started + "'\nexec sleep 30\n"
+	script := "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'ffprobe version 7.1'; exit 0; fi\n(sleep 0.3; : > '" + released + "') &\n: > '" + started + "'\nexec sleep 30\n"
 	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
+	input := filepath.Join(dir, "synthetic.mp4")
 	locks := fsutil.NewReadLockManager()
-	g := Generator{Probe: ffmpeg.NewFFProbe(binary), LockManager: locks, IntelSprites: &ffmpeg.IntelGenerationConfig{Backend: "vaapi"}}
+	ownerCleaned := make(chan struct{})
+	g := Generator{Probe: ffmpeg.NewFFProbe(binary), LockManager: locks, IntelSprites: &ffmpeg.IntelGenerationConfig{Backend: "vaapi"}, IntelDiagnostic: func(ffmpeg.IntelGenerationDiagnostic) { close(ownerCleaned) }}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ownerCleaned := make(chan struct{})
-	g.IntelDiagnostic = func(ffmpeg.IntelGenerationDiagnostic) { close(ownerCleaned) }
 	returned := make(chan error, 1)
 	go func() {
-		images, _, err := g.IntelSpriteTiles(ctx, "synthetic.mp4", []float64{0, 1})
-		if images != nil {
-			err = errors.New("cancelled sprite returned partial tiles")
-		}
+		_, err := g.IntelSpriteSheet(ctx, input, []float64{0, 1}, 9, 9, filepath.Join(dir, "out.jpg"))
 		returned <- err
 	}()
 	for {
@@ -168,49 +118,62 @@ func TestIntelSpriteMetadataDeletionWaitsForOwner(t *testing.T) {
 			break
 		}
 		if ctx.Err() != nil {
-			t.Fatal("fixture did not start")
+			t.Fatal("metadata fixture did not start")
 		}
 		runtime.Gosched()
 	}
-	locks.Cancel("synthetic.mp4")
-	if _, err := os.Stat(pipeReleased); err != nil {
-		t.Error("deletion returned before metadata process pipes were released")
+	locks.Cancel(input)
+	if _, err := os.Stat(released); err != nil {
+		t.Error("deletion returned before process pipes released")
 	}
-	// The callback runs after metadata cleanup; allow return scheduling separately.
 	select {
 	case <-ownerCleaned:
 	case <-ctx.Done():
-		t.Fatal("cancelled sprite failed to clean up")
+		t.Fatal("owner cleanup timed out")
 	}
 	select {
 	case err := <-returned:
 		if err == nil {
-			t.Error("cancelled metadata succeeded")
+			t.Fatal("cancelled metadata succeeded")
 		}
 	case <-ctx.Done():
-		t.Fatal("cancelled sprite failed to return")
+		t.Fatal("metadata did not return")
 	}
 }
 
-func TestIntelSpriteMain10ActualMetadataCadence(t *testing.T) {
-	source := ffmpeg.IntelSource{Codec: "hevc", Profile: "Main 10", PixelFormat: "yuv420p10le", Width: 8192, Height: 4096, ColorRange: "tv", ColorTransfer: "bt709", ColorPrimaries: "bt709", ColorSpace: "bt709", SampleAspectRatio: "1:1", FrameRate: "60000/1001", AverageFrameRate: "998386873/16659228", Duration: "2669.015617"}
-	if err := intelSpriteEligibility(source, "vaapi"); err != nil {
-		t.Fatal(err)
+func TestSoftwareSpriteTilesAcceptNewlineFilename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows filenames cannot contain newline")
 	}
-	if err := intelSpriteEligibility(source, "qsv"); err == nil {
-		t.Fatal("10-bit QSV accepted")
+	binary, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
 	}
-	for _, change := range []func(*ffmpeg.IntelSource){
-		func(s *ffmpeg.IntelSource) { s.Duration = "4.9" },
-		func(s *ffmpeg.IntelSource) { s.Rotation = 90 },
-		func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "2:1" },
-		func(s *ffmpeg.IntelSource) { s.FrameRate = "0/0" },
-		func(s *ffmpeg.IntelSource) { s.AverageFrameRate = "-1/1" },
-	} {
-		s := source
-		change(&s)
-		if err := intelSpriteEligibility(s, "vaapi"); err == nil {
-			t.Fatalf("unsafe sprite metadata accepted: %+v", s)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	input := filepath.Join(t.TempDir(), "source\nname.mp4")
+	cmd := exec.CommandContext(ctx, binary, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=2:duration=1", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "1", input)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v %s", err, output)
+	}
+	g := Generator{Encoder: ffmpeg.NewEncoder(binary), LockManager: fsutil.NewReadLockManager()}
+	images, d, err := g.IntelSpriteTiles(ctx, input, []float64{0, 0.5})
+	if err != nil || len(images) != 2 || d.Actual != "software" {
+		t.Fatalf("images=%d diagnostic=%+v error=%v", len(images), d, err)
+	}
+	for _, img := range images {
+		if img.Bounds().Size() != image.Pt(160, 90) {
+			t.Fatal(img.Bounds())
+		}
+	}
+}
+
+func TestSoftwareSpriteTilesRejectInvalidTimestampsBeforeRendering(t *testing.T) {
+	g := Generator{}
+	for _, times := range [][]float64{nil, {-1}, {1, 0}, {math.NaN()}, {math.Inf(1)}} {
+		images, _, err := g.IntelSpriteTiles(context.Background(), "source\nname.mp4", times)
+		if err == nil || images != nil {
+			t.Fatalf("accepted invalid timestamps %v", times)
 		}
 	}
 }

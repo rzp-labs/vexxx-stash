@@ -217,12 +217,18 @@ func (g Generator) generateWithContext(ctx context.Context, lockCtx *fsutil.Lock
 
 // GenerateOutput runs ffmpeg with the given args and returns it standard output.
 func (g Generator) generateOutput(lockCtx *fsutil.LockContext, args []string) ([]byte, error) {
-	args, release, err := g.acquireGeneration(lockCtx, args)
+	return g.generateOutputWithContext(lockCtx, lockCtx, args)
+}
+
+// A bounded probe starts its deadline after admission while source deletion
+// continues to own and drain the subprocess through the registered lock.
+func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsutil.LockContext, args []string) ([]byte, error) {
+	args, release, err := g.acquireGeneration(ctx, args)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(lockCtx)
+	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(ctx)
 	defer cancel()
 	cmd := g.Encoder.Command(execCtx, args)
 

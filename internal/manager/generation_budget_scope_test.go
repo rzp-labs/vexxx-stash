@@ -100,8 +100,8 @@ func TestIntelOnlyBudgetRetainsNativePoolExclusion(t *testing.T) {
 	}
 }
 
-func TestIntelSpriteManagerEligibilityFallbackKeepsAdmission(t *testing.T) {
-	for _, vr := range []bool{false, true} {
+func TestIntelSpriteManagerUnsupportedDoesNotFallback(t *testing.T) {
+	for _, vr := range []bool{true} {
 		c := config.InitializeEmpty()
 		c.SetString(config.SpriteGenerationBackend, "vaapi")
 		budget := c.GetIntelGenerationBudget()
@@ -112,11 +112,11 @@ func TestIntelSpriteManagerEligibilityFallbackKeepsAdmission(t *testing.T) {
 			req.vrMode = "LR180"
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-		_, handled, err := g.intelSpriteTiles(ctx, req)
+		handled, err := g.intelSpriteSheet(ctx, req)
 		cancel()
 		release()
-		if !handled || !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("manager eligibility fallback escaped Intel admission (VR=%t): %v", vr, err)
+		if !handled || err == nil || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("unsupported GPU sprite entered software renderer (VR=%t): %v", vr, err)
 		}
 	}
 }

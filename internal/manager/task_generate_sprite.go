@@ -25,7 +25,7 @@ func (t *GenerateSpriteTask) Start(ctx context.Context) error {
 		return nil
 	}
 
-	videoFile, err := instance.generationVideoFile(ctx, t.Scene.Path)
+	videoFile, err := instance.generationSpriteVideoFile(ctx, t.Scene.Path)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -34,7 +34,7 @@ func (t *GenerateSpriteTask) Start(ctx context.Context) error {
 			return err
 		}
 		logger.Errorf("error reading video file: %s", err.Error())
-		return nil
+		return fmt.Errorf("reading sprite source: %w", err)
 	}
 
 	sceneHash := t.Scene.GetHash(t.fileNamingAlgorithm)
@@ -50,7 +50,7 @@ func (t *GenerateSpriteTask) Start(ctx context.Context) error {
 			return err
 		}
 		logger.Errorf("error creating sprite generator: %s", err.Error())
-		return nil
+		return fmt.Errorf("creating sprite generator: %w", err)
 	}
 	generator.Overwrite = t.Overwrite
 
@@ -67,7 +67,7 @@ func (t *GenerateSpriteTask) Start(ctx context.Context) error {
 	if err := generator.Generate(ctx); err != nil {
 		logger.Errorf("error generating sprite: %s", err.Error())
 		logErrorOutput(err)
-		return nil
+		return fmt.Errorf("generating sprite: %w", err)
 	}
 	return nil
 }

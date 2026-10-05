@@ -151,6 +151,34 @@ func TestGenerationMetadataCanonicalAndIndependentDefaults(t *testing.T) {
 	release()
 }
 
+func TestGPUGenerationMetadataUsesHeaderOnlyPolicy(t *testing.T) {
+	for _, kind := range []string{"sprite", "preview"} {
+		t.Run(kind, func(t *testing.T) {
+			mgr, input, argsPath, _ := metadataFixture(t)
+			setting := config.SpriteGenerationBackend
+			probe := mgr.generationSpriteVideoFile
+			if kind == "preview" {
+				setting, probe = config.PreviewGenerationBackend, mgr.generationPreviewVideoFile
+			}
+			mgr.Config.SetInterface(setting, "vaapi")
+			if _, err := probe(context.Background(), input); err != nil {
+				t.Fatal(err)
+			}
+			args, err := os.ReadFile(argsPath)
+			if err != nil || !strings.Contains(string(args), "-fflags\n+no_pixel_probe\n") {
+				t.Fatalf("GPU source metadata can decode on CPU: %s %v", args, err)
+			}
+			if _, err := mgr.FFProbe.NewVideoFile(input); err != nil {
+				t.Fatal(err)
+			}
+			args, _ = os.ReadFile(argsPath)
+			if strings.Contains(string(args), "no_pixel_probe") {
+				t.Fatalf("GPU source metadata policy leaked into shared scan/playback: %s", args)
+			}
+		})
+	}
+}
+
 func TestGenerationMetadataActiveCancelReleasesPermit(t *testing.T) {
 	mgr, input, _, block := metadataFixture(t)
 	if err := os.WriteFile(block, []byte("block"), 0600); err != nil {

@@ -54,7 +54,7 @@ func TestIntelEligibility(t *testing.T) {
 	}{
 		{"codec", func(s *IntelSource) { s.Codec = "vp9" }},
 		{"10bit", func(s *IntelSource) { s.PixelFormat = "yuv420p10le" }},
-		{"rotation", func(s *IntelSource) { s.Rotation = 180 }},
+		{"rotation", func(s *IntelSource) { s.Rotation = 45 }},
 		{"pq", func(s *IntelSource) { s.ColorTransfer = "smpte2084" }},
 		{"hlg", func(s *IntelSource) { s.ColorTransfer = "arib-std-b67" }},
 		{"widegamut", func(s *IntelSource) { s.ColorPrimaries = "bt2020" }},
@@ -237,7 +237,7 @@ func TestIntelProbeRejectsEmptyOutput(t *testing.T) {
 							var cpu Args
 							for i := 0; i < len(args); i++ {
 								switch args[i] {
-								case "-init_hw_device", "-filter_hw_device", "-hwaccel", "-hwaccel_device", "-hwaccel_output_format", "-c:v":
+								case "-init_hw_device", "-filter_hw_device", "-hwaccel", "-hwaccel_device", "-hwaccel_output_format", "-hwaccel_strict", "-c:v":
 									i++
 								case "-vf":
 									i++

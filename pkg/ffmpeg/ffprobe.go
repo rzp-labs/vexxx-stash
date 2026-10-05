@@ -222,6 +222,16 @@ func (f *FFProbe) NewVideoFile(videoPath string) (*VideoFile, error) {
 // an optional decoder thread request. Zero preserves legacy FFProbe arguments.
 // Admission belongs to the caller, so scan/playback probes remain independent.
 func (f *FFProbe) NewVideoFileContext(ctx context.Context, videoPath string, threads int) (*VideoFile, error) {
+	return f.newVideoFileContext(ctx, videoPath, threads, false)
+}
+
+// NewVideoFileMetadataContext is generation's header-only GPU source inspection.
+// Scan/playback and explicitly selected software generation keep legacy probing.
+func (f *FFProbe) NewVideoFileMetadataContext(ctx context.Context, videoPath string, threads int) (*VideoFile, error) {
+	return f.newVideoFileContext(ctx, videoPath, threads, true)
+}
+
+func (f *FFProbe) newVideoFileContext(ctx context.Context, videoPath string, threads int, metadataOnly bool) (*VideoFile, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -235,6 +245,9 @@ func (f *FFProbe) NewVideoFileContext(ctx context.Context, videoPath string, thr
 	}
 	if threads > 0 {
 		args = append(args, "-threads", strconv.Itoa(threads))
+	}
+	if metadataOnly {
+		args = append(args, "-fflags", "+no_pixel_probe")
 	}
 
 	// show_entries stream_side_data=rotation requires 5.x or later ffprobe
@@ -250,6 +263,9 @@ func (f *FFProbe) NewVideoFileContext(ctx context.Context, videoPath string, thr
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
+		}
+		if metadataOnly {
+			err = gpuMetadataProbeError(err)
 		}
 		return nil, fmt.Errorf("FFProbe encountered an error with <%s>.\nError JSON:\n%s\nError: %s", videoPath, string(out), err.Error())
 	}

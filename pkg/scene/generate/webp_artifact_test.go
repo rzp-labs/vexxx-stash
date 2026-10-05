@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,13 @@ func TestAnimatedWebPArtifactLossless(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	encoders, err := exec.CommandContext(ctx, path, "-hide_banner", "-encoders").Output()
+	if err != nil {
+		t.Fatalf("encoder capabilities: %v", err)
+	}
+	if !strings.Contains(string(encoders), "libwebp ") {
+		t.Skip("FFmpeg build lacks libwebp encoding")
+	}
 	encoder := ffmpeg.NewEncoder(path)
 	dir := t.TempDir()
 	input := filepath.Join(dir, "synthetic.mp4")

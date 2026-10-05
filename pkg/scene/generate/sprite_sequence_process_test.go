@@ -21,7 +21,7 @@ import (
 	"golang.org/x/image/bmp"
 )
 
-func TestIntelSpriteFallbackUsesTotalWorkerBudget(t *testing.T) {
+func TestSoftwareSpriteUsesTotalWorkerBudget(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix subprocess fixture")
 	}
@@ -43,13 +43,13 @@ func TestIntelSpriteFallbackUsesTotalWorkerBudget(t *testing.T) {
 	}
 	defer os.WriteFile(gate, nil, 0600)
 	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: 2})
-	g := Generator{FFMpegConfig: intelOnlyBudgetConfig{intel: budget}, Encoder: ffmpeg.NewEncoder(binary), LockManager: fsutil.NewReadLockManager(), IntelSprites: &ffmpeg.IntelGenerationConfig{Backend: "vaapi"}}
+	g := Generator{Budget: budget, Encoder: ffmpeg.NewEncoder(binary), LockManager: fsutil.NewReadLockManager()}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		images, d, err := g.IntelSpriteTiles(ctx, "input.mp4", []float64{0, 1, 2, 3, 4, 5})
-		if err == nil && (len(images) != 6 || d.Stage != "metadata" || d.Actual != "software") {
+		if err == nil && (len(images) != 6 || d.Stage != "" || d.Actual != "software") {
 			err = fmt.Errorf("tiles=%d diagnostic=%+v", len(images), d)
 		}
 		done <- err
@@ -76,8 +76,8 @@ func TestIntelSpriteFallbackUsesTotalWorkerBudget(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if g.generationBudget() != nil {
-		t.Fatal("Intel fallback mutated ordinary CPU scope")
+	if g.generationBudget() != budget {
+		t.Fatal("software rendering changed configured budget")
 	}
 }
 

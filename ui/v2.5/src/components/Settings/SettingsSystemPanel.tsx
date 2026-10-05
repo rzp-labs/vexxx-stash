@@ -239,18 +239,18 @@ export const IntelGenerationSettings: React.FC = () => {
             </option>
             <option value="vaapi">Intel VAAPI</option>
             {key !== "generationPreviewBackend" && (
-              <option value="qsv" disabled={key === "generationMarkerBackend"}>
-                {key === "generationMarkerBackend"
-                  ? intl.formatMessage({
-                      id: "config.general.generation.qsv_marker_pending",
-                    })
-                  : "Intel QSV"}
+              <option value="qsv" disabled>
+                {intl.formatMessage({
+                  id: "config.general.generation.qsv_marker_pending",
+                })}
               </option>
             )}
           </SelectSetting>
         ))}
         {(draft.generationMarkerBackend === "qsv" ||
-          persisted.generationMarkerBackend === "qsv") && (
+          persisted.generationMarkerBackend === "qsv" ||
+          draft.generationSpriteBackend === "qsv" ||
+          persisted.generationSpriteBackend === "qsv") && (
           <Alert severity="warning">
             <FormattedMessage id="config.general.generation.qsv_marker_fallback" />
           </Alert>

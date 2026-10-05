@@ -126,7 +126,7 @@ func (t *GeneratePreviewTask) generateVideo(ctx context.Context, videoChecksum s
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// The Intel coordinator already performed its one canonical slow-seek retry.
+		// Explicit GPU selection must not retry with software rendering.
 		if t.generator.IntelPreviews != nil && t.generator.IntelPreviews.Enabled() {
 			return err
 		}
