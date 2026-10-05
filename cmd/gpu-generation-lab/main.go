@@ -54,24 +54,43 @@ func (p labScenePaths) GetTranscodePath(string) string     { return filepath.Joi
 func main() {
 	input := flag.String("fixture", "", "explicit authorized synthetic fixture")
 	out := flag.String("output-dir", "", "new result directory (never overwrite)")
-	workload := flag.String("workload", "marker", "marker, webp, sprites or mixed")
+	workload := flag.String("workload", "marker", "marker, preview, webp, sprites or mixed")
 	hashFixture := flag.String("phash-fixture", "", "mixed only: separate authorized 640x360 synthetic fixture")
 	cancelAfter := flag.Duration("cancel-after", 0, "cancel generation after this duration (0 disables; maximum50s)")
 	backend := flag.String("backend", "software", "software, qsv or vaapi")
 	device := flag.String("device", "/dev/dri/renderD128", "explicit render device")
 	legacyCPU := flag.Bool("legacy-cpu", false, "software baseline without candidate budget")
 	vr := flag.String("vr", "", "explicit VR projection for marker/webp")
-	audio := flag.Bool("audio", false, "include marker audio")
+	audio := flag.Bool("audio", false, "include marker/scene audio")
+	previewPreset := flag.String("preview-preset", "slow", "canonical CPU scene preview preset")
+	previewSegments := flag.Int("preview-segments", 3, "isolated preview segment count2..12, each0.75 seconds")
 	start := flag.Float64("start", 1, "start seconds")
 	duration := flag.Float64("duration", 2, "marker duration, at most20 seconds")
+	samplingSpan := flag.Float64("sampling-span", 0, "optional timestamp span for sprite/preview seeks; does not increase output duration")
 	tiles := flag.Int("tiles", 3, "sprite sample count1..81")
+	spriteFrames := flag.Bool("sprite-frames", false, "sprites only: count source frames on GPU and use canonical short-clip frame sampling")
+	processes := flag.Int("processes", 1, "configured total process limit")
+	gpuProcesses := flag.Int("gpu-processes", 1, "configured GPU process limit")
+	threads := flag.Int("threads", 1, "configured FFmpeg threads")
 	flag.Parse()
 	if *input == "" || *out == "" || !validLabTiming(*start, *duration) || *tiles < 1 || *tiles > 81 {
 		fmt.Fprintln(os.Stderr, "explicit fixture/new output-dir and bounded positive duration/tile count required")
 		os.Exit(2)
 	}
+	if math.IsNaN(*samplingSpan) || math.IsInf(*samplingSpan, 0) || *samplingSpan < 0 {
+		fmt.Fprintln(os.Stderr, "sampling-span must be finite and nonnegative")
+		os.Exit(2)
+	}
 	if *backend != "software" && *backend != "qsv" && *backend != "vaapi" {
 		fmt.Fprintln(os.Stderr, "invalid backend")
+		os.Exit(2)
+	}
+	if *spriteFrames && (*workload != "sprites" || *backend != "vaapi") {
+		fmt.Fprintln(os.Stderr, "sprite-frames requires sprites workload and explicit VAAPI backend")
+		os.Exit(2)
+	}
+	if *previewSegments < 2 || *previewSegments > 12 {
+		fmt.Fprintln(os.Stderr, "isolated preview segment count must be2..12")
 		os.Exit(2)
 	}
 	if *cancelAfter < 0 || *cancelAfter > 50*time.Second || (*workload == "mixed" && (*legacyCPU || *hashFixture == "" || *vr != "" || *audio)) {
@@ -88,7 +107,11 @@ func main() {
 		timer := time.AfterFunc(*cancelAfter, cancel)
 		defer timer.Stop()
 	}
-	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
+	budget, budgetErr := generationbudget.New(generationbudget.Settings{MaxProcesses: *processes, MaxGPUProcesses: *gpuProcesses, Threads: *threads})
+	if budgetErr != nil {
+		fmt.Fprintln(os.Stderr, budgetErr)
+		os.Exit(2)
+	}
 	if *legacyCPU {
 		if *backend != "software" {
 			fmt.Fprintln(os.Stderr, "legacy-cpu requires software backend")
@@ -109,6 +132,7 @@ func main() {
 		cfg := &ffmpeg.IntelGenerationConfig{Backend: *backend, Device: *device, ProbeTimeout: 10 * time.Second}
 		g.IntelMarker = cfg
 		g.IntelSprites = cfg
+		g.IntelPreviews = cfg
 	}
 	var err error
 	validation := map[string]any{"status": "untested"}
@@ -136,6 +160,18 @@ func main() {
 		if err == nil {
 			validation, err = validateMarker(ctx, output, expectedDuration)
 		}
+	case "preview":
+		span := *duration
+		if *samplingSpan > 0 {
+			span = *samplingSpan
+		}
+		end := *start + span
+		opts := generate.PreviewOptions{Segments: *previewSegments, SegmentDuration: 0.75, LimitStart: start, LimitEnd: &end, Audio: *audio, Preset: *previewPreset}
+		err = g.PreviewVideo(ctx, *input, span, "synthetic", opts, *vr, false, false)
+		output = g.ScenePaths.GetVideoPreviewPath("synthetic")
+		if err == nil {
+			validation = map[string]any{"status": "passed", "visual": "untested"}
+		}
 	case "webp":
 		err = g.SceneMarkerWebp(ctx, *input, "synthetic", *start, *vr)
 		output = paths.GetWebpPreviewPath("", 0)
@@ -148,40 +184,92 @@ func main() {
 		}
 	case "sprites":
 		times := make([]float64, *tiles)
+		span := *duration
+		if *samplingSpan > 0 {
+			span = *samplingSpan
+		}
 		for i := range times {
-			times[i] = *start + float64(i)*(*duration/float64(*tiles))
+			times[i] = *start + float64(i)*(span/float64(*tiles))
 		}
-		images, _, e := g.IntelSpriteTiles(ctx, *input, times)
-		err = e
-		if err == nil {
-			if len(images) != *tiles {
-				err = fmt.Errorf("sprite tile count %d, expected%d", len(images), *tiles)
-				break
-			}
-			for _, img := range images {
-				if img.Bounds().Dx() != 160 || img.Bounds().Dy() != 90 {
-					err = fmt.Errorf("synthetic tile geometry %v", img.Bounds())
-					break
+		output = filepath.Join(*out, "sprite.jpg")
+		var sampledFrames []int
+		if *spriteFrames {
+			info, frameErr := g.IntelSpriteFrameInfo(ctx, *input)
+			err = frameErr
+			if err == nil {
+				sampledFrames = make([]int, *tiles)
+				for i := range sampledFrames {
+					sampledFrames[i] = int(math.Round(float64(i) * float64(info.NumberOfFrames-1) / float64(*tiles)))
 				}
+				_, err = g.IntelSpriteSheetFrames(ctx, *input, sampledFrames, 9, 9, output)
 			}
-			if err != nil {
-				break
+		} else if g.IntelSprites != nil && g.IntelSprites.Enabled() {
+			_, err = g.IntelSpriteSheet(ctx, *input, times, 9, 9, output)
+		} else {
+			images, _, e := g.IntelSpriteTiles(ctx, *input, times)
+			err = e
+			if err == nil && len(images) != *tiles {
+				err = fmt.Errorf("sprite tile count %d, expected%d", len(images), *tiles)
 			}
-			output = filepath.Join(*out, "sprite.jpg")
-			err = g.SaveSprite(ctx, images, output)
-			if err == nil && *tiles == 81 {
-				err = g.SpriteVTT(ctx, filepath.Join(*out, "sprite.vtt"), output, *duration/81, *start)
+			if err == nil {
+				err = g.SaveSprite(ctx, images, output)
 			}
-
-			validation = map[string]any{"status": "passed", "tile_count": len(images), "tile_width": 160, "tile_height": 90, "timestamps": times, "visual": "untested", "vtt": "generated for full81 only"}
 		}
+		if err == nil && *tiles == 81 && !*spriteFrames {
+			err = g.SpriteVTT(ctx, filepath.Join(*out, "sprite.vtt"), output, span/81, *start)
+		}
+		if err == nil {
+			validation = map[string]any{"status": "passed", "tile_count": *tiles, "timestamps": times, "visual": "untested", "vtt": "generated for full81 only"}
+			if *spriteFrames {
+				validation["frame_numbers"] = sampledFrames
+				delete(validation, "timestamps")
+				validation["vtt"] = "not generated for frame sampling in isolated lab"
+			}
+		}
+
 	default:
 		err = fmt.Errorf("unknown workload")
 	}
 	if len(diagnostics) == 0 {
-		diagnostics = append(diagnostics, ffmpeg.IntelGenerationDiagnostic{Selected: *backend, Actual: "software"})
+		actual := "none"
+		if *backend == "software" {
+			actual = "software"
+		}
+		diagnostic := ffmpeg.IntelGenerationDiagnostic{Selected: *backend, Actual: actual}
+		if err != nil {
+			diagnostic.Stage = "generation"
+			diagnostic.Reason = err.Error()
+		}
+		diagnostics = append(diagnostics, diagnostic)
 	}
 	report := map[string]any{"workload": *workload, "diagnostics": diagnostics, "output_validation": validation, "output": output}
+	if budget != nil {
+		// Reuse the mixed driver's fresh-context drain check after all workload
+		// coordinators return, including cancellation. Do not run another render.
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), time.Second)
+		var releases []func()
+		var drainErr error
+		for i := 0; i < budget.Settings().MaxProcesses; i++ {
+			kind := generationbudget.CPU
+			if i < budget.Settings().MaxGPUProcesses {
+				kind = generationbudget.GPU
+			}
+			var release func()
+			release, drainErr = budget.Acquire(drainCtx, kind)
+			if drainErr != nil {
+				break
+			}
+			releases = append(releases, release)
+		}
+		for _, release := range releases {
+			release()
+		}
+		drainCancel()
+		report["budget_reusable"] = drainErr == nil
+		if drainErr != nil && err == nil {
+			err = fmt.Errorf("generation budget did not drain: %w", drainErr)
+		}
+	}
 	if *workload == "mixed" {
 		// A last diagnostic from the CPU hash cannot summarize an Intel sprite
 		// workload. Actual backends are attributed in output_validation.jobs.

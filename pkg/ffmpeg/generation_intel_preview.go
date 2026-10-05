@@ -18,7 +18,7 @@ func (f *FFProbe) IntelPreviewSource(ctx context.Context, input string) (IntelSo
 func (s IntelSource) ValidatePreview() error {
 	if s.isMain10Sprite() {
 		// Only this documented SDR Main10 combination is converted to the scene
-		// preview's 8-bit output. HDR/wide gamut requires the canonical CPU path.
+		// preview's 8-bit output. HDR/wide gamut is not supported by this path.
 		s.PixelFormat = "yuv420p"
 	}
 	if err := s.Validate(); err != nil {
@@ -30,9 +30,9 @@ func (s IntelSource) ValidatePreview() error {
 	return nil
 }
 
-// NewIntelPreviewPlan uses canonical swscale before VAAPI encoding: retain
-// source precision and color conversion rather than implicitly reducing P010
-// through VPP. CPU scaling remains, but both decode and H.264 encode use the GPU.
+// NewIntelPreviewPlan keeps hardware frames resident through VAAPI scaling,
+// color/pixel conversion and H.264 encoding. Actual-source probes exercise the
+// same pipeline; unsupported hardware never authorizes a software retry.
 func NewIntelPreviewPlan(config IntelGenerationConfig, source IntelSource, input string, start float64, width int) (IntelGenerationPlan, error) {
 	p := IntelGenerationPlan{Config: config, Source: source}
 	if config.Backend != "vaapi" {
@@ -45,11 +45,18 @@ func NewIntelPreviewPlan(config IntelGenerationConfig, source IntelSource, input
 		return p, fmt.Errorf("preview output width must be positive and even")
 	}
 	p.InputArgs = IntelInputArgs(config, source)
-	transfer := "hwdownload,format=nv12,format=yuv420p"
-	if source.PixelFormat == "yuv420p10le" {
-		transfer = "hwdownload,format=p010le,format=yuv420p10le"
+	p.Filter = IntelScaleFilter(config, source, width, false) + ":mode=hq"
+	// VPP must preserve the source interpretation even after resizing below
+	// common SD/HD matrix boundaries. Unspecified tags remain unspecified.
+	if source.ColorSpace != "" && source.ColorSpace != "unknown" && source.ColorSpace != "unspecified" {
+		p.Filter += ":out_color_matrix=" + source.ColorSpace
 	}
-	p.Filter = fmt.Sprintf("%s,scale=%d:-2,format=yuv420p,format=nv12,hwupload", transfer, width)
+	switch source.ColorRange {
+	case "tv":
+		p.Filter += ":out_range=limited"
+	case "pc":
+		p.Filter += ":out_range=full"
+	}
 	base := Args{"-v", "error", "-nostdin", "-abort_on", "empty_output", "-threads", "1"}
 	base = append(base, p.InputArgs...)
 	if start > 0 {
@@ -68,7 +75,6 @@ func NewIntelPreviewPlan(config IntelGenerationConfig, source IntelSource, input
 		p.Probes = append(p.Probes, IntelProbeStep{stage, append(args, "-f", "null", "-")})
 	}
 	probe("decode", "", false)
-	probe("download", transfer, false)
 	probe("filter", p.Filter, false)
 	probe("encode", p.Filter, true)
 	return p, nil

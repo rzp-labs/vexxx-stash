@@ -2,7 +2,6 @@ package generate
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 
@@ -124,6 +123,14 @@ func markerIntelArgs(input, output string, options sceneMarkerOptions, plan ffmp
 	} else {
 		videoArgs = append(videoArgs, "-qp", "24")
 	}
+	for _, tag := range []struct{ key, value string }{
+		{"-color_primaries", plan.Source.ColorPrimaries}, {"-color_trc", plan.Source.ColorTransfer},
+		{"-colorspace", plan.Source.ColorSpace}, {"-color_range", plan.Source.ColorRange},
+	} {
+		if tag.value != "" && tag.value != "unknown" && tag.value != "unspecified" {
+			videoArgs = append(videoArgs, tag.key, tag.value)
+		}
+	}
 	o := transcoder.TranscodeOptions{StartTime: options.Seconds, Duration: options.Duration, OutputPath: output,
 		VideoCodec: ffmpeg.VideoCodec{Name: "h264_" + plan.Config.Backend, CodeName: "h264_" + plan.Config.Backend}, VideoArgs: videoArgs,
 		ExtraInputArgs:  append(append([]string{}, plan.InputArgs...), "-threads", "1"),
@@ -156,50 +163,35 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 		return err
 	}
 	g = g.WithIntelGenerationBudget()
-	softwareAttempt := func(ctx context.Context) error {
-		if err := g.generateWithContext(ctx, lockCtx, software); err != nil {
-			return err
-		}
-		return g.validateIntelMarkerOutput(ctx, output)
-	}
-	fallback := func(stage string, err error) error {
+	reject := func(stage string, err error) error {
 		if lockCtx.Err() != nil {
 			return lockCtx.Err()
 		}
-		d := ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelMarker.Backend, Actual: "software", Stage: stage, Reason: err.Error()}
-		fallbackErr := softwareAttempt(lockCtx)
-		var outputErr *ffmpeg.GenerationOutputError
-		if errors.As(fallbackErr, &outputErr) {
-			d.Stage = "output"
-			d.Reason = fallbackErr.Error()
-		}
-		logger.Warnf("marker generation selected=%s actual=software stage=%s reason=%s", g.IntelMarker.Backend, d.Stage, d.Reason)
+		d := ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelMarker.Backend, Actual: "none", Stage: stage, Reason: err.Error()}
+		logger.Warnf("marker generation selected=%s actual=none stage=%s reason=%s", g.IntelMarker.Backend, stage, d.Reason)
 		if g.IntelDiagnostic != nil {
 			g.IntelDiagnostic(d)
 		}
-		return fallbackErr
+		return fmt.Errorf("GPU marker preview %s: %w", stage, err)
 	}
 	if g.IntelMarker.Backend == "qsv" {
-		return fallback("quality", fmt.Errorf("QSV marker quality mapping has not passed representative visual acceptance; software generation required"))
+		return reject("quality", fmt.Errorf("QSV marker quality mapping has not passed representative visual acceptance; explicitly select VAAPI or software generation"))
 	}
 	if options.VRMode != "" {
-		return fallback("eligibility", fmt.Errorf("VR projection requires software generation"))
+		return reject("eligibility", fmt.Errorf("GPU VR projection is unsupported; explicitly select software generation"))
 	}
 	release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
 	if err != nil {
 		return err
 	}
-	source, err := g.Probe.IntelSource(lockCtx, input)
+	source, err := g.Probe.IntelPreviewSource(lockCtx, input)
 	release()
 	if err != nil {
-		return fallback("metadata", err)
+		return reject("metadata", err)
 	}
-	if source.SampleAspectRatio != "1:1" && source.SampleAspectRatio != "1/1" && source.SampleAspectRatio != "1" {
-		return fallback("eligibility", fmt.Errorf("sample aspect ratio %q requires software generation until display geometry is validated", source.SampleAspectRatio))
-	}
-	plan, err := ffmpeg.NewIntelGenerationPlan(*g.IntelMarker, source, input, options.Seconds, markerPreviewWidth, false)
+	plan, err := ffmpeg.NewIntelPreviewPlan(*g.IntelMarker, source, input, options.Seconds, markerPreviewWidth)
 	if err != nil {
-		return fallback("eligibility", err)
+		return reject("eligibility", err)
 	}
 	runner := func(ctx context.Context, args ffmpeg.Args) error {
 		return g.generateWithContext(ctx, lockCtx, args)
@@ -210,7 +202,7 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 				return err
 			}
 			return g.validateIntelMarkerOutput(ctx, output)
-		}, softwareAttempt, runner)
+		}, nil, runner)
 	if g.IntelDiagnostic != nil {
 		g.IntelDiagnostic(diagnostic)
 	}
@@ -258,6 +250,13 @@ func (g Generator) SceneMarkerWebp(ctx context.Context, input string, hash strin
 
 func (g Generator) sceneMarkerWebp(input string, options sceneMarkerOptions) generateFn {
 	return func(lockCtx *fsutil.LockContext, tmpFn string) error {
+		if g.IntelMarker != nil && g.IntelMarker.Enabled() {
+			err := fmt.Errorf("GPU marker lossless animated WebP encoding is unsupported; explicitly select software generation")
+			if g.IntelDiagnostic != nil {
+				g.IntelDiagnostic(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelMarker.Backend, Actual: "none", Stage: "webp", Reason: err.Error()})
+			}
+			return err
+		}
 		var videoFilter ffmpeg.VideoFilter
 		switch options.VRMode {
 		case "LR180":
@@ -301,8 +300,10 @@ func (g Generator) sceneMarkerWebp(input string, options sceneMarkerOptions) gen
 }
 
 func (g Generator) SceneMarkerScreenshot(ctx context.Context, input string, hash string, seconds float64, width int, vrMode string) error {
-	lockCtx := g.LockManager.ReadLock(ctx, input)
+	done := make(chan struct{})
+	lockCtx := g.LockManager.ReadLockWithCompletion(ctx, input, done)
 	defer lockCtx.Cancel()
+	defer close(done)
 
 	output := g.MarkerPaths.GetScreenshotPath(hash, int(seconds))
 	if !g.Overwrite {
@@ -332,6 +333,9 @@ type SceneMarkerScreenshotOptions struct {
 
 func (g Generator) sceneMarkerScreenshot(input string, options SceneMarkerScreenshotOptions) generateFn {
 	return func(lockCtx *fsutil.LockContext, tmpFn string) error {
+		if g.IntelMarker != nil && g.IntelMarker.Enabled() {
+			return g.generateIntelMarkerScreenshot(lockCtx, input, tmpFn, options)
+		}
 		ssOptions := transcoder.ScreenshotOptions{
 			OutputPath: tmpFn,
 			OutputType: transcoder.ScreenshotOutputTypeImage2,
@@ -344,4 +348,55 @@ func (g Generator) sceneMarkerScreenshot(input string, options SceneMarkerScreen
 
 		return g.generate(lockCtx, args)
 	}
+}
+
+// A requested GPU marker still uses the same resident VAAPI JPEG pipeline as
+// sprites. No BMP export or Go image encode is involved in this leaf operation.
+func (g Generator) generateIntelMarkerScreenshot(lockCtx *fsutil.LockContext, input, output string, options SceneMarkerScreenshotOptions) error {
+	g = g.WithIntelGenerationBudget()
+	reject := func(stage string, reason error) error {
+		if err := lockCtx.Err(); err != nil {
+			return err
+		}
+		if g.IntelDiagnostic != nil {
+			g.IntelDiagnostic(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelMarker.Backend, Actual: "none", Stage: stage, Reason: reason.Error()})
+		}
+		return fmt.Errorf("GPU marker screenshot %s: %w", stage, reason)
+	}
+	if options.VRMode != "" {
+		return reject("eligibility", fmt.Errorf("GPU VR projection is unsupported; explicitly select software generation"))
+	}
+	if math.IsNaN(options.Seconds) || math.IsInf(options.Seconds, 0) || options.Seconds < 0 {
+		return reject("eligibility", fmt.Errorf("marker screenshot requires a finite nonnegative start"))
+	}
+	release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
+	if err != nil {
+		return err
+	}
+	source, err := g.Probe.IntelSpriteSource(lockCtx, input, g.IntelMarker.Backend)
+	release()
+	if err != nil {
+		return reject("metadata", err)
+	}
+	width := options.Width
+	if width <= 0 {
+		width = source.Width
+	}
+	plan, err := ffmpeg.NewIntelSpritePlan(*g.IntelMarker, source, input, options.Seconds, width)
+	if err != nil {
+		return reject("eligibility", err)
+	}
+	runner := func(ctx context.Context, args ffmpeg.Args) error { return g.generateWithContext(ctx, lockCtx, args) }
+	diagnostic, err := ffmpeg.RunIntelGenerationWork(lockCtx, plan, func(ctx context.Context) error {
+		args := transcoder.IntelSpriteScreenshot(input, options.Seconds, plan)
+		args[len(args)-1] = output
+		if err := runner(ctx, args); err != nil {
+			return err
+		}
+		return g.validateIntelMarkerOutput(ctx, output)
+	}, nil, runner)
+	if g.IntelDiagnostic != nil {
+		g.IntelDiagnostic(diagnostic)
+	}
+	return err
 }

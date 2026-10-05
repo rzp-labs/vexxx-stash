@@ -44,6 +44,11 @@ const nativePreviewQP = 22
 // It reports whether it produced the preview. A false return is not a failure:
 // it means the native path declined and the caller should run the ffmpeg one.
 func (t *GeneratePreviewTask) previewVideo(ctx context.Context, req previewRequest) bool {
+	// An explicitly selected Intel backend owns the rendering contract. The
+	// native image pipeline must not intercept it or obscure capability errors.
+	if t.generator != nil && t.generator.IntelPreviews != nil && t.generator.IntelPreviews.Enabled() {
+		return false
+	}
 	if !nativeGenerationEnabled() {
 		return false
 	}

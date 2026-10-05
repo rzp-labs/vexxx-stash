@@ -18,7 +18,7 @@ func TestIntelMarkerDeletionWaitsForCleanup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix subprocess fixture")
 	}
-	for _, stage := range []string{"software-fallback", "metadata"} {
+	for _, stage := range []string{"explicit-software", "metadata"} {
 		t.Run(stage, func(t *testing.T) {
 			dir := t.TempDir()
 			started := filepath.Join(dir, "started")
@@ -36,9 +36,8 @@ func TestIntelMarkerDeletionWaitsForCleanup(t *testing.T) {
 			}
 			locks := fsutil.NewReadLockManager()
 			g := Generator{LockManager: locks, MarkerPaths: paths, Overwrite: true}
-			if stage == "software-fallback" {
+			if stage == "explicit-software" {
 				g.Encoder = ffmpeg.NewEncoder(binary)
-				g.IntelMarker = &ffmpeg.IntelGenerationConfig{Backend: "qsv"}
 			} else {
 				g.Probe = ffmpeg.NewFFProbe(binary)
 				g.IntelMarker = &ffmpeg.IntelGenerationConfig{Backend: "vaapi"}
@@ -80,10 +79,10 @@ func TestIntelMarkerDeletionWaitsForCleanup(t *testing.T) {
 }
 
 func TestMarkerIntelCommandPreservesContract(t *testing.T) {
-	for _, backend := range []string{"vaapi", "qsv"} {
+	for _, backend := range []string{"vaapi"} {
 		for _, audio := range []bool{false, true} {
-			source := ffmpeg.IntelSource{Codec: "hevc", PixelFormat: "yuv420p", Width: 1920, Height: 1080, StreamIndex: 0}
-			p, err := ffmpeg.NewIntelGenerationPlan(ffmpeg.IntelGenerationConfig{Backend: backend, Device: "/dev/dri/renderD128"}, source, "in.mp4", 3.25, 640, false)
+			source := ffmpeg.IntelSource{Codec: "hevc", PixelFormat: "yuv420p", Width: 1920, Height: 1080, StreamIndex: 0, SampleAspectRatio: "1:1"}
+			p, err := ffmpeg.NewIntelPreviewPlan(ffmpeg.IntelGenerationConfig{Backend: backend, Device: "/dev/dri/renderD128"}, source, "in.mp4", 3.25, 640)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -154,7 +153,7 @@ func TestMarkerFailedFallbackKeepsExistingOutput(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("temporary artifacts leaked: %v", entries)
 	}
-	if len(diagnostics) != 1 || diagnostics[0].Actual != "software" || diagnostics[0].Stage != "metadata" {
+	if len(diagnostics) != 1 || diagnostics[0].Actual != "none" || diagnostics[0].Stage != "metadata" {
 		t.Fatal(diagnostics)
 	}
 }
@@ -174,16 +173,14 @@ func TestMarkerCancelledDoesNotFallback(t *testing.T) {
 	}
 }
 
-func TestIntelRequestedMarkerRejectsHeaderOnlyFallback(t *testing.T) {
+func TestIntelRequestedMarkerRejectsUnsupportedWithoutSoftwareFallback(t *testing.T) {
 	for _, c := range []struct {
 		name, source, vr string
-		valid            bool
 	}{
-		{"metadata", `{"streams":[]}`, "", false},
-		{"vr", `{"streams":[]}`, "LR180", false},
-		{"eligibility", `{"streams":[{"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p10le","width":1920,"height":1080}]}`, "", false},
-		{"device", `{"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"sample_aspect_ratio":"1:1"}]}`, "", false},
-		{"valid_cpu_fallback", `{"streams":[]}`, "", true},
+		{"metadata", `{"streams":[]}`, ""},
+		{"vr", `{"streams":[]}`, "LR180"},
+		{"eligibility", `{"streams":[{"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p10le","width":1920,"height":1080}]}`, ""},
+		{"device", `{"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"sample_aspect_ratio":"1:1"}]}`, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := markerTestPaths{t.TempDir()}
@@ -198,12 +195,8 @@ func TestIntelRequestedMarkerRejectsHeaderOnlyFallback(t *testing.T) {
 			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
-			packetJSON := `{"streams":[]}`
-			if c.valid {
-				packetJSON = `{"streams":[{"codec_type":"video","codec_name":"h264","nb_read_packets":"1"}]}`
-			}
 			probeBinary := filepath.Join(binDir, "ffprobe")
-			probeScript := "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'ffprobe version 7.1'; exit 0; fi\nfor arg do\nif [ \"$arg\" = '-count_packets' ]; then\ncat <<'PACKETS'\n" + packetJSON + "\nPACKETS\nexit 0\nfi\ndone\ncat <<'SOURCE'\n" + c.source + "\nSOURCE\n"
+			probeScript := "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'ffprobe version 7.1'; exit 0; fi\nfor arg do\nif [ \"$arg\" = '-count_packets' ]; then\ncat <<'PACKETS'\n" + `{"streams":[]}` + "\nPACKETS\nexit 0\nfi\ndone\ncat <<'SOURCE'\n" + c.source + "\nSOURCE\n"
 			if err := os.WriteFile(probeBinary, []byte(probeScript), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -211,22 +204,22 @@ func TestIntelRequestedMarkerRejectsHeaderOnlyFallback(t *testing.T) {
 			var diagnostics []ffmpeg.IntelGenerationDiagnostic
 			g.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostics = append(diagnostics, d) }
 			err := g.MarkerPreviewVideo(context.Background(), "input", "hash", 10, nil, false, c.vr)
-			if (err == nil) != c.valid {
-				t.Fatalf("valid=%v err=%v", c.valid, err)
+			if err == nil {
+				t.Fatal("unsupported GPU request succeeded")
 			}
 			data, _ := os.ReadFile(output)
-			if !c.valid && string(data) != "existing" {
+			if string(data) != "existing" {
 				t.Fatalf("published header-only artifact: %q", data)
 			}
 			calls, _ := os.ReadFile(counter)
-			if string(calls) != "x" {
-				t.Fatalf("fallback retried: %q", calls)
+			if len(calls) != 0 {
+				t.Fatalf("software fallback invoked: %q", calls)
 			}
 			entries, _ := os.ReadDir(p.dir)
 			if len(entries) != 1 {
 				t.Fatalf("temporary output leaked: %v", entries)
 			}
-			if len(diagnostics) != 1 || diagnostics[0].Actual != "software" || (!c.valid && diagnostics[0].Stage != "output") {
+			if len(diagnostics) != 1 || diagnostics[0].Actual != "none" || diagnostics[0].Stage == "output" {
 				t.Fatal(diagnostics)
 			}
 		})
@@ -259,14 +252,14 @@ exit 99
 	g := Generator{Encoder: ffmpeg.NewEncoder(binary), Probe: ffmpeg.NewFFProbe(probeBinary), LockManager: fsutil.NewReadLockManager(), MarkerPaths: p, IntelMarker: &ffmpeg.IntelGenerationConfig{Backend: "qsv", Device: "/dev/dri/renderD128"}}
 	var diagnostics []ffmpeg.IntelGenerationDiagnostic
 	g.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostics = append(diagnostics, d) }
-	if err := g.MarkerPreviewVideo(context.Background(), "input", "hash", 0, nil, false, ""); err != nil {
-		t.Fatal(err)
+	if err := g.MarkerPreviewVideo(context.Background(), "input", "hash", 0, nil, false, ""); err == nil {
+		t.Fatal("unsupported QSV accepted")
 	}
 	calls, _ := os.ReadFile(counter)
-	if string(calls) != "x" {
+	if len(calls) != 0 {
 		t.Fatalf("unexpected GPU/probe attempt: %q", calls)
 	}
-	if len(diagnostics) != 1 || diagnostics[0].Stage != "quality" || diagnostics[0].Selected != "qsv" || diagnostics[0].Actual != "software" || !strings.Contains(diagnostics[0].Reason, "representative visual acceptance") {
+	if len(diagnostics) != 1 || diagnostics[0].Stage != "quality" || diagnostics[0].Selected != "qsv" || diagnostics[0].Actual != "none" || !strings.Contains(diagnostics[0].Reason, "representative visual acceptance") {
 		t.Fatal(diagnostics)
 	}
 }

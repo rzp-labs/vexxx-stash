@@ -3,34 +3,43 @@ package manager
 import (
 	"context"
 	"fmt"
-	"image"
+	"math"
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/logger"
 )
 
-// intelSpriteTiles returns handled=true only when Intel sprites were explicitly
-// selected. Declined/failed hardware uses one canonical software fallback;
-// unrelated Native Generation settings cannot override that rollback path.
-func (g *SpriteGenerator) intelSpriteTiles(ctx context.Context, req spriteRequest) ([]image.Image, bool, error) {
+// intelSpriteSheet bypasses all CPU tile export, montage and JPEG encoding when
+// a GPU backend is selected. Unsupported projection/seek paths fail explicitly.
+func (g *SpriteGenerator) intelSpriteSheet(ctx context.Context, req spriteRequest) (bool, error) {
 	if g.g.IntelSprites == nil || !g.g.IntelSprites.Enabled() {
-		return nil, false, nil
+		return false, nil
 	}
 	if req.count <= 0 {
-		return nil, true, fmt.Errorf("sprite tile count must be positive")
+		return true, fmt.Errorf("sprite tile count must be positive")
 	}
-	if req.slowSeek || req.vrMode != "" {
-		reason := "frame-based seeking"
-		if req.vrMode != "" {
-			reason = "VR projection"
-		}
-		logger.Infof("[generator] sprite selected=%s actual=software stage=eligibility reason=%s", g.g.IntelSprites.Backend, reason)
+	if req.vrMode != "" {
+		reason := "VR projection has no GPU sprite implementation"
+		d := ffmpeg.IntelGenerationDiagnostic{Selected: g.g.IntelSprites.Backend, Actual: "none", Stage: "eligibility", Reason: reason}
+		logger.Infof("[generator] sprite selected=%s actual=%s stage=%s reason=%s", d.Selected, d.Actual, d.Stage, d.Reason)
 		if g.g.IntelDiagnostic != nil {
-			g.g.IntelDiagnostic(ffmpeg.IntelGenerationDiagnostic{Selected: g.g.IntelSprites.Backend, Actual: "software", Stage: "eligibility", Reason: reason})
+			g.g.IntelDiagnostic(d)
 		}
-		intelGenerator := g.g.WithIntelGenerationBudget()
-		images, err := (ffmpegSprites{gen: &intelGenerator}).tiles(ctx, req)
-		return images, true, err
+		return true, fmt.Errorf("GPU sprite unsupported: %s", reason)
+	}
+	if req.slowSeek {
+		frames := make([]int, req.count)
+		step := float64(req.frameCount-1) / float64(req.count)
+		for i := range frames {
+			frame := math.Round(float64(i) * step)
+			if frame >= math.MaxInt || frame <= math.MinInt {
+				return true, fmt.Errorf("invalid GPU sprite frame number conversion")
+			}
+			frames[i] = int(frame)
+		}
+		d, err := g.g.IntelSpriteSheetFrames(ctx, req.path, frames, g.Columns, g.Rows, g.ImageOutputPath)
+		logger.Infof("[generator] sprite selected=%s actual=%s stage=%s reason=%s", d.Selected, d.Actual, d.Stage, d.Reason)
+		return true, err
 	}
 	duration := req.streamDuration
 	if req.duration > 0 {
@@ -41,7 +50,7 @@ func (g *SpriteGenerator) intelSpriteTiles(ctx context.Context, req spriteReques
 	for i := range times {
 		times[i] = req.startOffset + float64(i)*step
 	}
-	images, d, err := g.g.IntelSpriteTiles(ctx, req.path, times)
+	d, err := g.g.IntelSpriteSheet(ctx, req.path, times, g.Columns, g.Rows, g.ImageOutputPath)
 	logger.Infof("[generator] sprite selected=%s actual=%s stage=%s reason=%s", d.Selected, d.Actual, d.Stage, d.Reason)
-	return images, true, err
+	return true, err
 }

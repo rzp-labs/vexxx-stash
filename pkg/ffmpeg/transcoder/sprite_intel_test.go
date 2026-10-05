@@ -3,9 +3,10 @@ package transcoder
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,183 +14,182 @@ import (
 	"github.com/stashapp/stash/pkg/ffmpeg"
 )
 
-func TestIntelSpriteCommandPreservesSeekAndDownloadsReducedFrame(t *testing.T) {
-	source := ffmpeg.IntelSource{Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, StreamIndex: 1}
-	for _, backend := range []string{"vaapi", "qsv"} {
-		t.Run(backend, func(t *testing.T) {
-			plan, err := ffmpeg.NewIntelGenerationPlan(ffmpeg.IntelGenerationConfig{Backend: backend, Device: "/dev/dri/renderD128"}, source, "scene.mp4", 3.125, 160, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := IntelSpriteScreenshot("scene.mp4", 3.125, plan)
-			inputAt := -1
-			for i, arg := range got {
-				if arg == "-i" {
-					inputAt = i
-					break
-				}
-			}
-			if inputAt < 2 || !reflect.DeepEqual(got[inputAt-2:inputAt+2], ffmpeg.Args{"-ss", "3.125", "-i", "scene.mp4"}) {
-				t.Fatalf("input seek changed: %q", got)
-			}
-			joined := strings.Join(got, " ")
-			for _, want := range []string{"-map 0:1 -an -frames:v 1", "scale_" + backend + "=w=160:h=90:format=nv12,hwdownload,format=nv12,format=bgr24", "-c:v bmp -f rawvideo -"} {
-				if !strings.Contains(joined, want) {
-					t.Errorf("missing %q in %q", want, joined)
-				}
-			}
-			if strings.Contains(joined, "fps=") || strings.Contains(joined, "select=") {
-				t.Fatal("Intel sprite must not change timestamp sampling")
-			}
-		})
-	}
-}
-
-func TestIntelSpriteQSVDecoderDepthIsScopedToScreenshotInput(t *testing.T) {
-	for _, codec := range []string{"h264", "hevc"} {
-		for _, backend := range []string{"qsv", "vaapi"} {
-			t.Run(codec+"/"+backend, func(t *testing.T) {
-				source := ffmpeg.IntelSource{Codec: codec, PixelFormat: "yuv420p", Width: 1920, Height: 1080}
-				plan, err := ffmpeg.NewIntelGenerationPlan(ffmpeg.IntelGenerationConfig{Backend: backend, Device: "/dev/dri/renderD128"}, source, "scene.mp4", 1.9876543209876543, 160, true)
-				if err != nil {
-					t.Fatal(err)
-				}
-				inputArgs := append(ffmpeg.Args(nil), plan.InputArgs...)
-				got := IntelSpriteScreenshot("scene.mp4", 1.9876543209876543, plan)
-				inputAt, depthAt, depthCount := -1, -1, 0
-				for i, arg := range got {
-					switch arg {
-					case "-i":
-						inputAt = i
-					case "-async_depth":
-						depthAt = i
-						depthCount++
-					}
-				}
-				if backend == "qsv" {
-					if depthCount != 1 || depthAt+1 >= inputAt || got[depthAt+1] != "1" {
-						t.Fatalf("QSV screenshot decoder must use depth one before its input: %q", got)
-					}
-				} else if depthCount != 0 {
-					t.Fatalf("QSV decoder option leaked into VAAPI screenshot: %q", got)
-				}
-				if !reflect.DeepEqual(plan.InputArgs, inputArgs) {
-					t.Fatalf("screenshot changed shared input arguments: %q", plan.InputArgs)
-				}
-				for _, probe := range plan.Probes {
-					if strings.Contains(strings.Join(probe.Args, " "), "-async_depth") {
-						t.Fatalf("screenshot decoder option leaked into shared capability probe: %q", probe.Args)
-					}
-				}
-			})
-		}
-	}
-
-	software := ScreenshotTime("scene.mp4", 1.9876543209876543, ScreenshotOptions{Width: 160, OutputType: ScreenshotOutputTypeBMP, OutputPath: "-"})
-	if strings.Contains(strings.Join(software, " "), "-async_depth") {
-		t.Fatalf("QSV decoder option leaked into software screenshot: %q", software)
-	}
-}
-
-func TestIntelSpriteMain10SeekAndCanonicalConversion(t *testing.T) {
-	source := ffmpeg.IntelSource{Codec: "hevc", Profile: "Main 10", PixelFormat: "yuv420p10le", Width: 320, Height: 180, StreamIndex: 0, ColorRange: "tv", ColorSpace: "bt709", ColorTransfer: "bt709", ColorPrimaries: "bt709"}
-	plan, err := ffmpeg.NewIntelSpritePlan(ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}, source, "source.mkv", 1.9876543209876543, 160)
+func gpuSpritePlan(t *testing.T) ffmpeg.IntelGenerationPlan {
+	t.Helper()
+	p, err := ffmpeg.NewIntelSpritePlan(ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}, ffmpeg.IntelSource{Codec: "h264", PixelFormat: "yuv420p", Width: 320, Height: 180}, "source.mp4", 1.9876543209876543, 160)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := IntelSpriteScreenshot("source.mkv", 1.9876543209876543, plan)
-	joined := strings.Join(got, " ")
-	for _, want := range []string{"-ss 1.9876543209876543 -i source.mkv", "-map 0:0 -an -frames:v 1", "hwdownload,format=p010le,format=yuv420p10le,scale=160:-2,format=bgr24", "-c:v bmp -f rawvideo -"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("missing %q: %s", want, joined)
+	return p
+}
+func TestIntelSpriteCommandsNeverTransferOrEncodeCPUPixels(t *testing.T) {
+	p := gpuSpritePlan(t)
+	still := IntelSpriteScreenshot("source.mp4", 1.9876543209876543, p)
+	if still[len(still)-1] != "-" {
+		t.Fatal(still)
+	}
+	if !strings.Contains(strings.Join(still, " "), "-ss 1.9876543209876543 -i source.mp4") {
+		t.Fatal(still)
+	}
+	for _, count := range []int{1, 3, 81} {
+		sheet, err := IntelSpriteSheet("seeks.ffconcat", p, count, 9, 9, "sprite.jpg")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := strings.Join(sheet, " ")
+		for _, want := range []string{"-hwaccel_output_format vaapi", "-segment_time_metadata 1 -i seeks.ffconcat", "concatdec_select", "trim=end_frame=1", "scale_vaapi=", "mjpeg_vaapi -global_quality 95"} {
+			if !strings.Contains(s, want) {
+				t.Fatalf("missing %q in %s", want, s)
+			}
+		}
+		if count > 1 && !strings.Contains(s, "xstack_vaapi=") {
+			t.Fatal(s)
+		}
+		if count < 81 && !strings.Contains(s, "[content][blank]xstack_vaapi=inputs=2:layout=0_0|1280_720:fill=black") {
+			t.Fatal(s)
+		}
+		for _, bad := range []string{"hwdownload", "hwupload", "format=bgr", "-c:v bmp", "scale="} {
+			if strings.Contains(s, bad) {
+				t.Fatalf("CPU pixel operation %q: %s", bad, s)
+			}
 		}
 	}
-	for _, unwanted := range []string{"scale_vaapi", "nv12", "fps=", "select=", "noaccurate_seek", "async_depth", "colorspace="} {
-		if strings.Contains(joined, unwanted) {
-			t.Fatalf("changed conversion/seek: %s", joined)
-		}
+	if _, err := IntelSpriteSheet("seeks.ffconcat", p, 82, 9, 9, "out.jpg"); err == nil {
+		t.Fatal("accepted oversized grid")
 	}
+}
+
+// This real CPU control projects ONLY unavailable hardware pixel operations.
+// Exact source pixels prove concat segment seeks/metadata selection, including
+// duplicate timestamps and nonzero source origins; they do not prove GPU VPP.
+func TestIntelSpriteConcatAccurateSourceFrameSelection(t *testing.T) {
 	bin, err := exec.LookPath("ffmpeg")
 	if err != nil {
-		t.Skip("ffmpeg unavailable; command contract checked")
+		t.Skip("ffmpeg unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	// FFmpeg 4.x has only -vsync; newer versions eventually removed that option.
-	// Choose the supported passthrough spelling without skipping parity checks.
-	help, err := exec.CommandContext(ctx, bin, "-h", "full").Output()
+	run := func(args ...string) []byte {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, bin, args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("ffmpeg: %v: %s", err, stderr.String())
+		}
+		return out
+	}
+	dir := t.TempDir()
+	input := filepath.Join(dir, "source's clip.mkv")
+	run("-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:duration=6", "-c:v", "libx264", "-g", "50", "-bf", "3", "-output_ts_offset", "5", input)
+	times := []float64{0.19, 0.19, 1.9876543209876543, 3.49}
+	list, err := ffmpeg.IntelSpriteSeekList(input, ffmpeg.IntelSource{StartTime: "5"}, times)
 	if err != nil {
-		t.Fatalf("ffmpeg options: %v", err)
+		t.Fatal(err)
 	}
-	syncArgs := []string{"-vsync", "0"}
-	if bytes.Contains(help, []byte("-fps_mode")) {
-		syncArgs = []string{"-fps_mode", "passthrough"}
+	seek := filepath.Join(dir, "seeks.ffconcat")
+	if err := os.WriteFile(seek, []byte(list), 0600); err != nil {
+		t.Fatal(err)
 	}
-	input := filepath.Join(t.TempDir(), "10bit.mkv")
-	// Preserve low 10-bit values and vary every frame. Uneven PTS exercises
-	// independent non-keyframe seeks without inferring cadence from declarations.
-	fixture := "nullsrc=size=320x180:rate=10,format=yuv420p10le,geq=lum='64+mod(X*13+Y*7+N*11,876)':cb='64+mod(X*5+N*17,876)':cr='64+mod(Y*3+N*19,876)',setpts='(N+floor(N/3))/10/TB'"
-	fixtureArgs := append([]string{"-v", "error", "-nostdin", "-f", "lavfi", "-i", fixture, "-frames:v", "30"}, syncArgs...)
-	fixtureArgs = append(fixtureArgs, "-c:v", "ffv1", "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709", "-color_primaries", "bt709", input)
-	if out, err := exec.CommandContext(ctx, bin, fixtureArgs...).CombinedOutput(); err != nil {
-		t.Fatalf("fixture: %v: %s", err, out)
+	plan := gpuSpritePlan(t)
+	plan.InputArgs = nil
+	args, err := IntelSpriteSheet(seek, plan, len(times), 2, 2, "-")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, at := range []float64{0, 0.19, 1.9876543209876543, 3.49} {
-		// Project only the unavailable VAAPI decode/download onto a CPU-decoded
-		// P010 surface. This proves conversion/seek parity, not B580 decoding.
-		projected := IntelSpriteScreenshot(input, at, plan)
-		var cpu ffmpeg.Args
-		for i := 0; i < len(projected); i++ {
-			switch projected[i] {
-			case "-init_hw_device", "-filter_hw_device", "-hwaccel", "-hwaccel_device", "-hwaccel_output_format":
-				i++
-			case "-vf":
-				i++
-				cpu = append(cpu, "-vf", strings.Replace(projected[i], "hwdownload,format=p010le", "format=p010le", 1))
-			default:
-				cpu = append(cpu, projected[i])
-			}
+	var projected []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-filter_complex" {
+			i++
+			graph := strings.ReplaceAll(args[i], plan.Filter, "scale=160:90")
+			graph = strings.ReplaceAll(graph, "xstack_vaapi=", "xstack=")
+			graph = strings.ReplaceAll(graph, ffmpeg.IntelJPEGRangeFilter(), "null")
+			projected = append(projected, "-filter_complex", graph)
+		} else if args[i] == "-c:v" {
+			break
+		} else {
+			projected = append(projected, args[i])
 		}
-		canonical := ScreenshotTime(input, at, ScreenshotOptions{Width: 160, OutputType: ScreenshotOutputTypeBMP, OutputPath: "-"})
-		run := func(args ffmpeg.Args) []byte {
-			cmd := exec.CommandContext(ctx, bin, args...)
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("seek %g: %v: %s", at, err, stderr.String())
-			}
-			return out
+	}
+	projected = append(projected, "-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "rawvideo", "-")
+	sheet := run(projected...)
+	if len(sheet) != 320*180*3 {
+		t.Fatalf("sheet bytes=%d", len(sheet))
+	}
+	for i, at := range times {
+		ref := run("-v", "error", "-ss", fmt.Sprint(at), "-i", input, "-vf", "scale=160:-2", "-frames:v", "1", "-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "rawvideo", "-")
+		var tile []byte
+		for y := 0; y < 90; y++ {
+			start := ((i/2*90+y)*320 + i%2*160) * 3
+			tile = append(tile, sheet[start:start+160*3]...)
 		}
-		// Check all restored 10-bit planes too: a BMP match alone can hide
-		// damage to low bits during the P010 layout conversion.
-		raw := ffmpeg.Args{"-v", "error", "-nostdin"}.Seek(at).Input(input)
-		raw = append(raw, "-map", "0:0", "-an", "-frames:v", "1")
-		planar := append(append(ffmpeg.Args{}, raw...), "-vf", "format=yuv420p10le", "-c:v", "rawvideo", "-f", "rawvideo", "-")
-		roundTrip := append(append(ffmpeg.Args{}, raw...), "-vf", "format=p010le,format=yuv420p10le", "-c:v", "rawvideo", "-f", "rawvideo", "-")
-		if want, candidate := run(planar), run(roundTrip); len(want) == 0 || !bytes.Equal(want, candidate) {
-			t.Fatalf("seek %g: P010 layout conversion changed 10-bit source planes", at)
-		}
-		want, candidate := run(canonical), run(cpu)
-		if len(want) == 0 || !bytes.Equal(want, candidate) {
-			t.Fatalf("seek %g: P010 conversion changed canonical BMP pixels (%d/%d bytes)", at, len(want), len(candidate))
+		if !bytes.Equal(tile, ref) {
+			t.Fatalf("tile %d timestamp %g changed source frame", i, at)
 		}
 	}
 }
 
-func TestIntel8BitSpriteVAAPIUsesCanonicalScale(t *testing.T) {
-	source := ffmpeg.IntelSource{Codec: "h264", PixelFormat: "yuv420p", Width: 3840, Height: 2160, StreamIndex: 0}
-	p, err := ffmpeg.NewIntelSpritePlan(ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}, source, "six-audio.mp4", 98.85243025925925, 160)
+func TestIntelSpriteShortFrameSelectionPreservesDuplicates(t *testing.T) {
+	bin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	run := func(args ...string) []byte {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, bin, args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("ffmpeg: %v %s", err, stderr.String())
+		}
+		return out
+	}
+	input := filepath.Join(t.TempDir(), "short.mp4")
+	run("-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:duration=0.6", "-c:v", "libx264", input)
+	frames := []int{0, 0, 2, 4}
+	plan := gpuSpritePlan(t)
+	plan.InputArgs = nil
+	args, err := IntelSpriteSheetFrames(input, plan, frames, 2, 2, "-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := strings.Join(IntelSpriteScreenshot("six-audio.mp4", 98.85243025925925, p), " ")
-	for _, want := range []string{"-ss 98.85243025925925 -i six-audio.mp4", "-map 0:0 -an -frames:v 1", "hwdownload,format=nv12,format=yuv420p,scale=160:-2,format=bgr24", "-c:v bmp -f rawvideo -"} {
-		if !strings.Contains(args, want) {
-			t.Fatalf("missing %q in %s", want, args)
+	var projected []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-filter_complex" {
+			i++
+			graph := strings.ReplaceAll(args[i], plan.Filter, "scale=160:90")
+			graph = strings.ReplaceAll(graph, "xstack_vaapi=", "xstack=")
+			graph = strings.ReplaceAll(graph, ffmpeg.IntelJPEGRangeFilter(), "null")
+			projected = append(projected, "-filter_complex", graph)
+		} else if args[i] == "-c:v" {
+			break
+		} else {
+			projected = append(projected, args[i])
 		}
 	}
-	if strings.Contains(args, "scale_vaapi") || strings.Contains(args, "fps=") {
-		t.Fatal(args)
+	projected = append(projected, "-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "rawvideo", "-")
+	sheet := run(projected...)
+	if len(sheet) != 320*180*3 {
+		t.Fatalf("sheet bytes=%d", len(sheet))
+	}
+	for i, frame := range frames {
+		ref := run("-v", "error", "-i", input, "-vf", fmt.Sprintf("select='eq(n,%d)',scale=160:-2", frame), "-frames:v", "1", "-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "rawvideo", "-")
+		var tile []byte
+		for y := 0; y < 90; y++ {
+			start := ((i/2*90+y)*320 + i%2*160) * 3
+			tile = append(tile, sheet[start:start+160*3]...)
+		}
+		if !bytes.Equal(tile, ref) {
+			t.Fatalf("tile %d changed canonical source frame %d", i, frame)
+		}
+	}
+	for _, invalid := range [][]int{nil, {-1}, {1, 0}} {
+		if _, err := IntelSpriteSheetFrames(input, plan, invalid, 2, 2, "-"); err == nil {
+			t.Fatalf("accepted frames %v", invalid)
+		}
 	}
 }

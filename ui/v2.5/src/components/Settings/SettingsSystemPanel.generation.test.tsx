@@ -103,7 +103,7 @@ describe("Intel generation settings rendered controls", () => {
     ).toEqual(["software", "software", "software"]);
     const qsvOptions = screen.getAllByRole("option", { name: /Intel QSV/ });
     expect(qsvOptions[0]).toBeDisabled();
-    expect(qsvOptions[1]).not.toBeDisabled();
+    expect(qsvOptions[1]).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "Save generation settings" })
     ).toBeDisabled();
@@ -493,7 +493,7 @@ describe("Intel generation settings rendered controls", () => {
       )
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/QSV marker quality has not passed validation/)
+      screen.getByText(/Saved QSV requests fail explicitly/)
     ).toBeInTheDocument();
     expect(
       screen.getByText(

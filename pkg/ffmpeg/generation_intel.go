@@ -26,6 +26,8 @@ type IntelSource struct {
 	Codec, PixelFormat, ColorTransfer, ColorPrimaries, ColorSpace, ColorRange    string
 	Width, Height, Rotation, StreamIndex                                         int
 	FrameRate, AverageFrameRate, Duration, SampleAspectRatio, DisplayAspectRatio string
+	// StartTime is the demuxer timestamp origin used by relative input seeks.
+	StartTime string
 }
 
 type IntelGenerationDiagnostic struct {
@@ -174,8 +176,9 @@ func RunIntelGeneration(ctx context.Context, plan IntelGenerationPlan, hardware,
 	return RunIntelGenerationWork(ctx, plan, func(ctx context.Context) error { return run(ctx, hardware) }, func(ctx context.Context) error { return run(ctx, software) }, run)
 }
 
-// RunIntelGenerationWork shares probes and a single fallback across compound
-// workloads such as a sprite sheet with multiple canonical frame seeks.
+// RunIntelGenerationWork shares probes across compound workloads. A nil
+// software callback makes hardware selection strict: device, capability and
+// execution failures are returned without starting software rendering.
 func RunIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardware, software func(context.Context) error, run IntelGenerationRunner) (IntelGenerationDiagnostic, error) {
 	return runIntelGenerationWork(ctx, plan, hardware, software, run, ValidateIntelDevice)
 }
@@ -195,6 +198,10 @@ func runIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardw
 		if errors.Is(err, context.Canceled) {
 			return d, err
 		}
+		if software == nil {
+			d.Actual = "none"
+			return d, fmt.Errorf("GPU %s generation failed at %s (software rendering disabled): %w", plan.Config.Backend, stage, err)
+		}
 		d.Actual = "software"
 		fallbackErr := software(ctx)
 		var outputError *GenerationOutputError
@@ -205,6 +212,9 @@ func runIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardw
 		return d, fallbackErr
 	}
 	if !plan.Config.Enabled() {
+		if software == nil {
+			return d, fmt.Errorf("GPU generation requires an explicitly selected hardware backend")
+		}
 		d.Actual = "software"
 		return d, software(ctx)
 	}

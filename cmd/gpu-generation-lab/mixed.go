@@ -97,6 +97,8 @@ func runMixed(ctx context.Context, g *generate.Generator, paths labPaths, input,
 					})
 				}
 			case "animated_webp":
+				// This mixed queue explicitly includes a software-only WebP job.
+				local.IntelMarker = nil
 				err = local.SceneMarkerWebp(ctx, input, "synthetic", 1, "")
 				local.IntelDiagnostic(ffmpeg.IntelGenerationDiagnostic{Selected: "software", Actual: "software", Reason: "lossless1/compression6 CPU WebP; presetnone corrects legacy presetdefault lossy-output bug"})
 				if err == nil {
@@ -112,8 +114,12 @@ func runMixed(ctx context.Context, g *generate.Generator, paths labPaths, input,
 					times[i] = 1 + float64(i)*2/81
 				}
 				var images []image.Image
-				images, _, err = local.IntelSpriteTiles(ctx, input, times)
-				if err == nil {
+				if local.IntelSprites != nil && local.IntelSprites.Enabled() {
+					_, err = local.IntelSpriteSheet(ctx, input, times, 9, 9, filepath.Join(outDir, "sprite.jpg"))
+				} else {
+					images, _, err = local.IntelSpriteTiles(ctx, input, times)
+				}
+				if err == nil && (local.IntelSprites == nil || !local.IntelSprites.Enabled()) {
 					if len(images) != 81 {
 						err = fmt.Errorf("got%d sprite tiles, expected81", len(images))
 					}
@@ -124,7 +130,7 @@ func runMixed(ctx context.Context, g *generate.Generator, paths labPaths, input,
 						}
 					}
 				}
-				if err == nil {
+				if err == nil && (local.IntelSprites == nil || !local.IntelSprites.Enabled()) {
 					err = local.SaveSprite(ctx, images, filepath.Join(outDir, "sprite.jpg"))
 				}
 				if err == nil {
@@ -136,7 +142,7 @@ func runMixed(ctx context.Context, g *generate.Generator, paths labPaths, input,
 						return validateMixedVTT(vtt)
 					})
 				}
-				job.Validation = map[string]any{"tile_count": len(images), "timestamps": times, "tile_geometry": "160x90", "montage_geometry": "1440x810", "vtt": "canonical81 intervals/coordinates checked on success", "visual": "untested"}
+				job.Validation = map[string]any{"tile_count": len(times), "timestamps": times, "tile_geometry": "160x90", "montage_geometry": "1440x810", "vtt": "canonical81 intervals/coordinates checked on success", "visual": "untested"}
 			case "canonical_cpu_phash":
 				var hash *uint64
 				// The hash coordinator owns the whole-hash CPU permit. Canonical

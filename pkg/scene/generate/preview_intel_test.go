@@ -131,14 +131,14 @@ func TestScenePreviewHardwareArgumentsPreserveContract(t *testing.T) {
 			t.Errorf("missing %q: %s", part, args)
 		}
 	}
-	for _, part := range []string{"libx264", "-crf", "-preset veryslow", "-r ", "fps="} {
+	for _, part := range []string{"libx264", "-crf", "-preset veryslow", "-r ", "fps=", "hwdownload", "hwupload", "scale="} {
 		if strings.Contains(args, part) {
 			t.Errorf("unexpected %q: %s", part, args)
 		}
 	}
 }
 
-func TestIntelSceneFallbackRejectsHeaderAndPreservesExisting(t *testing.T) {
+func TestIntelSceneUnsupportedSourceNeverFallsBackAndPreservesExisting(t *testing.T) {
 	p := previewTestPaths{markerTestPaths{t.TempDir()}}
 	output := p.GetVideoPreviewPath("")
 	if err := os.WriteFile(output, []byte("existing"), 0600); err != nil {
@@ -159,15 +159,15 @@ func TestIntelSceneFallbackRejectsHeaderAndPreservesExisting(t *testing.T) {
 	g := Generator{Encoder: ffmpeg.NewEncoder(binary), Probe: ffmpeg.NewFFProbe(probe), LockManager: fsutil.NewReadLockManager(), ScenePaths: p, Overwrite: true, Budget: budget, IntelPreviews: &ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD99999"}}
 	err := g.PreviewVideo(context.Background(), "input", 1, "hash", PreviewOptions{Segments: 2, SegmentDuration: 1}, "", false, false)
 	if err == nil {
-		t.Fatal("header-only fallback published")
+		t.Fatal("unsupported source published")
 	}
 	data, _ := os.ReadFile(output)
 	if string(data) != "existing" {
 		t.Fatalf("existing artifact replaced %q", data)
 	}
 	data, _ = os.ReadFile(counter)
-	if string(data) != "x" {
-		t.Fatalf("fallback count %q", data)
+	if len(data) != 0 {
+		t.Fatalf("CPU fallback invoked %q", data)
 	}
 	entries, _ := os.ReadDir(p.dir)
 	if len(entries) != 1 {
@@ -221,5 +221,47 @@ fi
 	entries, _ := os.ReadDir(p.dir)
 	if len(entries) != 1 {
 		t.Fatal("chunk/concat temp files leaked", entries)
+	}
+}
+
+func TestGPUAnimatedWebPRejectedWithoutCPUEncoder(t *testing.T) {
+	for _, asset := range []string{"scene", "marker"} {
+		t.Run(asset, func(t *testing.T) {
+			p := previewTestPaths{markerTestPaths{t.TempDir()}}
+			config := &ffmpeg.IntelGenerationConfig{Backend: "vaapi"}
+			g := Generator{LockManager: fsutil.NewReadLockManager(), ScenePaths: p, MarkerPaths: p.markerTestPaths,
+				IntelPreviews: config, IntelMarker: config}
+			var diagnostics []ffmpeg.IntelGenerationDiagnostic
+			g.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostics = append(diagnostics, d) }
+			var err error
+			if asset == "scene" {
+				err = g.PreviewWebp(context.Background(), "input", "hash")
+			} else {
+				err = g.SceneMarkerWebp(context.Background(), "input", "hash", 1.25, "")
+			}
+			// A software retry would panic because no encoder is supplied.
+			if err == nil || !strings.Contains(err.Error(), "lossless animated WebP") {
+				t.Fatalf("unsupported GPU format accepted: %v", err)
+			}
+			if len(diagnostics) != 1 || diagnostics[0].Actual != "none" || diagnostics[0].Stage != "webp" {
+				t.Fatal(diagnostics)
+			}
+			if entries, _ := os.ReadDir(p.dir); len(entries) != 0 {
+				t.Fatal("temporary output leaked", entries)
+			}
+		})
+	}
+}
+
+func TestGPUMarkerStillUnsupportedSourceDoesNotEncodeOnCPU(t *testing.T) {
+	p := markerTestPaths{t.TempDir()}
+	g := Generator{LockManager: fsutil.NewReadLockManager(), MarkerPaths: p, IntelMarker: &ffmpeg.IntelGenerationConfig{Backend: "vaapi"}}
+	for _, vr := range []string{"", "MONO360"} {
+		if err := g.SceneMarkerScreenshot(context.Background(), "input", "hash", 1.25, 640, vr); err == nil {
+			t.Fatal("unsupported GPU still accepted")
+		}
+		if entries, _ := os.ReadDir(p.dir); len(entries) != 0 {
+			t.Fatal("temporary output leaked", entries)
+		}
 	}
 }

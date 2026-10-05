@@ -10,7 +10,7 @@ import (
 )
 
 // IntelSource inspects all streams with a bounded, cancellable ffprobe process.
-// Multiple video streams fall back rather than changing FFmpeg's stream choice.
+// Multiple video streams are rejected rather than changing FFmpeg's stream choice.
 func (f *FFProbe) IntelSource(ctx context.Context, input string) (IntelSource, error) {
 	result, err := f.intelSource(ctx, input, true)
 	if err != nil {
@@ -37,12 +37,15 @@ func (f *FFProbe) intelSource(ctx context.Context, input string, requireUnambigu
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := stashExec.CommandContext(ctx, f.path, "-v", "error", "-show_streams", "-of", "json", input)
+	cmd := stashExec.CommandContext(ctx, f.path, "-v", "error", "-show_streams", "-show_format", "-of", "json", input)
 	output, err := cmd.Output()
 	if err != nil {
 		return result, fmt.Errorf("generation metadata probe: %w", err)
 	}
 	var data struct {
+		Format struct {
+			StartTime string `json:"start_time"`
+		} `json:"format"`
 		Streams []struct {
 			FFProbeStream
 			ColorTransfer  string `json:"color_transfer"`
@@ -53,6 +56,10 @@ func (f *FFProbe) intelSource(ctx context.Context, input string, requireUnambigu
 	}
 	if err := json.Unmarshal(output, &data); err != nil {
 		return result, fmt.Errorf("generation metadata: %w", err)
+	}
+	// An absent origin cannot safely be assumed zero for concat packet seeks.
+	if data.Format.StartTime == "" {
+		data.Format.StartTime = "N/A"
 	}
 	count := 0
 	audioCount := 0
@@ -70,7 +77,7 @@ func (f *FFProbe) intelSource(ctx context.Context, input string, requireUnambigu
 				rotation = sd.Rotation
 			}
 		}
-		result = IntelSource{Profile: s.Profile, Codec: s.CodecName, PixelFormat: s.PixFmt, Width: s.Width, Height: s.Height, Rotation: rotation, StreamIndex: s.Index, ColorTransfer: s.ColorTransfer, ColorPrimaries: s.ColorPrimaries, ColorSpace: s.ColorSpace, ColorRange: s.ColorRange, FrameRate: s.RFrameRate, AverageFrameRate: s.AvgFrameRate, Duration: s.Duration, SampleAspectRatio: s.SampleAspectRatio, DisplayAspectRatio: s.DisplayAspectRatio}
+		result = IntelSource{Profile: s.Profile, Codec: s.CodecName, PixelFormat: s.PixFmt, Width: s.Width, Height: s.Height, Rotation: rotation, StreamIndex: s.Index, ColorTransfer: s.ColorTransfer, ColorPrimaries: s.ColorPrimaries, ColorSpace: s.ColorSpace, ColorRange: s.ColorRange, FrameRate: s.RFrameRate, AverageFrameRate: s.AvgFrameRate, Duration: s.Duration, SampleAspectRatio: s.SampleAspectRatio, DisplayAspectRatio: s.DisplayAspectRatio, StartTime: data.Format.StartTime}
 	}
 	if requireUnambiguousAudio && audioCount > 1 {
 		return result, fmt.Errorf("multiple audio streams require software generation to preserve automatic audio selection")
@@ -91,8 +98,8 @@ func (e *GenerationOutputError) Error() string {
 func (e *GenerationOutputError) Unwrap() error { return e.Err }
 
 // ValidateVideoOutput verifies at least one actual encoded video packet. It
-// does not apply input eligibility rules: CPU fallbacks for HDR/rotation/VR must
-// also be checked. The caller acquires CPU admission before this bounded probe.
+// does not apply input eligibility rules: explicitly selected software outputs
+// also need validation. The caller acquires CPU admission before this bounded probe.
 func (f *FFProbe) ValidateVideoOutput(ctx context.Context, path string) error {
 	fail := func(err error) error { return &GenerationOutputError{Err: err} }
 	if f == nil {

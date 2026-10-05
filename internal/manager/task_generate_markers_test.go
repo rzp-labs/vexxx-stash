@@ -102,20 +102,23 @@ func assertMarkerTempEmpty(t *testing.T) {
 	release()
 }
 
-func TestSingleMarkerCreatesDestinationAndPersists(t *testing.T) {
-	for _, c := range []struct{ name, backend, device, actual, stage string }{
-		{"cpu", "software", "/dev/dri/renderD128", "software", ""},
-		{"intel-quality-fallback", "qsv", "/dev/dri/renderD128", "software", "quality"},
-		{"intel-device-fallback", "vaapi", "/dev/dri/renderD99999", "software", "device"},
-		{"intel-success-mocked-commands", "vaapi", "/dev/dri/renderD128", "vaapi", ""},
+func TestSingleMarkerPersistsOnlySupportedRequestedAssets(t *testing.T) {
+	for _, c := range []struct {
+		name, backend, device, actual, stage string
+		video                                bool
+	}{
+		{"cpu", "software", "/dev/dri/renderD128", "software", "", true},
+		{"intel-quality-rejected", "qsv", "/dev/dri/renderD128", "none", "quality", false},
+		{"intel-device-rejected", "vaapi", "/dev/dri/renderD99999", "none", "device", false},
+		{"intel-video-success-webp-unsupported-mocked", "vaapi", "/dev/dri/renderD128", "vaapi", "", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.actual == "vaapi" {
 				if err := ffmpeg.ValidateIntelDevice(c.device); err != nil {
-					t.Skip("Mock Intel command-success persistence needs an existing authorized render device; run this test in CT102")
+					t.Skip("Mock Intel command-success persistence needs an existing authorized render device; run this test in the isolated GPU lab")
 				}
 			}
-			task, _, _ := markerTaskFixture(t, c.backend, c.device)
+			task, started, _ := markerTaskFixture(t, c.backend, c.device)
 			video := task.generator.MarkerPaths.GetVideoPreviewPath("fixture", 1)
 			if _, err := os.Stat(filepath.Dir(video)); !os.IsNotExist(err) {
 				t.Fatal("fixture destination already exists", err)
@@ -124,16 +127,42 @@ func TestSingleMarkerCreatesDestinationAndPersists(t *testing.T) {
 			task.generator.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostics = append(diagnostics, d) }
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := task.Start(ctx); err != nil {
+			err := task.Start(ctx)
+			gpu := c.backend != "software"
+			if gpu {
+				if err == nil || !strings.Contains(err.Error(), "marker 1 image") || !strings.Contains(err.Error(), "GPU marker lossless animated WebP encoding is unsupported") {
+					t.Fatalf("unsupported GPU WebP must fail explicitly: %v", err)
+				}
+				if !c.video && !strings.Contains(err.Error(), "marker 1 video") {
+					t.Fatalf("unsupported GPU video failure omitted: %v", err)
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
-			for _, output := range []string{video, task.generator.MarkerPaths.GetWebpPreviewPath("fixture", 1)} {
-				if data, err := os.ReadFile(output); err != nil || string(data) != "fixture-output" {
-					t.Fatalf("missing persisted artifact %s: %q %v", output, data, err)
+			for output, want := range map[string]bool{video: c.video, task.generator.MarkerPaths.GetWebpPreviewPath("fixture", 1): !gpu} {
+				data, readErr := os.ReadFile(output)
+				if want {
+					if readErr != nil || string(data) != "fixture-output" {
+						t.Fatalf("missing supported artifact %s: %q %v", output, data, readErr)
+					}
+				} else if !os.IsNotExist(readErr) {
+					t.Fatalf("unsupported GPU asset produced a software artifact %s: %q %v", output, data, readErr)
 				}
 			}
-			if len(diagnostics) != 1 || diagnostics[0].Actual != c.actual || diagnostics[0].Stage != c.stage {
+			wantDiagnostics := 1
+			if gpu {
+				wantDiagnostics = 2
+			}
+			if len(diagnostics) != wantDiagnostics || diagnostics[0].Actual != c.actual || diagnostics[0].Stage != c.stage {
 				t.Fatal(diagnostics)
+			}
+			if gpu && (diagnostics[1].Actual != "none" || diagnostics[1].Stage != "webp") {
+				t.Fatal("unsupported image diagnostic missing", diagnostics)
+			}
+			if !c.video {
+				if _, err := os.Stat(started); !os.IsNotExist(err) {
+					t.Fatal("software encoding started after GPU rejection", err)
+				}
 			}
 			assertMarkerTempEmpty(t)
 		})
@@ -338,4 +367,22 @@ func TestMarkerPersistenceLab(t *testing.T) {
 			t.Logf("persisted and decoded marker selected=%s actual=%s stage=%s", c.backend, c.actual, c.stage)
 		})
 	}
+}
+
+func TestGPUMarkerUnsupportedAssetsReportFailedJobWithoutCPUFallback(t *testing.T) {
+	task, started, _ := markerTaskFixture(t, "qsv", "/dev/dri/renderD128")
+	m := job.NewManager()
+	t.Cleanup(func() { m.StopAndWait(time.Second) })
+	j := &GenerateJob{repository: task.repository, input: GenerateMetadataInput{MarkerIDs: []string{"1"}, Markers: true, MarkerImagePreviews: true, Overwrite: true}}
+	id := m.Add(context.Background(), "unsupported GPU marker", j)
+	result := waitMarkerJob(t, m, id)
+	if result.Status != job.StatusFailed || result.Error == nil || !strings.Contains(*result.Error, "marker 1 video") || !strings.Contains(*result.Error, "lossless animated WebP") {
+		t.Fatalf("GPU rejection reported as success: %+v", result)
+	}
+	for _, output := range []string{task.generator.MarkerPaths.GetVideoPreviewPath("fixture", 1), task.generator.MarkerPaths.GetWebpPreviewPath("fixture", 1), started} {
+		if _, err := os.Stat(output); !os.IsNotExist(err) {
+			t.Fatalf("CPU fallback created %s: %v", output, err)
+		}
+	}
+	assertMarkerTempEmpty(t)
 }

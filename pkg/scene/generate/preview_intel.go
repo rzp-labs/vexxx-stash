@@ -2,7 +2,6 @@ package generate
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
@@ -54,34 +53,15 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 			g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: "software", Actual: "software"})
 			return g.previewVideo(input, duration, options, vr, fallback, vsync2)(lockCtx, output)
 		}
-		// The entire CPU retry uses existing canonical slow seeking. No partial
-		// hardware chunks are mixed with software chunks in the final concat.
-		software := func(ctx context.Context) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			cpu := g
-			cpu.previewIntelPlan = nil
-			if err := cpu.previewVideo(input, duration, options, vr, true, vsync2)(lockCtx, output); err != nil {
-				return err
-			}
-			return cpu.validateIntelMarkerOutput(ctx, output)
-		}
-		fallbackToCPU := func(stage string, reason error) error {
+		reject := func(stage string, reason error) error {
 			if err := lockCtx.Err(); err != nil {
 				return err
 			}
-			err := software(lockCtx)
-			var outputErr *ffmpeg.GenerationOutputError
-			if errors.As(err, &outputErr) {
-				stage = "output"
-				reason = err
-			}
-			g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "software", Stage: stage, Reason: reason.Error()})
-			return err
+			g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: stage, Reason: reason.Error()})
+			return fmt.Errorf("GPU scene preview %s: %w", stage, reason)
 		}
 		if vr != "" {
-			return fallbackToCPU("eligibility", fmt.Errorf("VR projection requires software scene previews"))
+			return reject("eligibility", fmt.Errorf("GPU VR projection is unsupported; explicitly select software generation"))
 		}
 		release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
 		if err != nil {
@@ -90,7 +70,7 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 		source, err := g.Probe.IntelPreviewSource(lockCtx, input)
 		release()
 		if err != nil {
-			return fallbackToCPU("eligibility", err)
+			return reject("eligibility", err)
 		}
 		start := 0.0
 		if PreviewIsSingleSegment(options, duration) {
@@ -102,7 +82,7 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 		}
 		plan, err := ffmpeg.NewIntelPreviewPlan(*g.IntelPreviews, source, input, start, PreviewWidth)
 		if err != nil {
-			return fallbackToCPU("eligibility", err)
+			return reject("eligibility", err)
 		}
 		runner := func(ctx context.Context, args ffmpeg.Args) error { return g.generateWithContext(ctx, lockCtx, args) }
 		d, err := ffmpeg.RunIntelGenerationWork(lockCtx, plan, func(ctx context.Context) error {
@@ -112,7 +92,7 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 				return err
 			}
 			return hw.validateIntelMarkerOutput(ctx, output)
-		}, software, runner)
+		}, nil, runner)
 		g.reportPreview(d)
 		return err
 	}

@@ -312,7 +312,12 @@ func (g Generator) PreviewWebp(ctx context.Context, input string, hash string) e
 	}
 
 	logger.Infof("[generator] generating webp preview for %s", input)
-	g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: "software", Actual: "software", Stage: "webp", Reason: "lossless WebP encoding is CPU work"})
+	if g.IntelPreviews != nil && g.IntelPreviews.Enabled() {
+		err := fmt.Errorf("GPU scene lossless animated WebP encoding is unsupported; explicitly select software generation")
+		g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: "webp", Reason: err.Error()})
+		return err
+	}
+	g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: "software", Actual: "software", Stage: "webp"})
 
 	src := g.ScenePaths.GetVideoPreviewPath(hash)
 
@@ -327,6 +332,9 @@ func (g Generator) PreviewWebp(ctx context.Context, input string, hash string) e
 
 func (g Generator) previewVideoToImage(input string) generateFn {
 	return func(lockCtx *fsutil.LockContext, tmpFn string) error {
+		if g.IntelPreviews != nil && g.IntelPreviews.Enabled() {
+			return fmt.Errorf("GPU scene lossless animated WebP encoding is unsupported; explicitly select software generation")
+		}
 		var videoFilter ffmpeg.VideoFilter
 		videoFilter = videoFilter.ScaleWidth(scenePreviewWidth)
 		videoFilter = videoFilter.Fps(scenePreviewImageFPS)
