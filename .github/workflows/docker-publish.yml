@@ -52,8 +52,10 @@ jobs:
       contents: read
       actions: read
     env:
-      VALIDATION_PLAN_PATH: ${{ runner.temp }}/validation-plan.json
-      PACKAGING_EVIDENCE_PATH: ${{ runner.temp }}/pr-packaging.json
+      # Job env cannot use the runner context. /tmp is outside Docker's context;
+      # GitHub-hosted jobs have isolated filesystems, including this proof file.
+      VALIDATION_PLAN_PATH: /tmp/vexxx-validation-plan-${{ github.run_id }}-${{ github.run_attempt }}.json
+      PACKAGING_EVIDENCE_PATH: /tmp/pr-packaging.json
       # Freeze the declared variable inputs for both proof and Docker invocation.
       POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_CLI_PROJECT_ID }}
       POSTHOG_CLI_HOST: ${{ vars.POSTHOG_CLI_HOST }}
@@ -376,7 +378,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pr-packaging-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pr-packaging.json
+          path: ${{ env.PACKAGING_EVIDENCE_PATH }}
           if-no-files-found: error
           retention-days: 7
 

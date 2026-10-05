@@ -224,6 +224,12 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertFalse(document['on']['workflow_dispatch']['inputs']['publish_latest']['default'])
         jobs = document["jobs"]
         validator = jobs['ci-required']
+        # runner is available in step contexts, not jobs.<job_id>.env. GitHub
+        # rejects the entire workflow before jobs if these paths use it there.
+        self.assertNotIn('runner.', json.dumps(validator.get('env', {})))
+        self.assertEqual(validator['env']['PACKAGING_EVIDENCE_PATH'], '/tmp/pr-packaging.json')
+        evidence_save = next(step for step in validator['steps'] if step.get('name') == 'Save PR packaging evidence')
+        self.assertEqual(evidence_save['with']['path'], '${{ env.PACKAGING_EVIDENCE_PATH }}')
         self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read'})
         self.assertNotIn('needs', validator)  # Required check starts immediately.
         self.assertNotIn('if', validator)  # It must never be skipped for a draft.
