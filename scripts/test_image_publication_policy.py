@@ -224,7 +224,13 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertFalse(document['on']['workflow_dispatch']['inputs']['publish_latest']['default'])
         jobs = document["jobs"]
         validator = jobs['ci-required']
-        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read'})
+        # runner is available in step contexts, not jobs.<job_id>.env. GitHub
+        # rejects the entire workflow before jobs if these paths use it there.
+        self.assertNotIn('runner.', json.dumps(validator.get('env', {})))
+        self.assertEqual(validator['env']['PACKAGING_EVIDENCE_PATH'], '/tmp/pr-packaging.json')
+        evidence_save = next(step for step in validator['steps'] if step.get('name') == 'Save PR packaging evidence')
+        self.assertEqual(evidence_save['with']['path'], '${{ env.PACKAGING_EVIDENCE_PATH }}')
+        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read', 'id-token': 'write'})
         self.assertNotIn('needs', validator)  # Required check starts immediately.
         self.assertNotIn('if', validator)  # It must never be skipped for a draft.
         self.assertFalse(any('login-action' in step.get('uses', '') for step in validator['steps']))
@@ -272,6 +278,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                                    'REQUIRED_FRONTEND': 'false', 'REQUIRED_PYTHON': 'false',
                                    'REUSED_BACKEND': 'false', 'REUSED_FRONTEND': 'false', 'REUSED_PYTHON': 'false',
                                    'BUILD_IMAGE': image_selected, 'IMAGE_RESULT': image_result,
+                                   'PACKAGING_REUSED': 'false', 'EXECUTE_IMAGE': image_selected,
                                    'BACKEND': selected, 'FRONTEND': 'false', 'PYTHON': 'false',
                                    'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary')}
                             env.update(BACKEND_RESULT=test_result,
@@ -292,6 +299,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                        'REQUIRED_FRONTEND': 'false', 'REQUIRED_PYTHON': 'false',
                        'REUSED_BACKEND': 'false', 'REUSED_FRONTEND': 'false', 'REUSED_PYTHON': 'false',
                        'IMAGE_RESULT': 'skipped', 'BACKEND': 'false', 'FRONTEND': 'false', 'PYTHON': 'false',
+                       'PACKAGING_REUSED': 'false', 'EXECUTE_IMAGE': 'false',
                        'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary'), **override}
                 env.update(BACKEND_RESULT='skipped', BACKEND_GENERATE_RESULT='skipped', BACKEND_COMPILE_RESULT='skipped',
                            FRONTEND_RESULT='skipped', FRONTEND_GENERATE_RESULT='skipped', FRONTEND_COMPILE_RESULT='skipped',

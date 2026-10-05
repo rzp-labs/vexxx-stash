@@ -175,6 +175,8 @@ def main():
     elif name == "push":
         result.update(base=event.get("before", ""), head=event.get("after", sha))
     print(json.dumps(result, sort_keys=True))
+    if os.environ.get("VALIDATION_PLAN_PATH"):
+        Path(os.environ["VALIDATION_PLAN_PATH"]).write_text(json.dumps(result, sort_keys=True))
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
             summary.write("### Validation plan\n\n```json\n" + json.dumps(result, sort_keys=True, indent=2) + "\n```\n")

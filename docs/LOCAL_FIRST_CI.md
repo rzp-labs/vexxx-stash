@@ -38,14 +38,49 @@ attempt, and successful classifier/aggregate/domain steps. The summary records
 source run/attempt, commit/workflow revision, workflow digest and domain coverage.
 Unproven domains execute normally; missing, pending, failed, stale, mismatched or
 inaccessible evidence triggers normal execution. PR checks, tree equality and
-nearby commits are insufficient. Ordinary PR/master validation does not reuse
-results.
+nearby commits are insufficient for release test reuse. Ordinary PR/master tests
+still execute their selected domains.
+
+For a packaging-changing PR, a successful real build/smoke can record a small
+seven-day evidence artifact containing identities, hashes, resolved base-image
+materials and a GitHub-signed workflow/job receipt. A normal two-parent master merge may reuse that packaging validation
+only when the same-repository merged PR, ordered base/head parents, synthetic
+merge tree, immutable workflow, declared variable inputs and selected coverage
+match. The receipt's signature and proof-hash audience independently bind the
+actual source workflow/checkout, PR ref, run/attempt and job; artifact assertions
+alone cannot authorize reuse. Historical receipts must have been valid during the
+completed source job, and unavailable signing keys force a rebuild. Registry reads
+must confirm that mutable base tags still resolve to the
+source build's actual material digests. The current run also checks its own landed
+checkout identity and runs master tests/generation normally. The final gate accepts
+skipped build/smoke only with this complete proof and records the source run/attempt,
+candidate/landed commits and input/workflow hashes. Unsupported or absent source
+provenance, expired artifacts, squash/rebase landings, changed inputs, stale run
+attempts and API/registry failures rebuild normally. Branch protection is unchanged.
+The proof confirms the same declared recipe/variables and current registry base
+materials; it does not re-resolve every APK/npm repository response or tool download.
+It reuses recent validation evidence, not binary equivalence or a freshly built image.
+
+The explicitly approved `id-token: write` permission applies to the entire
+`ci-required` job across its existing triggers. Only successful same-repository PR
+packaging validation requests the proof-bound receipt. Receipt values and request
+errors are never logged, and no token is exchanged with a cloud provider or cloud
+trust configured. Missing receipt access still makes master packaging build normally.
+The publishing job receives no new permission; ordinary GitHub credentials,
+branch rules and the published release are unchanged.
+
+This reuses packaging evidence, never a synthetic-merge image. Its commit/version/
+date metadata is deliberately distinct from landed master; no image is represented
+as built for the landed SHA. Tag and manual candidates always build and smoke-test
+their own final image, including release identity and PostHog UI maps/chunk IDs.
 
 For image candidates, the existing Docker stages compile each production output
 once and use those outputs in the final image. Host production compilation is
 omitted in that case; ordinary non-image validation still compiles on the host.
 An ordinary validation binary is never promoted into a release: release metadata,
-hidden source maps/chunk IDs and unstripped native symbols remain release-specific.
+hidden source maps/chunk IDs remain release-specific. Validation Docker builds
+already retain native symbols; publication uploads those from its exact release
+binary. Native symbols alone are not a reason to repeat an equivalent build.
 
 ## Existing commands
 
@@ -56,6 +91,7 @@ installation is needed for these fast offline checks:
 python3 -m unittest discover -s scripts -p test_image_publication_policy.py
 python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
 python3 -m unittest discover -s scripts -p test_reuse_master_validation.py
+python3 -m unittest discover -s scripts -p test_reuse_pr_packaging.py
 ```
 
 For a candidate affecting both application domains, the existing commands are:
