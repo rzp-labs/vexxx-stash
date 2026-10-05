@@ -60,3 +60,16 @@ func TestPanicExceptionRedactsPrivateValuesAndKeepsFilesystemOperation(t *testin
 		}
 	}
 }
+
+func TestDiagnosticBinaryPathPreservesReleaseIdentity(t *testing.T) {
+	for input, expected := range map[string]string{
+		"/usr/bin/stash":             "/usr/bin/stash",
+		"/usr/local/bin/stash":       "/usr/local/bin/stash",
+		"/Users/private/build/stash": "stash",
+		"/mnt/user/private/stash":    "stash",
+	} {
+		if actual := diagnosticBinaryPath(input); actual != expected {
+			t.Errorf("%q: got %q, want %q", input, actual, expected)
+		}
+	}
+}

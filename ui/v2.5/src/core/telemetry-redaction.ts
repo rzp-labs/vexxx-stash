@@ -113,7 +113,7 @@ export function diagnosticMessage(value: unknown): string {
     } ${identifier[2]}`;
   // Keep HTTP status and operation while dropping response bodies/status text.
   const http = value.match(
-    /^(HTTP|Backend error|funscript fetch failed|Script upload failed \(HTTP|Auth failed \(HTTP)[ :]+([1-5]\d{2})(?:\))?(?::.*)?$/s
+    /^(HTTP|Backend error|funscript fetch failed|Script upload failed \(HTTP|Auth failed \(HTTP)[ :]+([1-5]\d{2})(?:\))?(?:(?::|\s).*)?$/s
   );
   if (http)
     return `${http[1]} ${http[2]}${

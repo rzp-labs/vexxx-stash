@@ -58,6 +58,13 @@ describe("actionable error messages without private payloads", () => {
       )
     ).toBe("Invalid JSON [input redacted]");
   });
+  it("retains status from the actual StashTag space-delimited response format", () => {
+    expect(
+      diagnosticMessage(
+        "Backend error: 503 private title /media/private.mp4 token=secret"
+      )
+    ).toBe("Backend error 503 [response redacted]");
+  });
   it.each([
     "private.mp4 secret",
     "Jane Smith",

@@ -62,9 +62,18 @@ func PanicException(value any) posthog.Exception {
 		}
 	}
 	for i := range exception.DebugImages {
-		exception.DebugImages[i].CodeFile = "stash"
+		exception.DebugImages[i].CodeFile = diagnosticBinaryPath(exception.DebugImages[i].CodeFile)
 	}
 	return exception
+}
+
+func diagnosticBinaryPath(filename string) string {
+	// Preserve the SDK's standard release image identity. These fixed public
+	// executable locations contain no private installation/build directory.
+	if filename == "/usr/bin/stash" || filename == "/usr/local/bin/stash" {
+		return filename
+	}
+	return "stash"
 }
 
 func diagnosticSourcePath(filename string) string {
