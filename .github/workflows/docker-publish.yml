@@ -51,6 +51,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      id-token: write
     env:
       # Job env cannot use the runner context. /tmp is outside Docker's context;
       # GitHub-hosted jobs have isolated filesystems, including this proof file.

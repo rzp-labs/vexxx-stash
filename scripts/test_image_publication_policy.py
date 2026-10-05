@@ -230,7 +230,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertEqual(validator['env']['PACKAGING_EVIDENCE_PATH'], '/tmp/pr-packaging.json')
         evidence_save = next(step for step in validator['steps'] if step.get('name') == 'Save PR packaging evidence')
         self.assertEqual(evidence_save['with']['path'], '${{ env.PACKAGING_EVIDENCE_PATH }}')
-        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read'})
+        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read', 'id-token': 'write'})
         self.assertNotIn('needs', validator)  # Required check starts immediately.
         self.assertNotIn('if', validator)  # It must never be skipped for a draft.
         self.assertFalse(any('login-action' in step.get('uses', '') for step in validator['steps']))

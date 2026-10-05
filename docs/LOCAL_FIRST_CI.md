@@ -61,12 +61,13 @@ The proof confirms the same declared recipe/variables and current registry base
 materials; it does not re-resolve every APK/npm repository response or tool download.
 It reuses recent validation evidence, not binary equivalence or a freshly built image.
 
-The draft implementation does not grant `id-token: write`: adding that source-job
-permission needs explicit security-permission approval before activation. Without
-it, no signed receipt can be recorded and master packaging builds normally. Receipt
-values and request errors are never logged, and no token is exchanged with a cloud
-provider. This approval dependency is separate from ordinary GitHub credentials;
-the existing authentication, branch rules and published release are unchanged.
+The explicitly approved `id-token: write` permission applies to the entire
+`ci-required` job across its existing triggers. Only successful same-repository PR
+packaging validation requests the proof-bound receipt. Receipt values and request
+errors are never logged, and no token is exchanged with a cloud provider or cloud
+trust configured. Missing receipt access still makes master packaging build normally.
+The publishing job receives no new permission; ordinary GitHub credentials,
+branch rules and the published release are unchanged.
 
 This reuses packaging evidence, never a synthetic-merge image. Its commit/version/
 date metadata is deliberately distinct from landed master; no image is represented
