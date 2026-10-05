@@ -24,8 +24,8 @@ func (s IntelSource) ValidatePreview() error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
-	if s.SampleAspectRatio != "1:1" && s.SampleAspectRatio != "1/1" && s.SampleAspectRatio != "1" {
-		return fmt.Errorf("sample aspect ratio %q requires software scene previews", s.SampleAspectRatio)
+	if !s.HasSquareOrUnspecifiedSampleAspectRatio() {
+		return fmt.Errorf("sample aspect ratio %q (display aspect ratio %q) requires software scene previews", s.SampleAspectRatio, s.DisplayAspectRatio)
 	}
 	return nil
 }

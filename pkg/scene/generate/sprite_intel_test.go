@@ -33,7 +33,7 @@ func TestIntelSpriteEligibilityConservative(t *testing.T) {
 		{"10-bit", func(s *ffmpeg.IntelSource) { s.PixelFormat = "yuv420p10le" }},
 		{"HDR", func(s *ffmpeg.IntelSource) { s.ColorTransfer = "smpte2084" }},
 		{"anamorphic", func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "4:3" }},
-		{"SAR unknown", func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "" }},
+		{"SAR malformed", func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "0:0" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -41,6 +41,25 @@ func TestIntelSpriteEligibilityConservative(t *testing.T) {
 			tt.change(&s)
 			if err := intelSpriteEligibility(s, "vaapi"); err == nil {
 				t.Fatal("unsupported input accepted")
+			}
+		})
+	}
+}
+
+func TestIntelSpriteUnspecifiedSARRequiresCanonicalVAAPIScale(t *testing.T) {
+	for _, sar := range []string{"", "N/A", "0:1", "0/1"} {
+		t.Run(sar, func(t *testing.T) {
+			s := ffmpeg.IntelSource{Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080,
+				SampleAspectRatio: sar, FrameRate: "60/1", AverageFrameRate: "60/1", Duration: "10"}
+			if err := intelSpriteEligibility(s, "vaapi"); err != nil {
+				t.Fatal(err)
+			}
+			if err := intelSpriteEligibility(s, "qsv"); err == nil {
+				t.Fatal("QSV hardware scaler's unspecified-SAR guard changed")
+			}
+			s.DisplayAspectRatio = "4:3"
+			if err := intelSpriteEligibility(s, "vaapi"); err == nil {
+				t.Fatal("non-square display geometry accepted with absent SAR")
 			}
 		})
 	}
