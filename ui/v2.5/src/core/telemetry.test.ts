@@ -43,6 +43,7 @@ describe("private media telemetry", () => {
     ).toBeNull();
     const sanitized = sanitizeTelemetry({
       ...event("$identify", {
+        $user_id: "42",
         $current_url: "https://private/media.mp4?token=secret",
         $referrer: "private",
         secret: "secret",
@@ -69,8 +70,7 @@ describe("private media telemetry", () => {
             stacktrace: {
               frames: [
                 {
-                  filename:
-                    "https://private-host/assets/index-Ab12.js?token=secret",
+                  filename: `${window.location.origin}/assets/index-Ab12Cd34.js?token=secret`,
                   lineno: 12,
                   colno: 45,
                   function: "render",
@@ -92,7 +92,7 @@ describe("private media telemetry", () => {
     );
     expect(sanitized?.properties.$exception_list[0].stacktrace.frames).toEqual([
       {
-        filename: "/assets/index-Ab12.js",
+        filename: "/assets/index-Ab12Cd34.js",
         platform: "web:javascript",
         in_app: true,
         lineno: 12,
@@ -104,6 +104,84 @@ describe("private media telemetry", () => {
     expect(JSON.stringify(sanitized)).not.toMatch(
       /private|secret|context_line|react_component_stack/
     );
+  });
+  it("rejects identities without the authenticated numeric user ID and role", () => {
+    for (const properties of [
+      {},
+      { $user_id: "42", $set: { user_role: "unknown" } },
+      { $user_id: "43", $set: { user_role: "ADMIN" } },
+      {
+        distinct_id: "00000000-0000-4000-8000-000000000000",
+        $set: { user_role: "ADMIN" },
+      },
+    ]) {
+      expect(sanitizeTelemetry(event("$identify", properties))).toBeNull();
+    }
+  });
+  it("rejects foreign, plugin and unversioned private asset names", () => {
+    const sanitized = sanitizeTelemetry(
+      event("$exception", {
+        $exception_list: [
+          {
+            stacktrace: {
+              frames: [
+                {
+                  filename: "https://foreign.example/assets/index-Ab12Cd34.js",
+                },
+                {
+                  filename: `${window.location.origin}/plugin/private/assets/index-Ab12Cd34.js`,
+                },
+                {
+                  filename: `${window.location.origin}/assets/private-media.js`,
+                },
+                {
+                  filename: `${window.location.origin}/assets/nested/index-Ab12Cd34.js`,
+                },
+              ],
+            },
+          },
+        ],
+      })
+    );
+    expect(sanitized?.properties.$exception_list[0].stacktrace.frames).toEqual(
+      []
+    );
+  });
+  it("supports the configured reverse proxy base without retaining its name", () => {
+    const base = document.createElement("base");
+    base.href = "/private-installation/";
+    document.head.appendChild(base);
+    try {
+      const sanitized = sanitizeTelemetry(
+        event("$exception", {
+          $exception_list: [
+            {
+              stacktrace: {
+                frames: [
+                  {
+                    filename: `${window.location.origin}/private-installation/assets/index-Ab12Cd34.js`,
+                  },
+                  {
+                    filename: `${window.location.origin}/assets/index-Ab12Cd34.js`,
+                  },
+                ],
+              },
+            },
+          ],
+        })
+      );
+      expect(
+        sanitized?.properties.$exception_list[0].stacktrace.frames
+      ).toEqual([
+        {
+          filename: "/assets/index-Ab12Cd34.js",
+          platform: "web:javascript",
+          in_app: true,
+        },
+      ]);
+    } finally {
+      base.remove();
+    }
   });
   it("categorizes page views without IDs, queries, filenames or installation prefix", () => {
     window.history.replaceState(

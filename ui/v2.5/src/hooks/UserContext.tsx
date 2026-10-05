@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo } from "react";
 import posthog from "posthog-js/no-external";
+import { ServerError } from "@apollo/client";
 import * as GQL from "src/core/generated-graphql";
 
 interface IUserContextType {
@@ -39,6 +40,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({
   const {
     data: userData,
     loading: userLoading,
+    error: userError,
     refetch,
   } = GQL.useCurrentUserQuery({
     fetchPolicy: "cache-and-network",
@@ -51,9 +53,17 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const currentUser = userData?.currentUser;
   useEffect(() => {
-    if (userLoading || !userData || !posthog.__loaded) return;
+    if (userLoading || !posthog.__loaded) return;
 
     const previousUserId = posthog.get_property("$user_id");
+    if (
+      (userError?.networkError as ServerError | undefined)?.statusCode === 401
+    ) {
+      if (previousUserId) posthog.reset();
+      return;
+    }
+    // A transient failure does not establish an anonymous session.
+    if (userError || !userData) return;
     if (previousUserId && previousUserId !== currentUser?.id) {
       posthog.reset();
     }
@@ -62,7 +72,7 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({
         user_role: currentUser.role,
       });
     }
-  }, [userLoading, userData, currentUser]);
+  }, [userLoading, userData, userError, currentUser]);
 
   const value = useMemo(() => {
     const user = userData?.currentUser ?? null;

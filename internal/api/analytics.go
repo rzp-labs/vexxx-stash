@@ -6,10 +6,14 @@ import (
 
 	"github.com/posthog/posthog-go"
 	"github.com/stashapp/stash/internal/analytics"
+	"github.com/stashapp/stash/internal/manager"
+	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/models"
+	"github.com/stashapp/stash/pkg/session"
 )
 
 // captureAuthenticatedEvent records a completed API action. Database-backed
-// requests use the immutable user ID established by authentication middleware;
+// requests resolve the immutable user ID only when emitting an enabled event;
 // legacy single-user mode uses a non-identifying server ID without person profiles.
 func captureAuthenticatedEvent(ctx context.Context, event string) {
 	client := analytics.Client()
@@ -17,6 +21,23 @@ func captureAuthenticatedEvent(ctx context.Context, event string) {
 		return
 	}
 
+	// Keep telemetry identity resolution off streaming/assets/ordinary API paths,
+	// and do no database work at all when telemetry is disabled.
+	if authCtx := GetAuthContext(ctx); authCtx == nil || authCtx.User == nil {
+		if username := session.GetCurrentUserID(ctx); username != nil && *username != "" {
+			mgr := manager.GetInstance()
+			var user *models.User
+			if err := mgr.Repository.WithReadTxn(ctx, func(ctx context.Context) error {
+				var err error
+				user, err = mgr.Repository.User.FindByUsername(ctx, *username)
+				return err
+			}); err != nil {
+				logger.Errorf("Error resolving analytics user ID: %v", err)
+			} else if user != nil {
+				ctx = SetAuthContext(ctx, &AuthorizationContext{User: user})
+			}
+		}
+	}
 	client.Enqueue(authenticatedCapture(ctx, event))
 }
 

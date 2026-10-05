@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 	"github.com/stashapp/stash/internal/manager"
 	"github.com/stashapp/stash/internal/manager/config"
 	"github.com/stashapp/stash/pkg/logger"
-	"github.com/stashapp/stash/pkg/models"
 	"github.com/stashapp/stash/pkg/session"
 )
 
@@ -116,21 +114,6 @@ func authenticateHandler() func(http.Handler) http.Handler {
 			}
 
 			ctx = session.SetCurrentUserID(ctx, userID)
-			if userID != "" {
-				mgr := manager.GetInstance()
-				var user *models.User
-				if err := mgr.Repository.WithReadTxn(ctx, func(ctx context.Context) error {
-					var err error
-					user, err = mgr.Repository.User.FindByUsername(ctx, userID)
-					return err
-				}); err != nil {
-					logger.Errorf("Error loading authenticated user context: %v", err)
-				} else if user != nil {
-					// Downstream captures use this request-scoped user record to
-					// obtain the stable database primary key as DistinctId.
-					ctx = SetAuthContext(ctx, &AuthorizationContext{User: user})
-				}
-			}
 
 			r = r.WithContext(ctx)
 

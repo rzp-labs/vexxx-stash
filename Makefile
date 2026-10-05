@@ -173,6 +173,9 @@ flags-posthog-macos:
 	$(NOOP)
 	$(eval LDFLAGS += -compressdwarf=false)
 
+# Pinned CLI 0.16.2 uses process credentials first and consults this local
+# dotenv fallback only when required variables are absent. Docker publication
+# supplies key/project/host in the environment; no root .env is needed there.
 .PHONY: posthog-symbols-upload
 posthog-symbols-upload:
 	posthog-cli --dotenv-file .env symbol-sets upload --directory $(POSTHOG_SYMBOL_DIR) --include-source

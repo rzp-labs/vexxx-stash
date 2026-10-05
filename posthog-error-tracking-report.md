@@ -23,6 +23,8 @@ fixed event names, a database user ID, and build version/revision. No mutation
 inputs, filenames, media URLs, content or request headers are attached. Anonymous
 and legacy single-user actions use `server` without creating a person profile.
 Login identification exports only the database ID and role, never the username.
+The database lookup runs only when an enabled event is emitted, never in the
+authentication middleware or when telemetry is disabled.
 IDs are scoped to the installation; use separate PostHog projects for unrelated
 installations to avoid cross-installation ID collisions.
 
@@ -38,9 +40,12 @@ query strings, DOM data, arbitrary person properties, raw error messages,
 React component text and stack source context. Error payloads retain standard
 error types, generated asset filenames, safe function names, line/column numbers,
 chunk IDs, revision, and pseudonymous user/session IDs. Media and plugin frames
-are excluded. DOM autocapture, replay, console capture, performance capture,
+are excluded: retained frames must match this installation's own asset directory
+and Vite's hashed JavaScript bundle names. DOM autocapture, replay, console capture, performance capture,
 remote feature configuration, surveys and remote script loading are disabled.
-The error parser is bundled locally. Logout/account changes reset browser identity.
+The error parser is bundled locally. Logout/account changes and confirmed expired
+sessions reset browser identity; transient server errors preserve it. Identification
+requires a matching positive database ID and known role.
 
 ## Symbols and releases
 

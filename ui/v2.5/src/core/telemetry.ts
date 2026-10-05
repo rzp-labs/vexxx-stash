@@ -4,6 +4,31 @@ import "posthog-js/dist/exception-autocapture";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const identity = /^(\d+|[0-9a-f-]{36})$/i;
+// The embedded UI uses Vite's hashed bundles under its own assets directory.
+// Plugin, media and foreign scripts must never become diagnostic filenames.
+function bundleFilename(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const base = new URL(
+      document.querySelector("base")?.href || "/",
+      window.location.origin
+    );
+    const assets = new URL("assets/", base);
+    const frame = new URL(value, base);
+    if (
+      frame.origin !== window.location.origin ||
+      assets.origin !== window.location.origin ||
+      !frame.pathname.startsWith(assets.pathname)
+    )
+      return undefined;
+    const name = frame.pathname.slice(assets.pathname.length);
+    return /^[A-Za-z0-9_.-]+-[A-Za-z0-9_-]{8}\.js$/.test(name)
+      ? `/assets/${name}`
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 const errorTypes = new Set([
   "Error",
   "TypeError",
@@ -43,8 +68,14 @@ export function sanitizeTelemetry(
   }
   if (event.event === "$identify") {
     const role = event.$set?.user_role ?? source.$set?.user_role;
-    if (["admin", "viewer", "ADMIN", "VIEWER"].includes(role))
-      properties.$set = { user_role: role };
+    if (
+      !["admin", "viewer", "ADMIN", "VIEWER"].includes(role) ||
+      typeof source.distinct_id !== "string" ||
+      !/^[1-9]\d*$/.test(source.distinct_id) ||
+      source.$user_id !== source.distinct_id
+    )
+      return null;
+    properties.$set = { user_role: role };
     properties.$process_person_profile = true;
   }
   if (event.event === "$pageview") {
@@ -82,12 +113,7 @@ export function sanitizeTelemetry(
           ? item.stacktrace.frames
           : []
         ).flatMap((frame: Record<string, unknown>) => {
-          const filename =
-            typeof frame.filename === "string"
-              ? frame.filename
-                  .match(/\/assets\/[A-Za-z0-9_.-]+\.js(?:[?#].*)?$/)?.[0]
-                  .split(/[?#]/)[0]
-              : undefined;
+          const filename = bundleFilename(frame.filename);
           if (!filename) return [];
           const safe: Record<string, unknown> = {
             filename,

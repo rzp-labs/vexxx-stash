@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stashapp/stash/pkg/models"
+	"github.com/stashapp/stash/pkg/session"
 )
 
 func TestAuthenticatedCapturePrivacyAndAnonymousEvents(t *testing.T) {
@@ -37,4 +38,11 @@ func TestAuthenticatedCapturePrivacyAndAnonymousEvents(t *testing.T) {
 			t.Fatal("username exported")
 		}
 	}
+}
+
+// No manager/repository is initialized in this test: a disabled SDK must return
+// before trying to resolve the account, even with a restored authenticated session.
+func TestDisabledTelemetryDoesNotResolveUser(t *testing.T) {
+	ctx := session.SetCurrentUserID(context.Background(), "private-user-name")
+	captureAuthenticatedEvent(ctx, "scene_created")
 }

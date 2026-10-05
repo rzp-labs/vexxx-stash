@@ -132,6 +132,37 @@ describe("UserContext", () => {
       expect(posthog.identify).not.toHaveBeenCalled();
     });
 
+    it("clears a persisted account when the server rejects an expired session", async () => {
+      vi.mocked(posthog.get_property).mockReturnValue("previous-user");
+      const { waitFor } = renderHook(() => useCurrentUser(), {
+        wrapper: createWrapper([
+          {
+            request: { query: CURRENT_USER_QUERY },
+            error: Object.assign(new Error("expired"), { statusCode: 401 }),
+          },
+          createUserCountMock(1),
+        ]),
+      });
+      await waitFor(() => expect(posthog.reset).toHaveBeenCalledOnce());
+      expect(posthog.identify).not.toHaveBeenCalled();
+    });
+
+    it("preserves an existing identity during a transient server failure", async () => {
+      vi.mocked(posthog.get_property).mockReturnValue("previous-user");
+      const { result, waitFor } = renderHook(() => useCurrentUser(), {
+        wrapper: createWrapper([
+          {
+            request: { query: CURRENT_USER_QUERY },
+            error: Object.assign(new Error("unavailable"), { statusCode: 503 }),
+          },
+          createUserCountMock(1),
+        ]),
+      });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(posthog.reset).not.toHaveBeenCalled();
+      expect(posthog.identify).not.toHaveBeenCalled();
+    });
+
     it("does not identify when the SDK is disabled", async () => {
       posthog.__loaded = false;
       const { result, waitFor } = renderHook(() => useCurrentUser(), {
