@@ -177,9 +177,6 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 	if g.IntelMarker.Backend == "qsv" {
 		return reject("quality", fmt.Errorf("QSV marker quality mapping has not passed representative visual acceptance; explicitly select VAAPI or software generation"))
 	}
-	if options.VRMode != "" {
-		return reject("eligibility", fmt.Errorf("GPU VR projection is unsupported; explicitly select software generation"))
-	}
 	release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
 	if err != nil {
 		return err
@@ -189,7 +186,7 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 	if err != nil {
 		return reject("metadata", err)
 	}
-	plan, err := ffmpeg.NewIntelPreviewPlan(*g.IntelMarker, source, input, options.Seconds, markerPreviewWidth)
+	plan, err := ffmpeg.NewIntelProjectedPreviewPlan(*g.IntelMarker, source, input, options.Seconds, markerPreviewWidth, options.VRMode)
 	if err != nil {
 		return reject("eligibility", err)
 	}
@@ -363,9 +360,6 @@ func (g Generator) generateIntelMarkerScreenshot(lockCtx *fsutil.LockContext, in
 		}
 		return fmt.Errorf("GPU marker screenshot %s: %w", stage, reason)
 	}
-	if options.VRMode != "" {
-		return reject("eligibility", fmt.Errorf("GPU VR projection is unsupported; explicitly select software generation"))
-	}
 	if math.IsNaN(options.Seconds) || math.IsInf(options.Seconds, 0) || options.Seconds < 0 {
 		return reject("eligibility", fmt.Errorf("marker screenshot requires a finite nonnegative start"))
 	}
@@ -380,9 +374,12 @@ func (g Generator) generateIntelMarkerScreenshot(lockCtx *fsutil.LockContext, in
 	}
 	width := options.Width
 	if width <= 0 {
-		width = source.Width
+		width, _ = ffmpeg.IntelDisplayDimensions(source)
+		if options.VRMode != "" {
+			width = 1280
+		}
 	}
-	plan, err := ffmpeg.NewIntelSpritePlan(*g.IntelMarker, source, input, options.Seconds, width)
+	plan, err := ffmpeg.NewIntelProjectedSpritePlan(*g.IntelMarker, source, input, options.Seconds, width, options.VRMode)
 	if err != nil {
 		return reject("eligibility", err)
 	}

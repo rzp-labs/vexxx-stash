@@ -483,7 +483,7 @@
         "persisted": "Saved requests: markers {marker}, sprites {sprite}, scene previews {preview}. Controls below are drafts until saved.",
         "enabled": "enabled",
         "disabled": "disabled",
-        "diagnostics": "Backend selection is a request, not a capability check. Each generation job logs the actual backend and failure stage. GPU requests fail explicitly when unsupported. Lossless animated WebP and VR projection require software selection. These controls do not change playback or enable GPU pHash.",
+        "diagnostics": "Backend selection is a request, not a capability check. Each generation job logs the actual backend and failure stage. GPU requests fail explicitly when unsupported. Supported VR, HDR, rotation and reflections render on the selected GPU. Lossless animated WebP requires software selection. These controls do not change playback or enable GPU pHash.",
         "generationMarkerBackend": "Marker MP4 generation backend",
         "generationSpriteBackend": "Scrubber sprite generation backend",
         "generationPreviewBackend": "Scene MP4 preview generation backend",

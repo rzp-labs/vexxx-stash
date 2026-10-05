@@ -3,7 +3,29 @@ package ffmpeg
 import (
 	"context"
 	"fmt"
+	"math"
+	"math/big"
 )
+
+// IntelPreviewSARFilter preserves display aspect after the canonical even-height
+// rounding. scale_vaapi adjusts its output link SAR but copies the input frame
+// SAR into encoded frames; setsar repairs only metadata on resident surfaces.
+func IntelPreviewSARFilter(source IntelSource, width int) string {
+	displayWidth, displayHeight := IntelDisplayDimensions(source)
+	if displayWidth <= 0 || displayHeight <= 0 || width <= 0 {
+		return ""
+	}
+	height := int(math.Round(float64(displayHeight)*float64(width)/float64(displayWidth)/2)) * 2
+	if height < 2 {
+		height = 2
+	}
+	sar := big.NewRat(int64(displayWidth), int64(displayHeight))
+	sar.Mul(sar, big.NewRat(int64(height), int64(width)))
+	if sar.Cmp(big.NewRat(1, 1)) == 0 {
+		return ""
+	}
+	return "setsar=sar=" + sar.RatString() + ":max=2147483647"
+}
 
 // IntelPreviewSource preserves automatic audio selection, independently of the
 // marker 8-bit guard and the sprite path's audio-free stream mapping.
@@ -16,7 +38,15 @@ func (f *FFProbe) IntelPreviewSource(ctx context.Context, input string) (IntelSo
 }
 
 func (s IntelSource) ValidatePreview() error {
-	if s.isMain10Sprite() {
+	if IntelSourceHDR(s) {
+		if !IntelHDRSourceValid(s) {
+			return fmt.Errorf("GPU HDR preview requires explicit HEVC Main10 PQ/HLG BT.2020 limited-range interpretation")
+		}
+		// This validation copy checks geometry/rotation without broadening the
+		// generic generation path. The original HDR tags feed the tone mapper.
+		s.PixelFormat = "yuv420p"
+		s.ColorTransfer, s.ColorPrimaries, s.ColorSpace = "", "", ""
+	} else if s.isMain10Sprite() {
 		// Only this documented SDR Main10 combination is converted to the scene
 		// preview's 8-bit output. HDR/wide gamut is not supported by this path.
 		s.PixelFormat = "yuv420p"
@@ -41,11 +71,18 @@ func NewIntelPreviewPlan(config IntelGenerationConfig, source IntelSource, input
 	if err := source.ValidatePreview(); err != nil {
 		return p, err
 	}
+	if IntelSourceHDR(source) {
+		return NewIntelHDRPreviewPlan(config, source, input, start, width)
+	}
 	if width <= 0 || width%2 != 0 {
 		return p, fmt.Errorf("preview output width must be positive and even")
 	}
+	rotation, err := IntelRotationFilter(config, source)
+	if err != nil {
+		return p, err
+	}
 	p.InputArgs = IntelInputArgs(config, source)
-	p.Filter = IntelScaleFilter(config, source, width, false) + ":mode=hq"
+	p.Filter = intelPrependRotation(rotation, IntelScaleFilter(config, source, width, false)+":mode=hq")
 	// VPP must preserve the source interpretation even after resizing below
 	// common SD/HD matrix boundaries. Unspecified tags remain unspecified.
 	if source.ColorSpace != "" && source.ColorSpace != "unknown" && source.ColorSpace != "unspecified" {
@@ -56,6 +93,9 @@ func NewIntelPreviewPlan(config IntelGenerationConfig, source IntelSource, input
 		p.Filter += ":out_range=limited"
 	case "pc":
 		p.Filter += ":out_range=full"
+	}
+	if sar := IntelPreviewSARFilter(source, width); sar != "" {
+		p.Filter += "," + sar
 	}
 	base := Args{"-v", "error", "-nostdin", "-abort_on", "empty_output", "-threads", "1"}
 	base = append(base, p.InputArgs...)

@@ -34,7 +34,7 @@ func TestIntelPreviewMain10IndependentEligibility(t *testing.T) {
 	}
 	for _, mutate := range []func(*IntelSource){
 		func(s *IntelSource) { s.ColorTransfer = "smpte2084" }, func(s *IntelSource) { s.ColorRange = "pc" },
-		func(s *IntelSource) { s.Rotation = 90 }, func(s *IntelSource) { s.SampleAspectRatio = "4:3" },
+		func(s *IntelSource) { s.Rotation = 45 }, func(s *IntelSource) { s.SampleAspectRatio = "4:3" },
 	} {
 		s := source
 		mutate(&s)
@@ -70,5 +70,57 @@ func TestIntelPreviewPreservesColorInterpretation(t *testing.T) {
 	}
 	if strings.Contains(plan.Filter, "out_color") || strings.Contains(plan.Filter, "out_range") {
 		t.Fatal("invented unspecified source tags", plan.Filter)
+	}
+}
+
+func TestIntelHDRRoutingRetainsStrictSourceInterpretation(t *testing.T) {
+	config := IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}
+	for _, transfer := range []string{"smpte2084", "arib-std-b67"} {
+		source := intelHDRFixture(transfer)
+		source.Rotation = 90
+		if err := source.ValidatePreview(); err != nil {
+			t.Fatal(err)
+		}
+		if err := source.ValidateSprite("vaapi"); err != nil {
+			t.Fatal(err)
+		}
+		if source.Validate() == nil || source.ValidateSprite("qsv") == nil {
+			t.Fatal("HDR support broadened generic or unvalidated backend eligibility")
+		}
+		for _, build := range []func(IntelGenerationConfig, IntelSource, string, float64, int) (IntelGenerationPlan, error){NewIntelPreviewPlan, NewIntelSpritePlan} {
+			plan, err := build(config, source, "HDR source.mp4", 1.125, 160)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(plan.Filter, "transpose_vaapi=dir=cclock:passthrough=none,") || !strings.Contains(plan.Filter, "tonemapping=bt.2390") || !strings.Contains(plan.Filter, "gamut_mode=perceptual") {
+				t.Fatalf("HDR went through SDR scaling or lost rotation: %s", plan.Filter)
+			}
+			if plan.Source.Width != source.Height || plan.Source.Height != source.Width || plan.Source.Rotation != 0 || plan.Source.ColorTransfer != "bt709" {
+				t.Fatalf("incorrect converted output geometry/interpretation: %+v", plan.Source)
+			}
+			if !strings.Contains(strings.Join(plan.InputArgs, " "), "-noautorotate -display_rotation 0") {
+				t.Fatal("HDR decoder would apply CPU autorotation", plan.InputArgs)
+			}
+		}
+		if source.ColorTransfer != transfer || source.ColorPrimaries != "bt2020" || source.PixelFormat != "yuv420p10le" || source.Rotation != 90 {
+			t.Fatal("validation changed original HDR input", source)
+		}
+		for _, mutate := range []func(*IntelSource){
+			func(s *IntelSource) { s.Width = 0 },
+			func(s *IntelSource) { s.Height = -1 },
+			func(s *IntelSource) { s.Rotation = 45 },
+			func(s *IntelSource) { s.SampleAspectRatio = "4:3" },
+			func(s *IntelSource) { s.ColorSpace = "bt709" },
+			func(s *IntelSource) { s.ColorPrimaries = "bt709" },
+			func(s *IntelSource) { s.ColorRange = "pc" },
+		} {
+			invalid := source
+			mutate(&invalid)
+			for _, build := range []func(IntelGenerationConfig, IntelSource, string, float64, int) (IntelGenerationPlan, error){NewIntelPreviewPlan, NewIntelSpritePlan} {
+				if _, err := build(config, invalid, "input", 0, 160); err == nil {
+					t.Fatalf("invalid HDR metadata accepted: %+v", invalid)
+				}
+			}
+		}
 	}
 }

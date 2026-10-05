@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"image"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -27,7 +29,7 @@ func TestIntelSpriteEligibilityGPU(t *testing.T) {
 			t.Fatal(sar, err)
 		}
 	}
-	for _, change := range []func(*ffmpeg.IntelSource){func(s *ffmpeg.IntelSource) { s.Rotation = 90 }, func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "4:3" }, func(s *ffmpeg.IntelSource) { s.ColorTransfer = "smpte2084" }} {
+	for _, change := range []func(*ffmpeg.IntelSource){func(s *ffmpeg.IntelSource) { s.Rotation = 45 }, func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "4:3" }, func(s *ffmpeg.IntelSource) { s.ColorTransfer = "smpte2084" }} {
 		s := source
 		change(&s)
 		if err := intelSpriteEligibility(s, "vaapi"); err == nil {
@@ -136,5 +138,42 @@ func TestIntelSpriteMetadataDeletionWaitsForOwner(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("metadata did not return")
+	}
+}
+
+func TestSoftwareSpriteTilesAcceptNewlineFilename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows filenames cannot contain newline")
+	}
+	binary, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	input := filepath.Join(t.TempDir(), "source\nname.mp4")
+	cmd := exec.CommandContext(ctx, binary, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=2:duration=1", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "1", input)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v %s", err, output)
+	}
+	g := Generator{Encoder: ffmpeg.NewEncoder(binary), LockManager: fsutil.NewReadLockManager()}
+	images, d, err := g.IntelSpriteTiles(ctx, input, []float64{0, 0.5})
+	if err != nil || len(images) != 2 || d.Actual != "software" {
+		t.Fatalf("images=%d diagnostic=%+v error=%v", len(images), d, err)
+	}
+	for _, img := range images {
+		if img.Bounds().Size() != image.Pt(160, 90) {
+			t.Fatal(img.Bounds())
+		}
+	}
+}
+
+func TestSoftwareSpriteTilesRejectInvalidTimestampsBeforeRendering(t *testing.T) {
+	g := Generator{}
+	for _, times := range [][]float64{nil, {-1}, {1, 0}, {math.NaN()}, {math.Inf(1)}} {
+		images, _, err := g.IntelSpriteTiles(context.Background(), "source\nname.mp4", times)
+		if err == nil || images != nil {
+			t.Fatalf("accepted invalid timestamps %v", times)
+		}
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/logger"
 )
 
@@ -18,15 +17,6 @@ func (g *SpriteGenerator) intelSpriteSheet(ctx context.Context, req spriteReques
 	if req.count <= 0 {
 		return true, fmt.Errorf("sprite tile count must be positive")
 	}
-	if req.vrMode != "" {
-		reason := "VR projection has no GPU sprite implementation"
-		d := ffmpeg.IntelGenerationDiagnostic{Selected: g.g.IntelSprites.Backend, Actual: "none", Stage: "eligibility", Reason: reason}
-		logger.Infof("[generator] sprite selected=%s actual=%s stage=%s reason=%s", d.Selected, d.Actual, d.Stage, d.Reason)
-		if g.g.IntelDiagnostic != nil {
-			g.g.IntelDiagnostic(d)
-		}
-		return true, fmt.Errorf("GPU sprite unsupported: %s", reason)
-	}
 	if req.slowSeek {
 		frames := make([]int, req.count)
 		step := float64(req.frameCount-1) / float64(req.count)
@@ -37,7 +27,7 @@ func (g *SpriteGenerator) intelSpriteSheet(ctx context.Context, req spriteReques
 			}
 			frames[i] = int(frame)
 		}
-		d, err := g.g.IntelSpriteSheetFrames(ctx, req.path, frames, g.Columns, g.Rows, g.ImageOutputPath)
+		d, err := g.g.IntelSpriteSheetFramesProjected(ctx, req.path, frames, g.Columns, g.Rows, g.ImageOutputPath, req.vrMode)
 		logger.Infof("[generator] sprite selected=%s actual=%s stage=%s reason=%s", d.Selected, d.Actual, d.Stage, d.Reason)
 		return true, err
 	}
@@ -50,7 +40,7 @@ func (g *SpriteGenerator) intelSpriteSheet(ctx context.Context, req spriteReques
 	for i := range times {
 		times[i] = req.startOffset + float64(i)*step
 	}
-	d, err := g.g.IntelSpriteSheet(ctx, req.path, times, g.Columns, g.Rows, g.ImageOutputPath)
+	d, err := g.g.IntelSpriteSheetProjected(ctx, req.path, times, g.Columns, g.Rows, g.ImageOutputPath, req.vrMode)
 	logger.Infof("[generator] sprite selected=%s actual=%s stage=%s reason=%s", d.Selected, d.Actual, d.Stage, d.Reason)
 	return true, err
 }

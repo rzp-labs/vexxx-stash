@@ -94,7 +94,7 @@ func NewSpriteGenerator(ctx context.Context, videoFile ffmpeg.VideoFile, videoCh
 	}
 	generator.ChunkCount = chunkCount
 	if gpuSelected {
-		if err := configureGPUSpriteInfo(generator); err != nil {
+		if err := configureGPUSpriteInfo(generator, slowSeek); err != nil {
 			return nil, err
 		}
 	} else if err := generator.configure(ctx); err != nil {
@@ -188,7 +188,7 @@ func (g *SpriteGenerator) vttExists() bool {
 // configureGPUSpriteInfo derives VTT metadata without entering legacy full-file
 // frame inspection. Time-based GPU sheets index the actual requested interval;
 // short clips already have an exact GPU-decoded frame count.
-func configureGPUSpriteInfo(info *generatorInfo) error {
+func configureGPUSpriteInfo(info *generatorInfo, frameSampling bool) error {
 	if info.VideoFile.VideoStream == nil {
 		return fmt.Errorf("missing video stream")
 	}
@@ -202,15 +202,18 @@ func configureGPUSpriteInfo(info *generatorInfo) error {
 			rate, _ = rational.Float64()
 		}
 	}
+	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
+		rate = 0
+	}
+	if frameSampling && rate <= 0 {
+		return fmt.Errorf("GPU sprite frame-sampled VTT requires a finite positive frame rate")
+	}
 	frames := info.VideoFile.FrameCount
 	if frames <= 0 {
 		frames, _ = strconv.ParseInt(info.VideoFile.VideoStream.NbFrames, 10, 64)
 	}
 	if frames <= 0 && rate > 0 && info.VideoFile.VideoStreamDuration > 0 {
 		frames = int64(rate * info.VideoFile.VideoStreamDuration)
-	}
-	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
-		rate = 0
 	}
 	if rate == 0 && info.VideoFile.VideoStreamDuration <= 0 {
 		return fmt.Errorf("GPU sprite VTT duration and frame rate are unavailable")

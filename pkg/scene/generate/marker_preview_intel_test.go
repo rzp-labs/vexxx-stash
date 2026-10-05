@@ -178,7 +178,7 @@ func TestIntelRequestedMarkerRejectsUnsupportedWithoutSoftwareFallback(t *testin
 		name, source, vr string
 	}{
 		{"metadata", `{"streams":[]}`, ""},
-		{"vr", `{"streams":[]}`, "LR180"},
+		{"vr", `{"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"sample_aspect_ratio":"1:1"}]}`, "UNKNOWN_PROJECTION"},
 		{"eligibility", `{"streams":[{"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p10le","width":1920,"height":1080}]}`, ""},
 		{"device", `{"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"sample_aspect_ratio":"1:1"}]}`, ""},
 	} {

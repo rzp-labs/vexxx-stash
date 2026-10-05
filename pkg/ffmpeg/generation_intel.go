@@ -22,9 +22,11 @@ type IntelGenerationConfig struct {
 }
 
 type IntelSource struct {
-	Profile                                                                      string
-	Codec, PixelFormat, ColorTransfer, ColorPrimaries, ColorSpace, ColorRange    string
-	Width, Height, Rotation, StreamIndex                                         int
+	Profile                                                                   string
+	Codec, PixelFormat, ColorTransfer, ColorPrimaries, ColorSpace, ColorRange string
+	Width, Height, Rotation, StreamIndex                                      int
+	// DisplayMatrix preserves reflections which the scalar rotation cannot express.
+	DisplayMatrix                                                                *[9]int32
 	FrameRate, AverageFrameRate, Duration, SampleAspectRatio, DisplayAspectRatio string
 	// StartTime is the demuxer timestamp origin used by relative input seeks.
 	StartTime string
@@ -89,8 +91,8 @@ func (s IntelSource) Validate() error {
 	if s.Width <= 0 || s.Height <= 0 {
 		return fmt.Errorf("input dimensions unavailable")
 	}
-	if s.Rotation != 0 {
-		return fmt.Errorf("rotated input requires software generation")
+	if _, err := intelRotationDegrees(s); err != nil {
+		return err
 	}
 	if s.ColorTransfer == "smpte2084" || s.ColorTransfer == "arib-std-b67" || strings.HasPrefix(s.ColorPrimaries, "bt2020") || strings.HasPrefix(s.ColorSpace, "bt2020") {
 		return fmt.Errorf("HDR/wide-gamut input requires software generation")
@@ -101,7 +103,8 @@ func (s IntelSource) Validate() error {
 // IntelScaleFilter uses concrete dimensions to avoid QSV's differing negative
 // height semantics. FFmpeg scale=w:-2 rounds the proportional height to even.
 func IntelScaleFilter(config IntelGenerationConfig, source IntelSource, width int, download bool) string {
-	height := int(math.Round(float64(source.Height)*float64(width)/float64(source.Width)/2)) * 2
+	displayWidth, displayHeight := IntelDisplayDimensions(source)
+	height := int(math.Round(float64(displayHeight)*float64(width)/float64(displayWidth)/2)) * 2
 	if height < 2 {
 		height = 2
 	}
@@ -114,6 +117,11 @@ func IntelScaleFilter(config IntelGenerationConfig, source IntelSource, width in
 
 func IntelInputArgs(config IntelGenerationConfig, source IntelSource) Args {
 	args := Args{"-init_hw_device", "vaapi=vex:" + config.Device}
+	if source.Rotation != 0 || source.DisplayMatrix != nil {
+		// Keep pixels native until the explicit GPU transform, and clear the
+		// propagated display matrix so encoded outputs cannot rotate twice.
+		args = append(args, "-noautorotate", "-display_rotation", "0")
+	}
 	if config.Backend == "qsv" {
 		args = append(args, "-init_hw_device", "qsv=vexq@vex", "-filter_hw_device", "vexq", "-hwaccel", "qsv", "-hwaccel_device", "vexq", "-hwaccel_output_format", "qsv", "-c:v", source.Codec+"_qsv")
 	} else {
@@ -123,7 +131,7 @@ func IntelInputArgs(config IntelGenerationConfig, source IntelSource) Args {
 }
 
 // NewIntelGenerationPlan builds separate, actual source-decode, scale/transfer
-// and synthetic encode probes. No encoders-list result is treated as capability.
+// and source encode probes. No encoders-list result is treated as capability.
 // Device checking is deferred to RunIntelGeneration to keep construction pure.
 func NewIntelGenerationPlan(config IntelGenerationConfig, source IntelSource, input string, start float64, width int, download bool) (IntelGenerationPlan, error) {
 	p := IntelGenerationPlan{Config: config, Source: source}
@@ -136,8 +144,12 @@ func NewIntelGenerationPlan(config IntelGenerationConfig, source IntelSource, in
 	if width <= 0 || width%2 != 0 {
 		return p, fmt.Errorf("Intel output width must be positive and even")
 	}
+	rotation, err := IntelRotationFilter(config, source)
+	if err != nil {
+		return p, err
+	}
 	p.InputArgs = IntelInputArgs(config, source)
-	p.Filter = IntelScaleFilter(config, source, width, download)
+	p.Filter = intelPrependRotation(rotation, IntelScaleFilter(config, source, width, download))
 	// Null output otherwise succeeds at EOF without exercising the hardware.
 	// Every probe maps only video, so a packet reaching its muxer proves that
 	// the bounded frame traversed the requested decode/filter/encode stage.
@@ -149,19 +161,11 @@ func NewIntelGenerationPlan(config IntelGenerationConfig, source IntelSource, in
 	base = base.Input(input)
 	base = append(base, "-map", fmt.Sprintf("0:%d", source.StreamIndex), "-an", "-frames:v", "1")
 	p.Probes = append(p.Probes, IntelProbeStep{"decode", append(append(Args{}, base...), "-f", "null", "-")})
-	p.Probes = append(p.Probes, IntelProbeStep{"scale", append(append(Args{}, base...), "-vf", IntelScaleFilter(config, source, width, false), "-f", "null", "-")})
+	p.Probes = append(p.Probes, IntelProbeStep{"scale", append(append(Args{}, base...), "-vf", intelPrependRotation(rotation, IntelScaleFilter(config, source, width, false)), "-f", "null", "-")})
 	if download {
 		p.Probes = append(p.Probes, IntelProbeStep{"download", append(append(Args{}, base...), "-vf", p.Filter, "-f", "null", "-")})
 	}
-	encode := Args{"-v", "error", "-nostdin", "-abort_on", "empty_output", "-threads", "1", "-filter_threads", "1", "-init_hw_device", "vaapi=vex:" + config.Device}
-	hwdevice := "vex"
-	upload := "format=nv12,hwupload"
-	if config.Backend == "qsv" {
-		encode = append(encode, "-init_hw_device", "qsv=vexq@vex")
-		hwdevice = "vexq"
-		upload += "=extra_hw_frames=16"
-	}
-	encode = append(encode, "-filter_hw_device", hwdevice, "-f", "lavfi", "-i", "color=size=64x64:rate=1", "-frames:v", "1", "-an", "-vf", upload, "-c:v", "h264_"+config.Backend, "-f", "null", "-")
+	encode := append(append(Args{}, base...), "-vf", intelPrependRotation(rotation, IntelScaleFilter(config, source, width, false)), "-c:v", "h264_"+config.Backend, "-f", "null", "-")
 	p.Probes = append(p.Probes, IntelProbeStep{"encode", encode})
 	return p, nil
 }

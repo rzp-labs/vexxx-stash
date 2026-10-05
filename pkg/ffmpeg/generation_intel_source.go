@@ -72,12 +72,23 @@ func (f *FFProbe) intelSource(ctx context.Context, input string, requireUnambigu
 		}
 		count++
 		rotation, _ := strconv.Atoi(s.Tags.Rotate)
+		var matrix *[9]int32
 		for _, sd := range s.SideDataList {
-			if sd.Rotation != 0 {
+			if sd.SideDataType == "Display Matrix" || sd.DisplayMatrix != "" {
+				if matrix != nil {
+					return result, fmt.Errorf("generation metadata contains multiple display matrices")
+				}
+				parsed, err := intelParseDisplayMatrix(sd.DisplayMatrix)
+				if err != nil {
+					return result, err
+				}
+				matrix = &parsed
+				rotation = sd.Rotation
+			} else if sd.Rotation != 0 {
 				rotation = sd.Rotation
 			}
 		}
-		result = IntelSource{Profile: s.Profile, Codec: s.CodecName, PixelFormat: s.PixFmt, Width: s.Width, Height: s.Height, Rotation: rotation, StreamIndex: s.Index, ColorTransfer: s.ColorTransfer, ColorPrimaries: s.ColorPrimaries, ColorSpace: s.ColorSpace, ColorRange: s.ColorRange, FrameRate: s.RFrameRate, AverageFrameRate: s.AvgFrameRate, Duration: s.Duration, SampleAspectRatio: s.SampleAspectRatio, DisplayAspectRatio: s.DisplayAspectRatio, StartTime: data.Format.StartTime}
+		result = IntelSource{Profile: s.Profile, Codec: s.CodecName, PixelFormat: s.PixFmt, Width: s.Width, Height: s.Height, Rotation: rotation, DisplayMatrix: matrix, StreamIndex: s.Index, ColorTransfer: s.ColorTransfer, ColorPrimaries: s.ColorPrimaries, ColorSpace: s.ColorSpace, ColorRange: s.ColorRange, FrameRate: s.RFrameRate, AverageFrameRate: s.AvgFrameRate, Duration: s.Duration, SampleAspectRatio: s.SampleAspectRatio, DisplayAspectRatio: s.DisplayAspectRatio, StartTime: data.Format.StartTime}
 	}
 	if requireUnambiguousAudio && audioCount > 1 {
 		return result, fmt.Errorf("multiple audio streams require software generation to preserve automatic audio selection")

@@ -11,7 +11,15 @@ func (s IntelSource) isMain10Sprite() bool {
 	return s.Codec == "hevc" && s.Profile == "Main 10" && s.PixelFormat == "yuv420p10le" && s.ColorTransfer == "bt709" && s.ColorPrimaries == "bt709" && s.ColorSpace == "bt709" && s.ColorRange == "tv"
 }
 func (s IntelSource) ValidateSprite(backend string) error {
-	if backend == "vaapi" && (s.isMain10Sprite() || s.PixelFormat == "yuvj420p") {
+	if IntelSourceHDR(s) {
+		if backend != "vaapi" || !IntelHDRSourceValid(s) {
+			return fmt.Errorf("GPU HDR JPEG requires VAAPI and explicit HEVC Main10 PQ/HLG BT.2020 limited-range interpretation")
+		}
+		// Only the validation copy loses HDR tags. Rendering retains them until
+		// the dedicated GPU tone/gamut conversion produces SDR pixels.
+		s.PixelFormat = "yuv420p"
+		s.ColorTransfer, s.ColorPrimaries, s.ColorSpace = "", "", ""
+	} else if backend == "vaapi" && (s.isMain10Sprite() || s.PixelFormat == "yuvj420p") {
 		s.PixelFormat = "yuv420p"
 	}
 	return s.Validate()
@@ -24,7 +32,8 @@ func (s IntelSource) ValidateSprite(backend string) error {
 // iHD chooses the RGB-to-YUV matrix from that complete colour standard.
 // Composition uses real limited-range BT.601 samples throughout.
 func IntelSpriteScaleFilter(config IntelGenerationConfig, source IntelSource, width int) string {
-	height := int(math.Round(float64(source.Height)*float64(width)/float64(source.Width)/2)) * 2
+	displayWidth, displayHeight := IntelDisplayDimensions(source)
+	height := int(math.Round(float64(displayHeight)*float64(width)/float64(displayWidth)/2)) * 2
 	if height < 2 {
 		height = 2
 	}
@@ -42,10 +51,10 @@ func IntelSpriteScaleFilter(config IntelGenerationConfig, source IntelSource, wi
 	// A single 4K/8K-to-thumbnail VPP reduction aliases fine source detail.
 	// Reduce by at most two in each hardware stage, preserving the source
 	// surface format and colour standard until the final RGB conversion.
-	stageWidth := source.Width
+	stageWidth := displayWidth
 	for stageWidth > width && stageWidth-width > width {
 		stageWidth = int(math.Ceil(float64(stageWidth)/4)) * 2
-		stageHeight := int(math.Round(float64(source.Height)*float64(stageWidth)/float64(source.Width)/2)) * 2
+		stageHeight := int(math.Round(float64(displayHeight)*float64(stageWidth)/float64(displayWidth)/2)) * 2
 		if stageHeight < 2 {
 			stageHeight = 2
 		}
@@ -58,9 +67,13 @@ func IntelSpriteScaleFilter(config IntelGenerationConfig, source IntelSource, wi
 // samples. iHD ProcAmp uses Y'=c*Y+16-16*c+b and UV'=c*s*(UV-128)+128.
 // c=255/219, b=-16, s=219/224 therefore expands Y16..235 and UV16..240.
 // mjpeg_vaapi advertises MPEG metadata despite encoding baseline JPEG samples;
-// metadata stays TV directly into the encoder, with no subsequent VPP stage.
+// metadata stays TV while the physical samples retain the full JPEG range.
+// A final identity VPP copy gives JPEG a fresh driver-owned NV12 target. iHD
+// 26.2.1 rejects some composed Vulkan-producer surfaces without this boundary.
+// Matching matrix/range forces allocation instead of FFmpeg's same-format
+// passthrough, without resizing, changing format or converting sample range.
 func IntelJPEGRangeFilter() string {
-	return "procamp_vaapi=c=1.1643835616438356:b=-16:s=0.9776785714285714,setparams=range=limited:colorspace=bt470bg"
+	return "procamp_vaapi=c=1.1643835616438356:b=-16:s=0.9776785714285714,setparams=range=limited:colorspace=bt470bg,scale_vaapi=w=iw:h=ih:format=nv12:out_color_matrix=bt470bg:out_range=limited"
 }
 
 // NewIntelSpritePlan probes actual source pixels through the GPU JPEG pipeline.
@@ -73,6 +86,9 @@ func NewIntelSpritePlan(config IntelGenerationConfig, source IntelSource, input 
 	if err := source.ValidateSprite(config.Backend); err != nil {
 		return p, err
 	}
+	if IntelSourceHDR(source) {
+		return NewIntelHDRSpritePlan(config, source, input, start, width)
+	}
 	if !source.HasSquareOrUnspecifiedSampleAspectRatio() {
 		return p, fmt.Errorf("GPU JPEG does not support sample aspect ratio %q (display aspect ratio %q)", source.SampleAspectRatio, source.DisplayAspectRatio)
 	}
@@ -82,8 +98,12 @@ func NewIntelSpritePlan(config IntelGenerationConfig, source IntelSource, input 
 	if math.IsNaN(start) || math.IsInf(start, 0) || start < 0 {
 		return p, fmt.Errorf("invalid GPU JPEG timestamp")
 	}
+	rotation, err := IntelRotationFilter(config, source)
+	if err != nil {
+		return p, err
+	}
 	p.InputArgs = IntelInputArgs(config, source)
-	p.Filter = IntelSpriteScaleFilter(config, source, width)
+	p.Filter = intelPrependRotation(rotation, IntelSpriteScaleFilter(config, source, width))
 	base := Args{"-v", "error", "-nostdin", "-abort_on", "empty_output"}
 	base = append(base, p.InputArgs...)
 	base = base.Seek(start).Input(input)

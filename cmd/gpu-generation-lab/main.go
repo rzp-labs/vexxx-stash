@@ -170,7 +170,7 @@ func main() {
 		err = g.PreviewVideo(ctx, *input, span, "synthetic", opts, *vr, false, false)
 		output = g.ScenePaths.GetVideoPreviewPath("synthetic")
 		if err == nil {
-			validation = map[string]any{"status": "passed", "visual": "untested"}
+			validation = map[string]any{"status": "generated", "packet_presence": "passed", "segment_timing": "untested", "full_decode": "untested", "visual": "untested"}
 		}
 	case "webp":
 		err = g.SceneMarkerWebp(ctx, *input, "synthetic", *start, *vr)
@@ -201,12 +201,12 @@ func main() {
 				for i := range sampledFrames {
 					sampledFrames[i] = int(math.Round(float64(i) * float64(info.NumberOfFrames-1) / float64(*tiles)))
 				}
-				_, err = g.IntelSpriteSheetFrames(ctx, *input, sampledFrames, 9, 9, output)
+				_, err = g.IntelSpriteSheetFramesProjected(ctx, *input, sampledFrames, 9, 9, output, *vr)
 			}
 		} else if g.IntelSprites != nil && g.IntelSprites.Enabled() {
-			_, err = g.IntelSpriteSheet(ctx, *input, times, 9, 9, output)
+			_, err = g.IntelSpriteSheetProjected(ctx, *input, times, 9, 9, output, *vr)
 		} else {
-			images, _, e := g.IntelSpriteTiles(ctx, *input, times)
+			images, e := g.SpriteScreenshots(ctx, *input, times, *vr)
 			err = e
 			if err == nil && len(images) != *tiles {
 				err = fmt.Errorf("sprite tile count %d, expected%d", len(images), *tiles)

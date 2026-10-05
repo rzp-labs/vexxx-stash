@@ -44,7 +44,7 @@ func TestIntelSpritePlanUnsupportedIsExplicit(t *testing.T) {
 			t.Fatalf("accepted %s", backend)
 		}
 	}
-	for _, change := range []func(*IntelSource){func(s *IntelSource) { s.Rotation = 90 }, func(s *IntelSource) { s.SampleAspectRatio = "4:3" }, func(s *IntelSource) { s.ColorTransfer = "smpte2084" }, func(s *IntelSource) { s.PixelFormat = "yuv422p10le" }} {
+	for _, change := range []func(*IntelSource){func(s *IntelSource) { s.Rotation = 45 }, func(s *IntelSource) { s.SampleAspectRatio = "4:3" }, func(s *IntelSource) { s.ColorTransfer = "smpte2084" }, func(s *IntelSource) { s.PixelFormat = "yuv422p10le" }} {
 		s := source
 		change(&s)
 		if _, err := NewIntelSpritePlan(IntelGenerationConfig{Backend: "vaapi"}, s, "source.mp4", 0, 160); err == nil {

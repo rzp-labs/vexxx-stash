@@ -31,8 +31,13 @@ func (g Generator) IntelSpriteTiles(ctx context.Context, input string, times []f
 		}
 		return nil, d, fmt.Errorf("%s", d.Reason)
 	}
-	if _, err := ffmpeg.IntelSpriteSeekList(input, ffmpeg.IntelSource{}, times); err != nil {
-		return nil, d, err
+	if len(times) == 0 {
+		return nil, d, fmt.Errorf("sprite timestamps are empty")
+	}
+	for i, at := range times {
+		if math.IsNaN(at) || math.IsInf(at, 0) || at < 0 || (i > 0 && at < times[i-1]) {
+			return nil, d, fmt.Errorf("invalid sprite timestamp at index %d", i)
+		}
 	}
 	images, err := captureSpriteSequence(ctx, times, g.spriteWorkers(generationbudget.CPU, len(times)), spriteScreenshotWidth, 0, func(ctx context.Context, at float64) (image.Image, error) {
 		return g.SpriteScreenshot(ctx, input, at, "")
@@ -44,16 +49,26 @@ func (g Generator) IntelSpriteTiles(ctx context.Context, input string, times []f
 // publication. Metadata probes, seek-list I/O and atomic rename remain host
 // orchestration. No selected-GPU failure starts a software renderer.
 func (g Generator) IntelSpriteSheet(ctx context.Context, input string, times []float64, columns, rows int, output string) (ffmpeg.IntelGenerationDiagnostic, error) {
-	return g.intelSpriteSheet(ctx, input, times, nil, columns, rows, output)
+	return g.intelSpriteSheet(ctx, input, times, nil, columns, rows, output, "")
+}
+
+// IntelSpriteSheetProjected retains a stored VR projection before GPU tile
+// scaling and composition. Unknown modes fail without exporting CPU pixels.
+func (g Generator) IntelSpriteSheetProjected(ctx context.Context, input string, times []float64, columns, rows int, output, vrMode string) (ffmpeg.IntelGenerationDiagnostic, error) {
+	return g.intelSpriteSheet(ctx, input, times, nil, columns, rows, output, vrMode)
 }
 
 // IntelSpriteSheetFrames preserves the canonical frame indices used for short
 // clips. Frame selection is metadata-only and never downloads GPU surfaces.
 func (g Generator) IntelSpriteSheetFrames(ctx context.Context, input string, frames []int, columns, rows int, output string) (ffmpeg.IntelGenerationDiagnostic, error) {
-	return g.intelSpriteSheet(ctx, input, nil, frames, columns, rows, output)
+	return g.intelSpriteSheet(ctx, input, nil, frames, columns, rows, output, "")
 }
 
-func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []float64, frames []int, columns, rows int, output string) (d ffmpeg.IntelGenerationDiagnostic, err error) {
+func (g Generator) IntelSpriteSheetFramesProjected(ctx context.Context, input string, frames []int, columns, rows int, output, vrMode string) (ffmpeg.IntelGenerationDiagnostic, error) {
+	return g.intelSpriteSheet(ctx, input, nil, frames, columns, rows, output, vrMode)
+}
+
+func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []float64, frames []int, columns, rows int, output, vrMode string) (d ffmpeg.IntelGenerationDiagnostic, err error) {
 	count := len(times)
 	if frames != nil {
 		count = len(frames)
@@ -121,7 +136,8 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	if frames == nil {
 		start = times[0]
 	}
-	plan, err := ffmpeg.NewIntelSpritePlan(*g.IntelSprites, source, input, start, spriteScreenshotWidth)
+	width := spriteWidth(vrMode)
+	plan, err := ffmpeg.NewIntelProjectedSpritePlan(*g.IntelSprites, source, input, start, width, vrMode)
 	if err != nil {
 		return fail("plan", err)
 	}
@@ -179,15 +195,16 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	config, format, err := image.DecodeConfig(f)
 	_ = f.Close()
 	release()
-	height := int(math.Round(float64(source.Height)*spriteScreenshotWidth/float64(source.Width)/2)) * 2
+	displayWidth, displayHeight := ffmpeg.IntelDisplayDimensions(plan.Source)
+	height := int(math.Round(float64(displayHeight)*float64(width)/float64(displayWidth)/2)) * 2
 	if height < 2 {
 		height = 2
 	}
 	if err != nil {
 		return fail("output", err)
 	}
-	if format != "jpeg" || config.Width != spriteScreenshotWidth*columns || config.Height != height*rows {
-		return fail("output", fmt.Errorf("GPU sprite geometry/format %dx%d %s, expected %dx%d JPEG", config.Width, config.Height, format, spriteScreenshotWidth*columns, height*rows))
+	if format != "jpeg" || config.Width != width*columns || config.Height != height*rows {
+		return fail("output", fmt.Errorf("GPU sprite geometry/format %dx%d %s, expected %dx%d JPEG", config.Width, config.Height, format, width*columns, height*rows))
 	}
 	if err = workCtx.Err(); err != nil {
 		return fail("cancellation", err)

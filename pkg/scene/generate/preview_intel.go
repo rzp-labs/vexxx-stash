@@ -60,9 +60,6 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 			g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: stage, Reason: reason.Error()})
 			return fmt.Errorf("GPU scene preview %s: %w", stage, reason)
 		}
-		if vr != "" {
-			return reject("eligibility", fmt.Errorf("GPU VR projection is unsupported; explicitly select software generation"))
-		}
 		release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
 		if err != nil {
 			return err
@@ -80,7 +77,7 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 		} else {
 			_, start = PreviewStepSizeAndOffset(options, duration)
 		}
-		plan, err := ffmpeg.NewIntelPreviewPlan(*g.IntelPreviews, source, input, start, PreviewWidth)
+		plan, err := ffmpeg.NewIntelProjectedPreviewPlan(*g.IntelPreviews, source, input, start, PreviewWidth, vr)
 		if err != nil {
 			return reject("eligibility", err)
 		}

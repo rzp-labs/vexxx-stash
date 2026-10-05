@@ -17,7 +17,7 @@ func TestIntelSourceMetadata(t *testing.T) {
 	}{
 		{"sdr", fixture, false},
 		{"10bit", `{"streams":[{"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p10le","width":1920,"height":1080}]}`, true},
-		{"rotation", `{"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"side_data_list":[{"rotation":90}]}]}`, true},
+		{"rotation", `{"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"side_data_list":[{"rotation":45}]}]}`, true},
 		{"multiple_audio", `{"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080},{"codec_type":"audio","channels":1},{"codec_type":"audio","channels":2}]}`, true},
 		{"multiple", `{"streams":[{"codec_type":"video"},{"codec_type":"video"}]}`, true},
 		{"malformed", `{`, true},
@@ -123,5 +123,43 @@ func TestIntelSpriteSourceKeepsMarkerAndQSVGates(t *testing.T) {
 	}
 	if _, err := p.IntelSpriteSource(context.Background(), "actual.mp4", "qsv"); err == nil {
 		t.Fatal("QSV source broadened")
+	}
+}
+
+func TestIntelSourcePreservesReflectedDisplayMatrices(t *testing.T) {
+	for _, c := range []struct {
+		name, sideData string
+		rotation       int
+		direction      string
+		fail           bool
+	}{
+		{"rotation", `{"side_data_type":"Display Matrix","rotation":90,"displaymatrix":"\n00000000: 0 -65536 0\n00000001: 65536 0 0\n00000002: 0 0 1073741824\n"}`, 90, "cclock", false},
+		{"same rotation reflected", `{"side_data_type":"Display Matrix","rotation":90,"displaymatrix":"\n00000000: 0 -65536 0\n00000001: -65536 0 0\n00000002: 0 0 1073741824\n"}`, 90, "clock_flip", false},
+		{"zero rotation reflected", `{"side_data_type":"Display Matrix","rotation":0,"displaymatrix":"\n00000000: 65536 0 0\n00000001: 0 -65536 0\n00000002: 0 0 1073741824\n"}`, 0, "vflip", false},
+		{"malformed matrix", `{"side_data_type":"Display Matrix","rotation":90,"displaymatrix":"malformed"}`, 0, "", true},
+		{"missing matrix", `{"side_data_type":"Display Matrix","rotation":90}`, 0, "", true},
+		{"skew matrix", `{"side_data_type":"Display Matrix","rotation":0,"displaymatrix":"\n00000000: 65536 65536 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824\n"}`, 0, "", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fixture := `{"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1920,"height":1080,"tags":{"rotate":"180"},"side_data_list":[` + c.sideData + `]}]}`
+			path := filepath.Join(t.TempDir(), "ffprobe")
+			if err := os.WriteFile(path, []byte("#!/bin/sh\ncat <<'JSON'\n"+fixture+"\nJSON\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			source, err := (&FFProbe{path: path}).IntelSource(context.Background(), "input")
+			if (err != nil) != c.fail {
+				t.Fatalf("source %+v error %v", source, err)
+			}
+			if c.fail {
+				return
+			}
+			if source.DisplayMatrix == nil || source.Rotation != c.rotation {
+				t.Fatalf("matrix/scalar metadata lost: %+v", source)
+			}
+			filter, err := IntelRotationFilter(IntelGenerationConfig{Backend: "vaapi"}, source)
+			if err != nil || filter != "transpose_vaapi=dir="+c.direction+":passthrough=none" {
+				t.Fatalf("reflection lost: %s %v", filter, err)
+			}
+		})
 	}
 }

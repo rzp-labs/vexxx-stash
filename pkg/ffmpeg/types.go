@@ -95,6 +95,8 @@ type FFProbeStream struct {
 	SampleFmt     string `json:"sample_fmt,omitempty"`
 	SampleRate    string `json:"sample_rate,omitempty"`
 	SideDataList  []struct {
-		Rotation int `json:"rotation"`
+		Rotation      int    `json:"rotation"`
+		SideDataType  string `json:"side_data_type"`
+		DisplayMatrix string `json:"displaymatrix"`
 	} `json:"side_data_list"`
 }

@@ -1,6 +1,24 @@
 # syntax=docker/dockerfile:1
 # This dockerfile should be built with `make docker-build` from the stash root.
 
+# Rebuild only libavutil with the exact packaged feature configuration. The
+# source digest, package version and exported ABI are checked by the helper.
+FROM alpine:3.24 AS ffmpeg-mapping
+RUN apk add --no-cache ffmpeg=8.1.2-r0 ffmpeg-libavutil=8.1.2-r0 python3 curl xz build-base pkgconf linux-headers \
+    alsa-lib-dev aom-dev bzip2-dev coreutils dav1d-dev fontconfig-dev freetype-dev \
+    fribidi-dev harfbuzz-dev ladspa-dev lame-dev libass-dev libbluray-dev libdrm-dev \
+    libdvdnav-dev libdvdread-dev libjxl-dev libopenmpt-dev libplacebo-dev librist-dev \
+    libsrt-dev libssh-dev libtheora-dev libva-dev libvdpau-dev libvorbis-dev libvpx-dev \
+    libwebp-dev libxfixes-dev libxml2-dev lilv-dev nasm openssl-dev opus-dev perl-dev \
+    pulseaudio-dev rav1e-dev shaderc-dev sdl2-dev soxr-dev v4l-utils-dev vidstab-dev \
+    vulkan-loader-dev x264-dev x265-dev xvidcore-dev zeromq-dev zimg-dev zlib-dev \
+    svt-av1-dev libvpl-dev
+WORKDIR /ffmpeg
+COPY scripts/ffmpeg/build-libavutil.py scripts/ffmpeg/vaapi-vulkan-rgb-export.patch /ffmpeg/
+RUN curl --fail --silent --show-error --location \
+    https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz -o /ffmpeg/source.tar.xz && \
+    python3 build-libavutil.py /ffmpeg/source.tar.xz /ffmpeg/vaapi-vulkan-rgb-export.patch /ffmpeg/output
+
 # Build Frontend
 FROM node:24-alpine AS frontend
 RUN apk add --no-cache make git
@@ -90,8 +108,10 @@ RUN --mount=type=secret,id=POSTHOG_CLI_API_KEY,env=POSTHOG_CLI_API_KEY,required=
 # Final Runnable Image
 FROM alpine:3.24
 # Keep the dispatcher, VAAPI driver and QSV GPU runtime on one Alpine release.
-RUN apk add --no-cache ca-certificates vips-tools ffmpeg python3 py3-pip \
-    intel-media-driver libvpl onevpl-intel-gpu
+RUN apk add --no-cache ca-certificates vips-tools ffmpeg=8.1.2-r0 ffmpeg-libavutil=8.1.2-r0 python3 py3-pip \
+    intel-media-driver libvpl onevpl-intel-gpu mesa-vulkan-intel vulkan-loader
+COPY --from=ffmpeg-mapping /ffmpeg/output/libavutil.so.60.26.102 /usr/lib/libavutil.so.60.26.102
+COPY --from=ffmpeg-mapping /ffmpeg/output/mapping-build.json /usr/share/vexxx/ffmpeg-mapping-build.json
 COPY scripts/check_intel_runtime.py /usr/local/bin/check_intel_runtime.py
 # Packaging regression check; does not require or initialize a GPU.
 RUN python3 /usr/local/bin/check_intel_runtime.py

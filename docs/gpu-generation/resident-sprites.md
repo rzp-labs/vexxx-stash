@@ -35,8 +35,12 @@ The final GPU procamp implements the standard limited-to-full sample transform:
 [procamp equations](https://raw.githubusercontent.com/intel/media-driver/intel-media-26.2.1/media_softlet/agnostic/common/vp/kdll/hal_kerneldll_next.c).
 They are not subjective brightness or saturation adjustments. The final encoder
 is `mjpeg_vaapi` at global quality 95. Its MPEG-only negotiation is accommodated
-with metadata immediately before encoding; no subsequent VPP conversion changes
-the actual full-range JPEG samples. See the
+with metadata while retaining actual full-range JPEG samples. A final identity
+`scale_vaapi` pass copies the sheet into a fresh driver-owned NV12 surface.
+Explicit matching BT.601 matrix and limited-range metadata disable passthrough;
+size, format, matrix, range and physical samples stay unchanged. This adds one
+GPU sheet pass and a native output pool within the existing process, without
+CPU pixel transfer or encoding. See the
 [FFmpeg encoder](https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1.2/libavcodec/vaapi_encode_mjpeg.c).
 
 ## B580 checks
@@ -80,9 +84,88 @@ thresholds or a replacement for the canonical comparison. Inspection found
 matching source content and geometry, comparable detail, and more neutral GPU
 colors consistent with the source controls.
 
-Metadata, I/O, orchestration, VTT generation and JPEG header validation still use
-the CPU. Literal zero CPU usage is impossible. HDR, VR projection, QSV JPEG and
-other unsupported source/capability combinations return explicit errors.
+Right-angle rotations and reflected display matrices use VAAPI before scaling.
+Supported VR modes use the canonical first-eye 1280×720 GPU projection and
+320×180 tiles. Explicit
+PQ/HLG Main10 BT.2020 sources receive GPU BT.2390 tone mapping and perceptual
+gamut conversion to BT.709 SDR before staged reduction. Both operations use
+Vulkan/libplacebo on the selected VAAPI device, then directly import packed RGB
+GPU surfaces into VAAPI. Main10 retains ten-bit RGB precision through this bridge.
+See [the interoperability patch](../../scripts/ffmpeg/README.md) and
+[scene preview eligibility](scene-previews.md).
+
+The final Vulkan-path checks use application binary SHA256 prefix `4799b4d`
+and retained-mapping runtime `aa68a4af` (patch `6196ab32`). Two fresh complete
+LR180 sheets populated all 81 320×180 cells, producing 2880×1620 JPEGs with
+canonical VTT. They completed in 6.999 and 7.011 seconds wall time, using
+3.612 and 3.611 media-process CPU seconds. Full decoding and chronological
+CPU-cell comparisons preserved projection geometry, source colors and detail.
+Observed repeat output identity is a stability check, not a requirement for
+compressed-byte equality. TB360, MONO360 and FISHEYE190 three-cell sheets also
+passed, with all 78 unused cell centers black. A complete ordinary SDR sheet
+passed the common final-copy graph in 6.090 seconds / 3.011 CPU seconds.
+
+Before the terminal identity copy, projected and tone-mapped multi-tile sheets
+could fail `mjpeg_vaapi` with VAAPI encoding error 24 despite correct composed
+NV12 pixels. The controlled fresh native-surface copy preserved decoded pixels
+and allowed encoding; the final integrated sheets above confirm that path.
+This is an observed B580/iHD interoperability constraint, not a proven internal
+driver cause. The added GPU pass does not resample, change format, range or
+encoder quality, and uses no CPU image processing. It remains within the
+existing admitted process and adds no independent concurrency cap.
+
+Cancellation after two seconds during an actual LR180 composition/JPEG command
+returned in 2.027 seconds, left no final or temporary output or live children,
+and reacquired all three configured GPU/total permits in a fresh context. There
+was no additional forced benchmark cleanup; normal Go context cancellation
+kills its child process. All six render cases and cancellation removed their
+disposable containers and recorded no memory, OOM or PID pressure events.
+
+Complete PQ and HLG sheets on the same final build populated all 81 160×90 cells
+at 1440×810 with accurate seek requests and VTT. Both fully decoded and retained
+ordered neutral patches, highlight detail, hue and ramps across every cell when
+compared with the separate proper whole-image CPU tone-mapping policy control.
+Tile RGB MAE 2.25–2.49 and PSNR 34.96–35.74 dB are diagnostics, not acceptance
+thresholds. Tiny averaged JPEG ramp reversals of at most 0.20/0.24 sample for
+PQ/HLG remain recorded; they were not hidden by changing a numeric gate.
+The source fixture is static, so these tone controls do not independently prove
+source-frame timing; the moving SDR controls above provide that comparison.
+The unchanged application CPU reference remains separate from the HDR policy
+control. Concurrent HLG preview regressions and HDR metadata checks are recorded
+in [scene previews](scene-previews.md).
+
+A combined PQ/LR180 case also passed three populated 320×180 cells with all 78
+unused centers black; its proper projected CPU control retains ten-bit precision
+until final JPEG conversion. Tile RGB MAE 0.899/PSNR 45.20 dB and the paired MP4
+MAE 0.811–0.827/PSNR 45.79–45.93 dB remain diagnostics. This projected HDR policy
+control shares the production shader math; the independent canonical SDR VR
+comparisons above remain the separate projection oracle.
+
+The final binary/runtime also passed an explicit FISHEYE190 CPU/GPU sprite pair
+on the representative 8192×4096 Main10 SDR source. Three widely separated seeks
+were 30.125, 1175.1094276666665 and 2320.093855333333 seconds; independent source
+packet checks found first eligible PTS 30.130100, 1175.123950 and 2320.101117.
+Both outputs fully decoded as 2880×1620 full-range BT.601 JPEGs with three
+320×180 tiles, matching projection/content, color and detail and 78 black unused
+centers. Software measured 5.112 seconds wall/10.394 CPU seconds; GPU measured
+3.142 seconds/1.083 CPU seconds. Peak individual RSS was about 872/319 MB;
+the software sampled process-group RSS peak was 2.613 GB. All permits were
+reusable and containers removed. GPU and separate RGB24-control cgroup events
+were zero; the initial CPU case did not record cgroup event counters.
+
+The canonical VR CPU comparisons have RGB MAE 2.061–2.628 and PSNR 37.343–40.270
+dB; occupied-cell SSIM 0.984351 excludes the black canvas. Separate accurate-seek
+CPU v360/RGB24 controls corroborate matching content. Those controls were closer
+to the CPU JPEG (MAE 1.341–1.831) than the GPU JPEG (2.384–2.708), retained openly.
+Inspection found no systematic dark/green bias in this VR CPU reference; the
+ordinary raw 8K BMP bias described earlier is not used to dismiss this comparison.
+These bounded observations do not establish sustained throughput or new quality
+gates. Private media paths and decoded images remain outside the public PR.
+
+Metadata, I/O, orchestration, driver/shader setup, VTT generation and JPEG header
+validation still use the CPU. Literal zero CPU usage is impossible. QSV JPEG
+and other unsupported
+source/capability combinations return explicit errors.
 Lossless animated WebP has no supported GPU encoder in the installed stack; it
 does not silently switch format, quality or backend. See
 [configuration](configuration.md) and [resident MP4 checks](scene-previews.md).
