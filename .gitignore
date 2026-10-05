@@ -83,3 +83,15 @@ docs/# Meta Design Graphic Rendering Pipeline.md
 /plugins/
 /scratch/
 scratch/
+
+# Local environment values; commit sanitized templates instead.
+.env
+.env.*
+!.env.example
+
+# Local IDE configuration and generated PostHog wizard guides.
+/.idea/
+/.posthog/
+/.claude/skills/integration-go/
+/ui/v2.5/.claude/skills/integration-javascript_web/
+/ui/v2.5/.claude/skills/integration-react-react-router-6/

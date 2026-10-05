@@ -98,7 +98,7 @@ func (r *mutationResolver) StudioCreate(ctx context.Context, input models.Studio
 	}
 
 	r.hookExecutor.ExecutePostHooks(ctx, newStudio.ID, hook.StudioCreatePost, input, nil)
-	r.hookExecutor.ExecutePostHooks(ctx, newStudio.ID, hook.StudioCreatePost, input, nil)
+	captureAuthenticatedEvent(ctx, "studio_created")
 	return r.getStudio(ctx, newStudio.ID)
 }
 

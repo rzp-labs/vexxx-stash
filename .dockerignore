@@ -55,3 +55,19 @@ stash
 dist
 
 docker
+
+# Local PostHog upload credentials must not enter the Docker build context.
+.env
+**/.env
+.env.*
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Local development data, IDE settings, and generated wizard guides.
+.local*
+.idea
+.posthog
+.claude/skills/integration-go
+ui/v2.5/.claude/skills/integration-javascript_web
+ui/v2.5/.claude/skills/integration-react-react-router-6

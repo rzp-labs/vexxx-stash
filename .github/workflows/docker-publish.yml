@@ -178,6 +178,18 @@ jobs:
             GITHASH=${{ github.sha }}
             STASH_VERSION=${{ needs.plan.outputs.version }}
             BUILD_DATE=${{ needs.plan.outputs.build_date }}
+            POSTHOG_UPLOAD_REQUIRED=${{ needs.plan.outputs.publish }}
+            POSTHOG_CLI_PROJECT_ID=${{ vars.POSTHOG_CLI_PROJECT_ID }}
+            POSTHOG_CLI_HOST=${{ vars.POSTHOG_CLI_HOST }}
+            VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=${{ vars.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN }}
+            VITE_PUBLIC_POSTHOG_HOST=${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
+            GITHUB_ACTIONS=true
+            GITHUB_SHA=${{ github.sha }}
+            GITHUB_REF_NAME=${{ github.ref_name }}
+            GITHUB_REPOSITORY=${{ github.repository }}
+            GITHUB_SERVER_URL=${{ github.server_url }}
+          secrets: |
+            POSTHOG_CLI_API_KEY=${{ needs.plan.outputs.publish == 'true' && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && (inputs.publish_test_image || inputs.publish_latest))) && secrets.POSTHOG_CLI_API_KEY || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test container

@@ -1,5 +1,6 @@
 import React from "react";
-import { FormattedMessage } from "react-intl";
+import { FormattedMessage, IntlContext } from "react-intl";
+import posthog from "posthog-js/no-external";
 import { isLazyComponentError } from "src/utils/lazyComponent";
 
 interface IErrorBoundaryProps {
@@ -20,6 +21,10 @@ export class ErrorBoundary extends React.Component<
   IErrorBoundaryProps,
   IErrorBoundaryState
 > {
+  static contextType = IntlContext;
+
+  declare context: React.ContextType<typeof IntlContext>;
+
   constructor(props: IErrorBoundaryProps) {
     super(props);
     this.state = {};
@@ -29,6 +34,9 @@ export class ErrorBoundary extends React.Component<
     let errorHelpId: string | undefined;
     if (isLazyComponentError(error)) {
       errorHelpId = "errors.lazy_component_error_help";
+    }
+    if (posthog.__loaded) {
+      posthog.captureException(error);
     }
     this.setState({
       error,
@@ -44,11 +52,19 @@ export class ErrorBoundary extends React.Component<
       return (
         <div>
           <h2>
-            <FormattedMessage id="errors.something_went_wrong" />
+            {this.context ? (
+              <FormattedMessage id="errors.something_went_wrong" />
+            ) : (
+              "Something went wrong"
+            )}
           </h2>
           {errorHelpId && (
             <h5>
-              <FormattedMessage id={errorHelpId} />
+              {this.context ? (
+                <FormattedMessage id={errorHelpId} />
+              ) : (
+                "Reload the page to load the latest application version."
+              )}
             </h5>
           )}
           <details className="error-message">

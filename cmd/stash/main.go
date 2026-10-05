@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,9 +11,13 @@ import (
 	"runtime/debug"
 	"runtime/pprof"
 	"syscall"
+	"time"
+
+	"github.com/posthog/posthog-go"
 
 	"github.com/spf13/pflag"
 
+	"github.com/stashapp/stash/internal/analytics"
 	"github.com/stashapp/stash/internal/api"
 	"github.com/stashapp/stash/internal/build"
 	"github.com/stashapp/stash/internal/desktop"
@@ -78,6 +83,30 @@ func main() {
 
 	l := initLog(cfg)
 
+	if err := analytics.Initialize(); err != nil {
+		exitError(fmt.Errorf("PostHog initialization error: %w", err))
+		return
+	}
+	defer func() {
+		if err := analytics.Close(); err != nil {
+			logger.Errorf("error closing PostHog client: %v", err)
+		}
+	}()
+	defer recoverPanic()
+
+	if err := analytics.InitializeLogs(); err != nil {
+		exitError(fmt.Errorf("PostHog log initialization error: %w", err))
+		return
+	}
+	defer func() {
+		analytics.LogInfo("stash_server_stopping")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := analytics.CloseLogs(ctx); err != nil {
+			logger.Errorf("error closing PostHog log exporter: %v", err)
+		}
+	}()
+
 	if cpuProfilePath != "" {
 		if err := initProfiling(cpuProfilePath); err != nil {
 			exitError(err)
@@ -106,6 +135,7 @@ func main() {
 
 	exit := make(chan int)
 	mgr.SetExitChannel(exit)
+	analytics.LogInfo("stash_server_starting")
 
 	go func() {
 		err := server.Start()
@@ -164,6 +194,14 @@ func recoverPanic() {
 	if err := recover(); err != nil {
 		exitCode = 1
 		logger.Errorf("panic: %v\n%s", err, debug.Stack())
+
+		if client := analytics.Client(); client != nil {
+			exception := posthog.NewDefaultException(time.Now(), "server", "ApplicationPanic", "application panic (message redacted)")
+			version, revision, _ := build.Version()
+			exception.Properties = posthog.NewProperties().Set("app_version", version).Set("app_revision", revision).Set("$process_person_profile", false)
+			client.Enqueue(exception)
+		}
+
 		if desktop.IsDesktop() {
 			desktop.FatalError(fmt.Errorf("Panic: %v", err))
 		}

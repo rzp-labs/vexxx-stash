@@ -1,9 +1,4 @@
-import React, {
-  useEffect,
-  useState,
-  useCallback,
-  useMemo,
-} from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import {
   defineMessages,
   FormattedMessage,
@@ -41,6 +36,7 @@ import EnterVRHomeButton from "src/components/ScenePlayer/VR/EnterVRHomeButton";
 import Mousetrap from "mousetrap";
 
 import SessionUtils from "src/utils/session";
+import posthog from "posthog-js/no-external";
 import { Icon } from "src/components/Shared/Icon";
 import { useConfigurationContext } from "src/hooks/Config";
 import { ManualStateContext } from "./Help/context";
@@ -247,14 +243,20 @@ const newPathsList = allMenuItems
 const MainNavbarMenuItems = PatchComponent(
   "MainNavBar.MenuItems",
   (props: React.PropsWithChildren<{}>) => {
-    return <Box sx={{ display: 'flex', flexDirection: { xs: 'column', lg: 'row' } }}>{props.children}</Box>;
+    return (
+      <Box sx={{ display: "flex", flexDirection: { xs: "column", lg: "row" } }}>
+        {props.children}
+      </Box>
+    );
   }
 );
 
 const MainNavbarUtilityItems = PatchComponent(
   "MainNavBar.UtilityItems",
   (props: React.PropsWithChildren<{}>) => {
-    return <Box sx={{ display: 'flex', alignItems: 'center' }}>{props.children}</Box>;
+    return (
+      <Box sx={{ display: "flex", alignItems: "center" }}>{props.children}</Box>
+    );
   }
 );
 
@@ -266,14 +268,15 @@ function getHWCodecShortName(codecName: string): string {
   if (codecName.includes("VideoToolbox")) return "VT";
   if (codecName.includes("VAAPI")) return "VAAPI";
   if (codecName.includes("V4L2M2M")) return "V4L2";
-  if (codecName.includes("Rockchip") || codecName.includes("rkmpp")) return "RKMPP";
+  if (codecName.includes("Rockchip") || codecName.includes("rkmpp"))
+    return "RKMPP";
   return codecName;
 }
 
 // Get unique short names from hardware codecs
 function getUniqueHWCodecTypes(codecs: string[]): string[] {
   const types = new Set<string>();
-  codecs.forEach(c => types.add(getHWCodecShortName(c)));
+  codecs.forEach((c) => types.add(getHWCodecShortName(c)));
   return Array.from(types);
 }
 
@@ -283,7 +286,7 @@ export const MainNavbar: React.FC = () => {
   const { configuration } = useConfigurationContext();
   const { openManual } = React.useContext(ManualStateContext);
   const theme = useTheme();
-  const isDesktop = useMediaQuery(theme.breakpoints.up('lg'));
+  const isDesktop = useMediaQuery(theme.breakpoints.up("lg"));
   const scrolled = useScrollTrigger({ disableHysteresis: true, threshold: 10 });
   const { user } = useCurrentUser();
 
@@ -390,9 +393,9 @@ export const MainNavbar: React.FC = () => {
                 sx={{
                   width: 28,
                   height: 28,
-                  fontSize: '0.75rem',
+                  fontSize: "0.75rem",
                   fontWeight: 600,
-                  bgcolor: 'primary.main',
+                  bgcolor: "primary.main",
                 }}
               >
                 {initials}
@@ -403,15 +406,19 @@ export const MainNavbar: React.FC = () => {
             anchorEl={accountMenuAnchor}
             open={Boolean(accountMenuAnchor)}
             onClose={() => setAccountMenuAnchor(null)}
-            transformOrigin={{ horizontal: 'right', vertical: 'top' }}
-            anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
+            transformOrigin={{ horizontal: "right", vertical: "top" }}
+            anchorOrigin={{ horizontal: "right", vertical: "bottom" }}
             PaperProps={{ sx: { minWidth: 180 } }}
           >
-            <Box sx={{ px: 2, py: 1, pointerEvents: 'none' }}>
+            <Box sx={{ px: 2, py: 1, pointerEvents: "none" }}>
               <Typography variant="subtitle2" noWrap>
                 {user.username}
               </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'capitalize' }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ textTransform: "capitalize" }}
+              >
                 {user.role.toLowerCase()}
               </Typography>
             </Box>
@@ -425,11 +432,17 @@ export const MainNavbar: React.FC = () => {
               <ListItemIcon sx={{ minWidth: 32 }}>
                 <Icon icon={faKey} />
               </ListItemIcon>
-              <FormattedMessage id="users.change_password" defaultMessage="Change Password" />
+              <FormattedMessage
+                id="users.change_password"
+                defaultMessage="Change Password"
+              />
             </MenuItem>
             <MenuItem
               component="a"
               href={`${baseURL}logout`}
+              onClick={() => {
+                if (posthog.__loaded) posthog.reset();
+              }}
             >
               <ListItemIcon sx={{ minWidth: 32 }}>
                 <Icon icon={faSignOutAlt} />
@@ -452,6 +465,9 @@ export const MainNavbar: React.FC = () => {
           <IconButton
             className="minimal logout-button"
             href={`${baseURL}logout`}
+            onClick={() => {
+              if (posthog.__loaded) posthog.reset();
+            }}
             color="inherit"
             size="small"
           >
@@ -478,7 +494,7 @@ export const MainNavbar: React.FC = () => {
     return (
       <Tooltip
         title={
-          <Box sx={{ whiteSpace: 'pre-line' }}>
+          <Box sx={{ whiteSpace: "pre-line" }}>
             <strong>Hardware Encoding:</strong>
             {"\n"}
             {tooltipText}
@@ -492,15 +508,15 @@ export const MainNavbar: React.FC = () => {
           sx={{
             mr: 1,
             height: 24,
-            backgroundColor: 'rgba(76, 175, 80, 0.15)',
-            borderColor: 'rgba(76, 175, 80, 0.5)',
-            border: '1px solid',
-            color: '#81c784',
-            '& .MuiChip-icon': {
-              color: '#81c784',
+            backgroundColor: "rgba(76, 175, 80, 0.15)",
+            borderColor: "rgba(76, 175, 80, 0.5)",
+            border: "1px solid",
+            color: "#81c784",
+            "& .MuiChip-icon": {
+              color: "#81c784",
             },
-            '& .MuiChip-label': {
-              fontSize: '0.75rem',
+            "& .MuiChip-label": {
+              fontSize: "0.75rem",
               fontWeight: 500,
             },
           }}
@@ -545,7 +561,7 @@ export const MainNavbar: React.FC = () => {
         <NavLink
           to="/settings"
           onClick={handleDismiss}
-          style={{ display: 'flex', alignItems: 'center' }}
+          style={{ display: "flex", alignItems: "center" }}
         >
           <SettingsButton />
         </NavLink>
@@ -567,40 +583,40 @@ export const MainNavbar: React.FC = () => {
 
   const renderMenuItems = (isDrawer: boolean) => (
     <MainNavbarMenuItems>
-      {menuItems.map(({ href, icon, message }) => (
+      {menuItems.map(({ href, icon, message }) =>
         isDrawer ? (
           <ListItem key={href} disablePadding sx={{ mb: 0.5 }}>
-            <ListItemButton 
-              component={NavLink} 
-              to={href} 
+            <ListItemButton
+              component={NavLink}
+              to={href}
               onClick={handleDismiss}
               sx={{
                 borderRadius: 2,
                 mx: 0.5,
                 py: 1.25,
-                transition: 'all 0.15s ease',
-                '&:hover': {
+                transition: "all 0.15s ease",
+                "&:hover": {
                   bgcolor: (t) => alpha(t.palette.primary.main, 0.08),
                 },
-                '&.active': {
+                "&.active": {
                   bgcolor: (t) => alpha(t.palette.primary.main, 0.12),
-                  '& .MuiListItemIcon-root': {
-                    color: 'primary.main',
+                  "& .MuiListItemIcon-root": {
+                    color: "primary.main",
                   },
-                  '& .MuiListItemText-primary': {
-                    color: 'primary.main',
+                  "& .MuiListItemText-primary": {
+                    color: "primary.main",
                     fontWeight: 600,
                   },
                 },
               }}
             >
-              <ListItemIcon sx={{ minWidth: 40, color: 'text.secondary' }}>
+              <ListItemIcon sx={{ minWidth: 40, color: "text.secondary" }}>
                 <Icon icon={icon} />
               </ListItemIcon>
-              <ListItemText 
-                primary={intl.formatMessage(message)} 
+              <ListItemText
+                primary={intl.formatMessage(message)}
                 primaryTypographyProps={{
-                  fontSize: '0.9375rem',
+                  fontSize: "0.9375rem",
                   fontWeight: 500,
                 }}
               />
@@ -614,22 +630,22 @@ export const MainNavbar: React.FC = () => {
             color="inherit"
             startIcon={<Icon icon={icon} />}
             sx={{
-              textTransform: 'none',
+              textTransform: "none",
               mx: 0.25,
               px: 1.5,
               py: 0.75,
               borderRadius: 1.5,
-              fontSize: '0.875rem',
+              fontSize: "0.875rem",
               fontWeight: 500,
-              color: 'text.secondary',
-              transition: 'all 0.15s ease',
-              '&:hover': {
+              color: "text.secondary",
+              transition: "all 0.15s ease",
+              "&:hover": {
                 bgcolor: (t) => alpha(t.palette.primary.main, 0.08),
-                color: 'text.primary',
+                color: "text.primary",
               },
-              '&.active': {
+              "&.active": {
                 bgcolor: (t) => alpha(t.palette.primary.main, 0.12),
-                color: 'primary.main',
+                color: "primary.main",
                 fontWeight: 600,
               },
             }}
@@ -638,7 +654,7 @@ export const MainNavbar: React.FC = () => {
             {intl.formatMessage(message)}
           </Button>
         )
-      ))}
+      )}
     </MainNavbarMenuItems>
   );
 
@@ -650,10 +666,11 @@ export const MainNavbar: React.FC = () => {
         elevation={scrolled ? 4 : 0}
         sx={{
           bgcolor: scrolled ? "rgba(9, 9, 11, 0.97)" : "rgba(9, 9, 11, 0.85)",
-          backdropFilter: 'blur(12px)',
+          backdropFilter: "blur(12px)",
           borderBottom: scrolled ? 0 : 1,
           borderColor: (t) => alpha(t.palette.divider, 0.1),
-          transition: 'background-color 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease',
+          transition:
+            "background-color 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease",
         }}
         className="top-nav vexxx-navbar"
       >
@@ -664,12 +681,12 @@ export const MainNavbar: React.FC = () => {
             aria-label="open drawer"
             edge="start"
             onClick={() => setExpanded(!expanded)}
-            sx={{ 
-              mr: 1, 
-              display: { lg: 'none' },
-              transition: 'transform 0.2s ease',
-              '&:hover': {
-                transform: 'scale(1.1)',
+            sx={{
+              mr: 1,
+              display: { lg: "none" },
+              transition: "transform 0.2s ease",
+              "&:hover": {
+                transform: "scale(1.1)",
               },
             }}
           >
@@ -682,13 +699,13 @@ export const MainNavbar: React.FC = () => {
             to="/"
             onClick={handleDismiss}
             sx={{
-              display: 'flex',
-              alignItems: 'center',
+              display: "flex",
+              alignItems: "center",
               mr: 1,
-              textDecoration: 'none',
-              height: '100%',
-              transition: 'opacity 0.2s ease',
-              '&:hover': {
+              textDecoration: "none",
+              height: "100%",
+              transition: "opacity 0.2s ease",
+              "&:hover": {
                 opacity: 0.8,
               },
             }}
@@ -696,17 +713,23 @@ export const MainNavbar: React.FC = () => {
             <img
               src="/vexxx.png"
               alt="Vexxx"
-              style={{ height: '72px', width: 'auto', objectFit: 'cover' }}
+              style={{ height: "72px", width: "auto", objectFit: "cover" }}
             />
           </Box>
 
           {/* VR entry — mobile only, pinned next to brand */}
-          <Box sx={{ display: { xs: 'flex', lg: 'none' }, alignItems: 'center', mr: 1 }}>
+          <Box
+            sx={{
+              display: { xs: "flex", lg: "none" },
+              alignItems: "center",
+              mr: 1,
+            }}
+          >
             <EnterVRHomeButton />
           </Box>
 
           {/* Desktop Menu */}
-          <Box sx={{ display: { xs: 'none', lg: 'flex' }, flexGrow: 1 }}>
+          <Box sx={{ display: { xs: "none", lg: "flex" }, flexGrow: 1 }}>
             {renderMenuItems(false)}
           </Box>
 
@@ -714,9 +737,11 @@ export const MainNavbar: React.FC = () => {
           <Box sx={{ flexGrow: { xs: 1, lg: 0 } }} />
 
           {/* Right Side Buttons */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
             {/* VR entry — desktop only; mobile renders it next to the brand above */}
-            <Box sx={{ display: { xs: 'none', lg: 'flex' }, alignItems: 'center' }}>
+            <Box
+              sx={{ display: { xs: "none", lg: "flex" }, alignItems: "center" }}
+            >
               <EnterVRHomeButton />
             </Box>
             {!!newPath && (
@@ -726,23 +751,25 @@ export const MainNavbar: React.FC = () => {
                   to={newPath}
                   variant="contained"
                   sx={{
-                    background: 'linear-gradient(135deg, #db2777 0%, #9333ea 100%)',
-                    border: 'none',
-                    borderRadius: '20px',
+                    background:
+                      "linear-gradient(135deg, #db2777 0%, #9333ea 100%)",
+                    border: "none",
+                    borderRadius: "20px",
                     px: 2.5,
                     py: 0.75,
                     fontWeight: 600,
-                    fontSize: '0.8125rem',
-                    textTransform: 'none',
-                    boxShadow: (t) => `0 4px 12px ${alpha('#db2777', 0.3)}`,
-                    transition: 'all 0.2s ease',
-                    '&:hover': {
-                      background: 'linear-gradient(135deg, #ec4899 0%, #a855f7 100%)',
-                      boxShadow: (t) => `0 6px 20px ${alpha('#db2777', 0.4)}`,
-                      transform: 'translateY(-1px)',
+                    fontSize: "0.8125rem",
+                    textTransform: "none",
+                    boxShadow: (t) => `0 4px 12px ${alpha("#db2777", 0.3)}`,
+                    transition: "all 0.2s ease",
+                    "&:hover": {
+                      background:
+                        "linear-gradient(135deg, #ec4899 0%, #a855f7 100%)",
+                      boxShadow: (t) => `0 6px 20px ${alpha("#db2777", 0.4)}`,
+                      transform: "translateY(-1px)",
                     },
-                    '&:active': {
-                      transform: 'translateY(0)',
+                    "&:active": {
+                      transform: "translateY(0)",
                     },
                   }}
                 >
@@ -766,41 +793,42 @@ export const MainNavbar: React.FC = () => {
         onOpen={() => setExpanded(true)}
         disableSwipeToOpen={false}
         swipeAreaWidth={20}
-        sx={{ 
-          display: { lg: 'none' },
-          '& .MuiDrawer-paper': {
-            bgcolor: 'background.paper',
-            backgroundImage: 'none',
+        sx={{
+          display: { lg: "none" },
+          "& .MuiDrawer-paper": {
+            bgcolor: "background.paper",
+            backgroundImage: "none",
             borderRight: 1,
-            borderColor: 'divider',
+            borderColor: "divider",
             width: 280,
           },
         }}
       >
-        <Box role="presentation" sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Box
+          role="presentation"
+          sx={{ height: "100%", display: "flex", flexDirection: "column" }}
+        >
           {/* Drawer Header */}
           <Box
             sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
               py: 2,
               px: 2,
               borderBottom: 1,
-              borderColor: 'divider',
+              borderColor: "divider",
             }}
           >
             <img
               src="/vexxx.png"
               alt="Vexxx"
-              style={{ height: '48px', width: 'auto', objectFit: 'contain' }}
+              style={{ height: "48px", width: "auto", objectFit: "contain" }}
             />
           </Box>
 
           {/* Menu Items */}
-          <List sx={{ flex: 1, py: 1, px: 1 }}>
-            {renderMenuItems(true)}
-          </List>
+          <List sx={{ flex: 1, py: 1, px: 1 }}>{renderMenuItems(true)}</List>
 
           {/* Drawer Footer with Quick Actions */}
           <Divider />
@@ -813,7 +841,8 @@ export const MainNavbar: React.FC = () => {
                 variant="contained"
                 onClick={handleDismiss}
                 sx={{
-                  background: 'linear-gradient(135deg, #db2777 0%, #9333ea 100%)',
+                  background:
+                    "linear-gradient(135deg, #db2777 0%, #9333ea 100%)",
                   borderRadius: 2,
                   py: 1.25,
                   fontWeight: 600,
@@ -824,7 +853,7 @@ export const MainNavbar: React.FC = () => {
               </Button>
             )}
             <EnterVRHomeButton prominent />
-            <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1 }}>
+            <Box sx={{ display: "flex", justifyContent: "center", gap: 1 }}>
               {renderUtilityButtons()}
             </Box>
           </Box>

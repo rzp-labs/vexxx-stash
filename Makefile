@@ -158,6 +158,46 @@ build: stash phasher
 .PHONY: build-release
 build-release: flags-release flags-pie build
 
+# PostHog-symbolicated releases intentionally avoid flags-release: -s/-w remove
+# DWARF and -trimpath prevents --include-source from finding project sources.
+POSTHOG_SYMBOL_DIR ?= dist/posthog
+POSTHOG_BINARY ?= $(POSTHOG_SYMBOL_DIR)/stash
+
+.PHONY: flags-posthog-linux
+flags-posthog-linux:
+	$(NOOP)
+	$(eval LDFLAGS += -B gobuildid)
+
+.PHONY: flags-posthog-macos
+flags-posthog-macos:
+	$(NOOP)
+	$(eval LDFLAGS += -compressdwarf=false)
+
+# Pinned CLI 0.16.2 uses process credentials first and consults this local
+# dotenv fallback only when required variables are absent. Docker publication
+# supplies key/project/host in the environment; no root .env is needed there.
+.PHONY: posthog-symbols-upload
+posthog-symbols-upload:
+	posthog-cli --dotenv-file .env symbol-sets upload --directory $(POSTHOG_SYMBOL_DIR) --include-source
+
+.PHONY: build-release-posthog-linux
+build-release-posthog-linux:
+	mkdir -p $(POSTHOG_SYMBOL_DIR)
+	$(MAKE) flags-pie flags-posthog-linux STASH_OUTPUT="-o $(POSTHOG_BINARY)" stash
+	$(MAKE) posthog-symbols-upload
+
+.PHONY: build-release-posthog-macos
+build-release-posthog-macos:
+	mkdir -p $(POSTHOG_SYMBOL_DIR)
+	$(MAKE) flags-pie flags-posthog-macos STASH_OUTPUT="-o $(POSTHOG_BINARY)" stash
+	$(MAKE) posthog-symbols-upload
+
+# A bare binary does not load .env. Export the same runtime configuration read
+# by internal/analytics/posthog.go before launching the uploaded artifact.
+.PHONY: run-release-posthog
+run-release-posthog:
+	set -a; . ./.env; set +a; ./$(POSTHOG_BINARY)
+
 # compile and bundle into Stash.app
 # for when on macOS itself
 .PHONY: stash-macapp

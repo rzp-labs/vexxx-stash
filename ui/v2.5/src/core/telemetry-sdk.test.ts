@@ -1,0 +1,69 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { PostHog, CaptureResult } from "posthog-js/no-external";
+import { sanitizeTelemetry, telemetryConfig } from "./telemetry";
+
+// Exercise the pinned real parser/config, but drop every event at the final
+// transport boundary. Any attempted network request fails locally in the test.
+describe("pinned PostHog error parser", () => {
+  afterEach(() => vi.restoreAllMocks());
+  it("retains symbolication metadata from an actual SDK exception without sending", async () => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network forbidden"));
+    const xhr = vi
+      .spyOn(XMLHttpRequest.prototype, "send")
+      .mockImplementation(() => {
+        throw new Error("network forbidden");
+      });
+    const captured: CaptureResult[] = [];
+    const sdk = new PostHog();
+    sdk.init("test-public-project-token", {
+      ...telemetryConfig,
+      api_host: "https://example.invalid",
+      persistence: "memory",
+      bootstrap: { distinctID: "00000000-0000-4000-8000-000000000000" },
+      capture_pageview: false,
+      capture_exceptions: false,
+      before_send: (event) => {
+        const safe = sanitizeTelemetry(event);
+        if (safe) captured.push(safe);
+        return null;
+      },
+    });
+    sdk.identify("42", { user_role: "ADMIN" });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].properties).toMatchObject({
+      distinct_id: "42",
+      $user_id: "42",
+      $set: { user_role: "ADMIN" },
+    });
+    captured.length = 0;
+    const chunk = "11111111-2222-4333-8444-555555555555";
+    const stack = `TypeError: private-file.mp4 secret\n    at render (${window.location.origin}/assets/index-Ab12Cd34.js:12:45)`;
+    Object.assign(globalThis, { _posthogChunkIds: { [stack]: chunk } });
+    const error = new TypeError("private-file.mp4 secret");
+    error.stack = stack;
+    sdk.captureException(error);
+    await vi.waitFor(() => expect(captured).toHaveLength(1));
+    const safe = captured[0];
+    expect(safe.event).toBe("$exception");
+    expect(safe.properties.$exception_list[0].stacktrace.frames).toEqual([
+      {
+        filename: "/assets/index-Ab12Cd34.js",
+        platform: "web:javascript",
+        in_app: true,
+        lineno: 12,
+        colno: 45,
+        function: "render",
+        chunk_id: chunk,
+      },
+    ]);
+    expect(JSON.stringify(safe)).not.toMatch(
+      /private-file|private-host|secret/
+    );
+    expect(fetch).not.toHaveBeenCalled();
+    expect(xhr).not.toHaveBeenCalled();
+    delete (globalThis as typeof globalThis & { _posthogChunkIds?: unknown })
+      ._posthogChunkIds;
+  });
+});
