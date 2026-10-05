@@ -39,7 +39,7 @@ describe("pinned PostHog error parser", () => {
     });
     captured.length = 0;
     const chunk = "11111111-2222-4333-8444-555555555555";
-    const stack = `TypeError: private-file.mp4 secret\n    at render (${window.location.origin}/assets/index-Ab12Cd34.js:12:45)`;
+    const stack = `TypeError: private-file.mp4 secret\n    at ${window.location.origin}/assets/index-Ab12Cd34.js:124:29373\n    at t.<anonymous> (${window.location.origin}/assets/ScenePlayer-BVCijiWf.js:25:35113)`;
     Object.assign(globalThis, { _posthogChunkIds: { [stack]: chunk } });
     const error = new TypeError("private-file.mp4 secret");
     error.stack = stack;
@@ -47,14 +47,24 @@ describe("pinned PostHog error parser", () => {
     await vi.waitFor(() => expect(captured).toHaveLength(1));
     const safe = captured[0];
     expect(safe.event).toBe("$exception");
+    // The pinned parser keeps call-site order (outer frame first); only the
+    // bundle identified by the injected chunk map receives its chunk ID.
     expect(safe.properties.$exception_list[0].stacktrace.frames).toEqual([
+      {
+        filename: "/assets/ScenePlayer-BVCijiWf.js",
+        platform: "web:javascript",
+        in_app: true,
+        lineno: 25,
+        colno: 35113,
+        function: "t.<anonymous>",
+      },
       {
         filename: "/assets/index-Ab12Cd34.js",
         platform: "web:javascript",
         in_app: true,
-        lineno: 12,
-        colno: 45,
-        function: "render",
+        lineno: 124,
+        colno: 29373,
+        function: "?",
         chunk_id: chunk,
       },
     ]);

@@ -119,6 +119,9 @@ export function sanitizeTelemetry(
             filename,
             platform: "web:javascript",
             in_app: true,
+            // Ingestion requires a function string. Use the pinned parser's
+            // safe sentinel when an anonymous/unsafe name is redacted.
+            function: "?",
           };
           for (const key of ["lineno", "colno"]) {
             if (Number.isSafeInteger(frame[key]) && Number(frame[key]) >= 0)

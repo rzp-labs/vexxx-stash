@@ -112,8 +112,10 @@ func intelSpriteEligibility(source ffmpeg.IntelSource, backend string) error {
 	if err := source.ValidateSprite(backend); err != nil {
 		return err
 	}
-	if source.SampleAspectRatio != "1:1" && source.SampleAspectRatio != "1/1" && source.SampleAspectRatio != "1" {
-		return fmt.Errorf("sprite sample aspect ratio %q is not validated", source.SampleAspectRatio)
+	knownSquare := source.SampleAspectRatio == "1:1" || source.SampleAspectRatio == "1/1" || source.SampleAspectRatio == "1"
+	canonicalGeometry := source.UsesCanonicalSpriteScale(backend) && source.HasSquareOrUnspecifiedSampleAspectRatio()
+	if !knownSquare && !canonicalGeometry {
+		return fmt.Errorf("sprite sample aspect ratio %q (display aspect ratio %q) is not validated", source.SampleAspectRatio, source.DisplayAspectRatio)
 	}
 	frameRate, ok := new(big.Rat).SetString(source.FrameRate)
 	averageRate, avgOK := new(big.Rat).SetString(source.AverageFrameRate)

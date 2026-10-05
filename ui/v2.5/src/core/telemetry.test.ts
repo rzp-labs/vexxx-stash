@@ -105,6 +105,58 @@ describe("private media telemetry", () => {
       /private|secret|context_line|react_component_stack/
     );
   });
+  it("always supplies a safe function string for every retained frame", () => {
+    const names = [
+      undefined,
+      null,
+      "",
+      "?",
+      42,
+      "https://private.example/file.js?token=secret",
+      "private/media.mp4",
+      "x".repeat(152),
+      "render",
+      "t.<anonymous>",
+    ];
+    const sanitized = sanitizeTelemetry(
+      event("$exception", {
+        $exception_list: [
+          {
+            type: "TypeError",
+            value: "private-file.mp4 secret",
+            stacktrace: {
+              frames: names.map((name) => ({
+                filename: `${window.location.origin}/assets/index-Ab12Cd34.js?token=secret`,
+                function: name,
+                lineno: 124,
+                colno: 29373,
+              })),
+            },
+          },
+        ],
+      })
+    );
+    const frames = sanitized?.properties.$exception_list[0].stacktrace.frames;
+    expect(frames.map((frame: { function: string }) => frame.function)).toEqual(
+      ["?", "?", "?", "?", "?", "?", "?", "?", "render", "t.<anonymous>"]
+    );
+    for (const frame of frames) {
+      expect(Object.prototype.hasOwnProperty.call(frame, "function")).toBe(
+        true
+      );
+      expect(typeof frame.function).toBe("string");
+      expect(frame).toMatchObject({
+        filename: "/assets/index-Ab12Cd34.js",
+        platform: "web:javascript",
+        in_app: true,
+        lineno: 124,
+        colno: 29373,
+      });
+    }
+    expect(JSON.stringify(sanitized)).not.toMatch(
+      /private|secret|token=|https:/
+    );
+  });
   it("rejects identities without the authenticated numeric user ID and role", () => {
     for (const properties of [
       {},
@@ -177,6 +229,7 @@ describe("private media telemetry", () => {
           filename: "/assets/index-Ab12Cd34.js",
           platform: "web:javascript",
           in_app: true,
+          function: "?",
         },
       ]);
     } finally {
