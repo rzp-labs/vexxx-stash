@@ -57,3 +57,15 @@ describe("generation settings proposals", () => {
     ).toBe("config.general.generation.invalid_device");
   });
 });
+
+it("keeps scene previews independent and rejects unvalidated QSV", () => {
+  expect(
+    validateGenerationSettings({
+      ...software,
+      generationPreviewBackend: "vaapi",
+    })
+  ).toBeUndefined();
+  expect(
+    validateGenerationSettings({ ...software, generationPreviewBackend: "qsv" })
+  ).toBe("config.general.generation.invalid_backend");
+});

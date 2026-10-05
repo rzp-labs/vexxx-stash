@@ -111,6 +111,8 @@ input ConfigGeneralInput {
   parallelTasks: Int
   "Requested FFmpeg marker preview backend; requires application restart"
   generationMarkerBackend: String
+  "Requested scene MP4 preview backend: software or vaapi; requires restart"
+  generationPreviewBackend: String
   "Requested FFmpeg sprite backend; requires application restart"
   generationSpriteBackend: String
   "Explicit Intel render device (for example /dev/dri/renderD128)"
@@ -269,6 +271,8 @@ type ConfigGeneralResult {
   parallelTasks: Int!
   "Requested FFmpeg marker preview backend; requires application restart"
   generationMarkerBackend: String!
+  "Requested scene MP4 preview backend: software or vaapi; requires restart"
+  generationPreviewBackend: String!
   "Requested FFmpeg sprite backend; requires application restart"
   generationSpriteBackend: String!
   "Explicit Intel render device (for example /dev/dri/renderD128)"
@@ -696,6 +700,7 @@ type StashBoxValidationResult {
 "Running FFmpeg generation configuration. Actual job backend/fallback is logged per stage."
 type GenerationConfiguration {
   markerBackend: String!
+  previewBackend: String!
   spriteBackend: String!
   device: String!
   budgetEnabled: Boolean!

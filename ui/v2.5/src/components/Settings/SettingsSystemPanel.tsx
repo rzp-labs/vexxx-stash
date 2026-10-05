@@ -52,6 +52,7 @@ export const IntelGenerationSettings: React.FC = () => {
   const {
     generationMarkerBackend,
     generationSpriteBackend,
+    generationPreviewBackend,
     generationDevice,
     generationBudgetEnabled,
     generationMaxProcesses,
@@ -63,6 +64,7 @@ export const IntelGenerationSettings: React.FC = () => {
     const incoming = normalizeGenerationSettings({
       generationMarkerBackend,
       generationSpriteBackend,
+      generationPreviewBackend,
       generationDevice,
       generationBudgetEnabled,
       generationMaxProcesses,
@@ -94,6 +96,7 @@ export const IntelGenerationSettings: React.FC = () => {
     generationLoaded,
     generationMarkerBackend,
     generationSpriteBackend,
+    generationPreviewBackend,
     generationDevice,
     generationBudgetEnabled,
     generationMaxProcesses,
@@ -181,6 +184,7 @@ export const IntelGenerationSettings: React.FC = () => {
             values={{
               marker: active.markerBackend,
               sprite: active.spriteBackend,
+              preview: active.previewBackend,
               device: active.device,
               budget: active.budgetEnabled
                 ? intl.formatMessage({
@@ -201,6 +205,7 @@ export const IntelGenerationSettings: React.FC = () => {
             values={{
               marker: persisted.generationMarkerBackend,
               sprite: persisted.generationSpriteBackend,
+              preview: persisted.generationPreviewBackend,
             }}
           />
         </Typography>
@@ -212,22 +217,28 @@ export const IntelGenerationSettings: React.FC = () => {
         <Typography variant="body2" sx={{ mb: 1 }}>
           <FormattedMessage id="config.general.generation.diagnostics" />
         </Typography>
-        {(["generationMarkerBackend", "generationSpriteBackend"] as const).map(
-          (key) => (
-            <SelectSetting
-              key={key}
-              id={key}
-              headingID={`config.general.generation.${key}`}
-              value={draft[key] ?? "software"}
-              disabled={saving}
-              onChange={(v) => change({ [key]: v })}
-            >
-              <option value="software">
-                {intl.formatMessage({
-                  id: "config.general.generation.software",
-                })}
-              </option>
-              <option value="vaapi">Intel VAAPI</option>
+        {(
+          [
+            "generationMarkerBackend",
+            "generationSpriteBackend",
+            "generationPreviewBackend",
+          ] as const
+        ).map((key) => (
+          <SelectSetting
+            key={key}
+            id={key}
+            headingID={`config.general.generation.${key}`}
+            value={draft[key] ?? "software"}
+            disabled={saving}
+            onChange={(v) => change({ [key]: v })}
+          >
+            <option value="software">
+              {intl.formatMessage({
+                id: "config.general.generation.software",
+              })}
+            </option>
+            <option value="vaapi">Intel VAAPI</option>
+            {key !== "generationPreviewBackend" && (
               <option value="qsv" disabled={key === "generationMarkerBackend"}>
                 {key === "generationMarkerBackend"
                   ? intl.formatMessage({
@@ -235,9 +246,9 @@ export const IntelGenerationSettings: React.FC = () => {
                     })
                   : "Intel QSV"}
               </option>
-            </SelectSetting>
-          )
-        )}
+            )}
+          </SelectSetting>
+        ))}
         {(draft.generationMarkerBackend === "qsv" ||
           persisted.generationMarkerBackend === "qsv") && (
           <Alert severity="warning">
@@ -313,6 +324,7 @@ export const IntelGenerationSettings: React.FC = () => {
               change({
                 generationMarkerBackend: "software",
                 generationSpriteBackend: "software",
+                generationPreviewBackend: "software",
                 generationBudgetEnabled: false,
               })
             }

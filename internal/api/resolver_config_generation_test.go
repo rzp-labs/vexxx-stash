@@ -68,3 +68,24 @@ func TestGenerationGraphQLRejectsNonBooleanAndFractionalLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigGeneralScenePreviewRequestAndSchema(t *testing.T) {
+	c := config.InitializeEmpty()
+	c.GetGenerationBudget()
+	preview := "vaapi"
+	if err := c.ApplyGenerationConfigurationPatch(config.GenerationConfigurationPatch{PreviewBackend: &preview}); err != nil {
+		t.Fatal(err)
+	}
+	got := makeConfigGeneralResult()
+	if got.GenerationPreviewBackend != "vaapi" || got.ActiveGeneration.PreviewBackend != "software" || !got.GenerationRestartRequired {
+		t.Fatalf("scene request/active API: %#v", got)
+	}
+	if got.GenerationMarkerBackend != "software" || got.GenerationSpriteBackend != "software" {
+		t.Fatal("scene request coupled other backends")
+	}
+	schema := NewExecutableSchema(Config{}).Schema()
+	operation := `mutation { configureGeneral(input: { generationPreviewBackend: "software" }) { generationPreviewBackend activeGeneration { previewBackend } } }`
+	if _, err := gqlparser.LoadQuery(schema, operation); err != nil {
+		t.Fatal("scene schema fields unavailable", err)
+	}
+}

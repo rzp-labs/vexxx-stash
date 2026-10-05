@@ -547,12 +547,14 @@ func (g *watcherSceneGenerator) Generate(ctx context.Context, s *models.Scene, f
 		options := getGeneratePreviewOptions(GeneratePreviewOptionsInput{})
 
 		generator := &generate.Generator{
-			Encoder:      mgr.FFMpeg,
-			FFMpegConfig: mgr.Config,
-			LockManager:  mgr.ReadLockManager,
-			MarkerPaths:  g.paths.SceneMarkers,
-			ScenePaths:   g.paths.Scene,
-			Overwrite:    overwrite,
+			Encoder:       mgr.FFMpeg,
+			IntelPreviews: mgr.Config.GetIntelPreviewGeneration(),
+			Probe:         mgr.FFProbe,
+			FFMpegConfig:  mgr.Config,
+			LockManager:   mgr.ReadLockManager,
+			MarkerPaths:   g.paths.SceneMarkers,
+			ScenePaths:    g.paths.Scene,
+			Overwrite:     overwrite,
 		}
 
 		taskPreview := GeneratePreviewTask{

@@ -27,6 +27,7 @@ fragment ConfigGeneralData on ConfigGeneralResult {
   videoFileNamingAlgorithm
   parallelTasks
   generationMarkerBackend
+  generationPreviewBackend
   generationSpriteBackend
   generationDevice
   generationBudgetEnabled
@@ -37,6 +38,7 @@ fragment ConfigGeneralData on ConfigGeneralResult {
   generationConfigurationError
   activeGeneration {
     markerBackend
+    previewBackend
     spriteBackend
     device
     budgetEnabled

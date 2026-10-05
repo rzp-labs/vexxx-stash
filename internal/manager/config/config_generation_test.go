@@ -27,7 +27,7 @@ func TestGenerationDefaultsAndSnapshot(t *testing.T) {
 }
 
 func TestIntelBudgetDoesNotImplicitlyEnableCPUGeneration(t *testing.T) {
-	for _, backend := range []string{MarkerGenerationBackend, SpriteGenerationBackend} {
+	for _, backend := range []string{MarkerGenerationBackend, SpriteGenerationBackend, PreviewGenerationBackend} {
 		for _, shared := range []bool{false, true} {
 			for _, limits := range []generationbudget.Settings{{}, {MaxProcesses: 3, MaxGPUProcesses: 2, Threads: 4}} {
 				t.Run(fmt.Sprintf("%s/shared=%t/limits=%v", backend, shared, limits), func(t *testing.T) {

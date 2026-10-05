@@ -85,7 +85,7 @@ func (r *mutationResolver) setConfigFloat(key string, value *float64) {
 func (r *mutationResolver) ConfigureGeneral(ctx context.Context, input ConfigGeneralInput) (*ConfigGeneralResult, error) {
 	c := config.GetInstance()
 	generationPatch := config.GenerationConfigurationPatch{
-		MarkerBackend: input.GenerationMarkerBackend, SpriteBackend: input.GenerationSpriteBackend,
+		PreviewBackend: input.GenerationPreviewBackend, MarkerBackend: input.GenerationMarkerBackend, SpriteBackend: input.GenerationSpriteBackend,
 		Device: input.GenerationDevice, BudgetEnabled: input.GenerationBudgetEnabled,
 		MaxProcesses: input.GenerationMaxProcesses, MaxGPUProcesses: input.GenerationMaxGPUProcesses, Threads: input.GenerationThreads,
 	}

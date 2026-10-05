@@ -5,7 +5,12 @@ export function validateGenerationSettings(input: ConfigGeneralInput) {
     !["software", "qsv", "vaapi"].includes(
       input.generationMarkerBackend ?? ""
     ) ||
-    !["software", "qsv", "vaapi"].includes(input.generationSpriteBackend ?? "")
+    !["software", "qsv", "vaapi"].includes(
+      input.generationSpriteBackend ?? ""
+    ) ||
+    !["software", "vaapi"].includes(
+      input.generationPreviewBackend ?? "software"
+    )
   ) {
     return "config.general.generation.invalid_backend";
   }
@@ -46,6 +51,11 @@ export function normalizeGenerationSettings(
   return {
     generationMarkerBackend: backend(input.generationMarkerBackend),
     generationSpriteBackend: backend(input.generationSpriteBackend),
+    generationPreviewBackend: ["software", "vaapi"].includes(
+      input.generationPreviewBackend ?? ""
+    )
+      ? input.generationPreviewBackend
+      : "software",
     generationDevice: /^\/dev\/dri\/renderD[0-9]+$/.test(
       input.generationDevice ?? ""
     )
