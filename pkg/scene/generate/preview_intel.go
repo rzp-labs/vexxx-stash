@@ -7,7 +7,6 @@ import (
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/ffmpeg/transcoder"
 	"github.com/stashapp/stash/pkg/fsutil"
-	"github.com/stashapp/stash/pkg/generationbudget"
 	"github.com/stashapp/stash/pkg/logger"
 )
 
@@ -60,13 +59,11 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 			g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: stage, Reason: reason.Error()})
 			return fmt.Errorf("GPU scene preview %s: %w", stage, reason)
 		}
-		release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
+		source, err := g.intelSourceMetadata(lockCtx, lockCtx, input, *g.IntelPreviews, true)
 		if err != nil {
-			return err
+			return reject("metadata", err)
 		}
-		source, err := g.Probe.IntelPreviewSource(lockCtx, input)
-		release()
-		if err != nil {
+		if err := source.ValidatePreview(); err != nil {
 			return reject("eligibility", err)
 		}
 		start := 0.0

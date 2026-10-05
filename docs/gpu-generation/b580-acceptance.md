@@ -2,6 +2,15 @@
 
 This runbook separates CT102 development evidence from B580 release acceptance. The defaults remain software. Per-workload acceleration is opt-in; rollback selects the software backend for that workload. No automatic production enablement or pHash data migration is authorized by these lab steps.
 
+The Stage A and QSV procedures below record the historical hybrid candidate.
+For the current resident implementation, use [generation configuration](configuration.md),
+[scene previews](scene-previews.md) and [resident sprites](resident-sprites.md).
+Selected GPU rendering fails explicitly when a capability or execution stage is
+unsupported; it never falls back to CPU pixels. QSV rendering and GPU lossless
+animated WebP remain unavailable. Historical fallback instructions do not apply
+to the resident backend. B580 lab access, publication and production changes
+each require their own applicable authorization.
+
 ## Stage A: CT102 lab readiness
 
 Use the Mac mini for coordination, edits and hardware-independent checks. Root coordinates CT102 through the existing `prox-svc` alias and Proxmox `pct exec` / transfer. CT102 remains offline and unprivileged: 2 CPUs capped at 2, weight 50, 2 GiB RAM, zero swap, 16-GiB local ZFS root, renderD128 only, autostart off. Do not change networking, resource limits, host drivers or other LXCs, restart the host, add credentials, or use private media. Begin with serialized GPU jobs of at most 55 seconds plus 3 seconds cleanup grace. Stop on host instability, OOM, repeated timeouts or unexpected host resource impact.

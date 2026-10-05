@@ -94,7 +94,7 @@ GPU surfaces into VAAPI. Main10 retains ten-bit RGB precision through this bridg
 See [the interoperability patch](../../scripts/ffmpeg/README.md) and
 [scene preview eligibility](scene-previews.md).
 
-The final Vulkan-path checks use application binary SHA256 prefix `4799b4d`
+The initial Vulkan-path checks use application binary SHA256 prefix `4799b4d`
 and retained-mapping runtime `aa68a4af` (patch `6196ab32`). Two fresh complete
 LR180 sheets populated all 81 320×180 cells, producing 2880×1620 JPEGs with
 canonical VTT. They completed in 6.999 and 7.011 seconds wall time, using
@@ -121,7 +121,7 @@ was no additional forced benchmark cleanup; normal Go context cancellation
 kills its child process. All six render cases and cancellation removed their
 disposable containers and recorded no memory, OOM or PID pressure events.
 
-Complete PQ and HLG sheets on the same final build populated all 81 160×90 cells
+Complete PQ and HLG sheets on that build populated all 81 160×90 cells
 at 1440×810 with accurate seek requests and VTT. Both fully decoded and retained
 ordered neutral patches, highlight detail, hue and ramps across every cell when
 compared with the separate proper whole-image CPU tone-mapping policy control.
@@ -141,7 +141,7 @@ MAE 0.811–0.827/PSNR 45.79–45.93 dB remain diagnostics. This projected HDR p
 control shares the production shader math; the independent canonical SDR VR
 comparisons above remain the separate projection oracle.
 
-The final binary/runtime also passed an explicit FISHEYE190 CPU/GPU sprite pair
+That binary/runtime also passed an explicit FISHEYE190 CPU/GPU sprite pair
 on the representative 8192×4096 Main10 SDR source. Three widely separated seeks
 were 30.125, 1175.1094276666665 and 2320.093855333333 seconds; independent source
 packet checks found first eligible PTS 30.130100, 1175.123950 and 2320.101117.
@@ -161,6 +161,34 @@ Inspection found no systematic dark/green bias in this VR CPU reference; the
 ordinary raw 8K BMP bias described earlier is not used to dismiss this comparison.
 These bounded observations do not establish sustained throughput or new quality
 gates. Private media paths and decoded images remain outside the public PR.
+
+Final strict-discovery checks use application `c79a6e3c`, CLI `50d6353f`,
+mapping library `041f6342` and header-only probing library `3167f164`.
+The earlier comparisons establish pixel compatibility; this final runtime also
+excludes software pixel decoding during source discovery and validation, using
+the [strict/GPU metadata path](../../scripts/ffmpeg/README.md). A validated
+receive-frame observer covers every generation subprocess; an explicit CPU
+control positively detected nine software frames before the zero-software
+claims were accepted.
+
+The representative Main10 FISHEYE190 JPEG repeated the same three requested
+seeks, fully decoded at 2880×1620 and preserved the canonical CPU projection,
+source colors/detail and 78 black unused-cell centers. Existing CPU JPEG and
+separate accurate RGB24 controls retain the numeric differences reported above;
+no quality threshold was lowered. The complete generation recorded zero
+software frames/317 hardware frames, measured 3.214 seconds wall/1.130 CPU
+seconds and sampled about 316 MB peak process-group RSS. Permits were reusable,
+memory/OOM/PID/quota-throttling event deltas were zero, and the container was
+removed. Repeated compressed output identity is an observed stability result,
+not an acceptance requirement.
+
+The final PQ three-cell sheet also fully decoded at 1440×810 with all eight
+neutral bands ordered, unchanged proper CPU tone-policy comparison, no ramp
+reversal and 78 black unused-cell centers. It recorded zero software frames/48
+hardware frames. Injected first hardware-decoder initialization failure produced
+an explicit metadata refusal with zero software/hardware frames, no assets and
+reusable permits. The separate captured HLG decoder teardown fault and its
+source/control evidence are documented in [scene previews](scene-previews.md).
 
 Metadata, I/O, orchestration, driver/shader setup, VTT generation and JPEG header
 validation still use the CPU. Literal zero CPU usage is impossible. QSV JPEG

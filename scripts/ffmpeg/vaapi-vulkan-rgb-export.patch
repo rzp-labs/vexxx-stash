@@ -1,19 +1,19 @@
 --- a/libavutil/hwcontext_vulkan.c
 +++ b/libavutil/hwcontext_vulkan.c
 @@ -167,6 +167,9 @@
- 
+
      /* Maximum queues */
      int limit_queues;
 +
 +    /* Native packed RGB pools must be exportable to the parent VAAPI device. */
 +    int vaapi_derived;
  } VulkanDevicePriv;
- 
+
  typedef struct VulkanFramesPriv {
 @@ -2202,7 +2205,10 @@
                  dev_select.vendor_id = 0x1002;
          }
- 
+
 -        return vulkan_device_create_internal(ctx, &dev_select, 0, opts, flags);
 +        int err = vulkan_device_create_internal(ctx, &dev_select, 0, opts, flags);
 +        if (!err)
@@ -33,7 +33,7 @@
          (pmode != PREP_MODE_EXTERNAL_EXPORT) &&
 @@ -2963,6 +2969,8 @@
      VulkanFramesPriv *fp = hwfc->hwctx;
- 
+
      if (fp->modifier_info) {
 +        if (fp->p.create_pnext == fp->modifier_info)
 +            fp->p.create_pnext = fp->modifier_info->pNext;
@@ -70,37 +70,61 @@
 +        hwctx->tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
 +    }
 +#endif
- 
+
      /* Defaults */
      if (!hwctx->nb_layers)
-@@ -4160,7 +4194,13 @@
+@@ -4160,11 +4194,13 @@
      wait_info.pSemaphores = f->sem;
      wait_info.pValues     = f->sem_value;
- 
+
 -    vk->WaitSemaphores(hwctx->act_dev, &wait_info, UINT64_MAX);
+-
+-    err = ff_hwframe_map_create(src->hw_frames_ctx, dst, src, &vulkan_unmap_to_drm, drm_desc);
+-    if (err < 0)
 +    ret = vk->WaitSemaphores(hwctx->act_dev, &wait_info, UINT64_MAX);
 +    if (ret != VK_SUCCESS) {
 +        av_log(hwfc, AV_LOG_ERROR, "Failed to wait for Vulkan frame export: %s\n",
 +               ff_vk_ret2str(ret));
 +        err = AVERROR_EXTERNAL;
-+        goto end;
+         goto end;
 +    }
- 
-     err = ff_hwframe_map_create(src->hw_frames_ctx, dst, src, &vulkan_unmap_to_drm, drm_desc);
-     if (err < 0)
-@@ -4198,7 +4238,10 @@
+
+     ret = vk->GetImageDrmFormatModifierPropertiesEXT(hwctx->act_dev, f->img[0],
+                                                      &drm_mod);
+@@ -4198,7 +4234,10 @@
      for (int i = 0; i < drm_desc->nb_layers; i++) {
          VkFormat plane_vkfmt = av_vkfmt_from_pixfmt(hwfc->sw_format)[i];
- 
+
 -        drm_desc->layers[i].format = vulkan_fmt_to_drm(plane_vkfmt);
 +        /* Packed X2RGB10 has no alpha and VAAPI imports XRGB2101010. */
 +        drm_desc->layers[i].format = hwfc->sw_format == AV_PIX_FMT_X2RGB10
 +                                    ? DRM_FORMAT_XRGB2101010
 +                                    : vulkan_fmt_to_drm(plane_vkfmt);
          drm_desc->layers[i].nb_planes = fp->drm_format_modifier_properties[i].drmFormatModifierPlaneCount;
- 
+
          if (drm_desc->layers[i].nb_planes > MAX_MEMORY_PLANES) {
-@@ -4250,6 +4293,7 @@
+@@ -4232,6 +4271,11 @@
+
+     }
+
++    /* Transfer descriptor ownership only after all exports and checks pass. */
++    err = ff_hwframe_map_create(src->hw_frames_ctx, dst, src, &vulkan_unmap_to_drm, drm_desc);
++    if (err < 0)
++        goto end;
++
+     dst->width   = src->width;
+     dst->height  = src->height;
+     dst->data[0] = (uint8_t *)drm_desc;
+@@ -4241,6 +4285,8 @@
+     return 0;
+
+ end:
++    for (int i = 0; i < drm_desc->nb_objects; i++)
++        close(drm_desc->objects[i].fd);
+     av_free(drm_desc);
+     return err;
+ }
+@@ -4250,6 +4296,7 @@
                                 const AVFrame *src, int flags)
  {
      int err;
@@ -108,10 +132,10 @@
      AVFrame *tmp = av_frame_alloc();
      if (!tmp)
          return AVERROR(ENOMEM);
-@@ -4264,9 +4308,29 @@
+@@ -4264,9 +4311,29 @@
      if (err < 0)
          goto fail;
- 
+
 +    /* Keep the DRM export callback alive until after the VAAPI import is
 +     * destroyed. Flattening the source alone releases it before VAAPI use. */
 +    if (dst->buf[1]) {
@@ -132,7 +156,7 @@
 +     * The DRM map retains the Vulkan source through the final fence import. */
 +    dst->buf[1] = drm_map;
 +    drm_map = NULL;
- 
+
  fail:
 +    av_buffer_unref(&drm_map);
      av_frame_free(&tmp);

@@ -120,12 +120,7 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	defer close(done)
 	workCtx, cancel := context.WithCancel(lockCtx)
 	defer cancel()
-	release, err := g.generationBudget().Acquire(workCtx, generationbudget.CPU)
-	if err != nil {
-		return fail("metadata", err)
-	}
-	source, err := g.Probe.IntelSpriteSource(workCtx, input, g.IntelSprites.Backend)
-	release()
+	source, err := g.intelSourceMetadata(workCtx, lockCtx, input, *g.IntelSprites, false)
 	if err != nil {
 		return fail("metadata", err)
 	}
@@ -183,7 +178,7 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	}
 	// DecodeConfig parses only the JPEG header; the host never decodes sheet
 	// pixels. A complete canonical grid is mandatory before atomic publication.
-	release, err = g.generationBudget().Acquire(workCtx, generationbudget.CPU)
+	release, err := g.generationBudget().Acquire(workCtx, generationbudget.CPU)
 	if err != nil {
 		return fail("output", err)
 	}
@@ -237,13 +232,11 @@ func (g Generator) IntelSpriteFrameInfo(ctx context.Context, input string) (*ffm
 	lockCtx := g.LockManager.ReadLockWithCompletion(ctx, input, done)
 	defer lockCtx.Cancel()
 	defer close(done)
-	release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
+	source, err := g.intelSourceMetadata(lockCtx, lockCtx, input, *g.IntelSprites, false)
 	if err != nil {
-		return nil, err
-	}
-	source, err := g.Probe.IntelSpriteSource(lockCtx, input, g.IntelSprites.Backend)
-	release()
-	if err != nil {
+		if g.IntelDiagnostic != nil {
+			g.IntelDiagnostic(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelSprites.Backend, Actual: "none", Stage: "metadata", Reason: err.Error()})
+		}
 		return nil, err
 	}
 	plan, err := ffmpeg.NewIntelSpritePlan(*g.IntelSprites, source, input, 0, spriteScreenshotWidth)

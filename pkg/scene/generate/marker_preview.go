@@ -177,14 +177,12 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 	if g.IntelMarker.Backend == "qsv" {
 		return reject("quality", fmt.Errorf("QSV marker quality mapping has not passed representative visual acceptance; explicitly select VAAPI or software generation"))
 	}
-	release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
-	if err != nil {
-		return err
-	}
-	source, err := g.Probe.IntelPreviewSource(lockCtx, input)
-	release()
+	source, err := g.intelSourceMetadata(lockCtx, lockCtx, input, *g.IntelMarker, true)
 	if err != nil {
 		return reject("metadata", err)
+	}
+	if err := source.ValidatePreview(); err != nil {
+		return reject("eligibility", err)
 	}
 	plan, err := ffmpeg.NewIntelProjectedPreviewPlan(*g.IntelMarker, source, input, options.Seconds, markerPreviewWidth, options.VRMode)
 	if err != nil {
@@ -219,7 +217,7 @@ func (g Generator) validateIntelMarkerOutput(ctx context.Context, output string)
 		return &ffmpeg.GenerationOutputError{Err: err}
 	}
 	defer release()
-	return g.Probe.ValidateVideoOutput(ctx, output)
+	return g.Probe.ValidateVideoOutputMetadata(ctx, output)
 }
 
 func (g Generator) SceneMarkerWebp(ctx context.Context, input string, hash string, seconds float64, vrMode string) error {
@@ -363,14 +361,12 @@ func (g Generator) generateIntelMarkerScreenshot(lockCtx *fsutil.LockContext, in
 	if math.IsNaN(options.Seconds) || math.IsInf(options.Seconds, 0) || options.Seconds < 0 {
 		return reject("eligibility", fmt.Errorf("marker screenshot requires a finite nonnegative start"))
 	}
-	release, err := g.generationBudget().Acquire(lockCtx, generationbudget.CPU)
-	if err != nil {
-		return err
-	}
-	source, err := g.Probe.IntelSpriteSource(lockCtx, input, g.IntelMarker.Backend)
-	release()
+	source, err := g.intelSourceMetadata(lockCtx, lockCtx, input, *g.IntelMarker, false)
 	if err != nil {
 		return reject("metadata", err)
+	}
+	if err := source.ValidateSprite(g.IntelMarker.Backend); err != nil {
+		return reject("eligibility", err)
 	}
 	width := options.Width
 	if width <= 0 {

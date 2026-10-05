@@ -237,7 +237,7 @@ func TestIntelProbeRejectsEmptyOutput(t *testing.T) {
 							var cpu Args
 							for i := 0; i < len(args); i++ {
 								switch args[i] {
-								case "-init_hw_device", "-filter_hw_device", "-hwaccel", "-hwaccel_device", "-hwaccel_output_format", "-c:v":
+								case "-init_hw_device", "-filter_hw_device", "-hwaccel", "-hwaccel_device", "-hwaccel_output_format", "-hwaccel_strict", "-c:v":
 									i++
 								case "-vf":
 									i++

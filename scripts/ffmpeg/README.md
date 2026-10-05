@@ -1,12 +1,74 @@
-# VAAPI/Vulkan packed RGB export
+# GPU interop, strict decoding and metadata
 
-The application image keeps Alpine's FFmpeg **8.1.2-r0** codecs, filters and
-programs. Only `libavutil.so.60.26.102` is rebuilt, using the installed library's
-complete configure arguments and the checksum-pinned upstream release source.
+The application image keeps Alpine's FFmpeg **8.1.2-r0** codec/filter libraries
+and the `ffprobe` program. `libavutil.so.60.26.102`,
+`libavformat.so.62.12.102` and the `ffmpeg` CLI are rebuilt separately,
+using the installed library's complete configure arguments and the checksum-pinned
+upstream release source. The CLI links the packaged shared libraries instead of
+rebuilding codecs or filters; the mapping library patch remains independent.
 The helper rejects a changed package version, source digest, exported symbol set,
 ABI version or configure arguments. The runtime gate also checks the actual APK
 version, active SONAME target and replacement digest, preventing an old cached
 build from silently leaving a newer unpatched library active.
+
+`strict-hardware-output.patch` adds the opt-in input option `-hwaccel_strict 1`.
+Every selected-GPU generation command requests it together with an explicit
+hardware decoder device and hardware output format. Upstream FFmpeg can remove
+VAAPI from format negotiation after decoder initialization fails, then select a
+software format; libplacebo can upload those CPU-decoded pixels. `-xerror` and
+`-hwaccel_output_format vaapi` alone do not prohibit that path. The patched CLI
+returns `AV_PIX_FMT_NONE` before selecting software, and also rejects video
+decoders without a matching hardware-device configuration before opening them.
+The latter covers decoders which never invoke format negotiation. Invalid strict
+settings fail explicitly. Opt-out, automatic acceleration, software playback and
+audio preserve upstream behavior.
+
+Strict decoder contexts remain alive until scheduler workers have joined and
+filter graphs have released queued hardware frames. Upstream CLI teardown at
+decoder EOF can destroy a VAAPI context while libplacebo is synchronizing an
+outstanding decoded surface. A captured iHD 26.2.1 fault read an unmapped
+completed-count buffer while another thread destroyed that context. The strict
+CLI defers this teardown to the existing final decoder cleanup; it retains one
+context per decoder and does not change process limits, pixel operations or
+software/audio teardown. The build and runtime manifests require this lifetime
+correction as well as strict selection.
+
+The application includes the option in probes, frame counts and final renders.
+A custom or stock FFmpeg without it rejects the command immediately, rather than
+silently retaining upstream fallback. `build-strict-ffmpeg.py` verifies the pinned
+source/package, configure arguments, version, advertised codec/filter features and
+shared-library dependencies. A separate manifest pins the replacement program
+digest; the runtime gate checks the actual executable, APK version and option.
+This prevents a cached or alternate binary from masquerading as the strict build.
+
+Stream discovery also needs an explicit policy: upstream
+`avformat_find_stream_info` can decode video while probing, before the CLI's
+hardware decoder exists. `no-pixel-probe.patch` adds the opt-in format flag
+`+no_pixel_probe`. Native H.264/HEVC probing retains header parsing with
+`AVDISCARD_ALL`; other video decoders cannot open or receive probe packets.
+All decoder-open sites, including EOF probing, enforce the policy. Concat
+children inherit it before opening, and child options cannot clear it. Audio
+and calls without the flag retain their packaged behavior. GPU source probes
+set the flag; generated-output identity/packet checks additionally skip stream
+discovery. A stock/custom library missing the flag fails explicitly.
+
+Header-only probing can omit H.264 VUI/SAR or in-band HEVC properties. The CLI's
+`-hwaccel_metadata 1` therefore requires strict hardware output and reports the
+first actual hardware frame's dimensions, underlying pixel format, SAR, color
+enums and decoder rate. Generation releases CPU probe admission before acquiring
+a bounded GPU permit for this frame, then merges its actual properties before
+eligibility and graph planning. Container timing remains authoritative; missing
+or invalid frame metadata is an error. No image is downloaded or software
+encoded for metadata recovery.
+
+`build-libavformat.py` retains Alpine's existing downstream
+`add-av_stream_get_first_dts-for-chromium.patch` (SHA256
+`3d8f9994ae8535e370a1ea5bd41a5671346f376a39d55349c5b36977f93a6bb9`).
+The pinned Alpine recipe's SHA512 is also verified. This preserves its packaged
+DTS getter and exact exported ABI; it does not introduce a new application API.
+The helper rejects changes to all other FFmpeg shared libraries. Separate probe
+and strict-CLI manifests, active digests, package versions and advertised options
+are checked by the assembled GPU-free runtime gate.
 
 `vaapi-vulkan-rgb-export.patch` provides a single-object DMA-BUF bridge from
 libplacebo's Vulkan output to VAAPI. On a Vulkan device derived from VAAPI, native
@@ -25,6 +87,11 @@ The patch also initializes the external layout helper's fallback to ENOTSUP,
 allowing the existing GPU ownership barrier to run when host transfer is absent.
 Vulkan export already waits for timeline semaphores; its result is now checked and
 failures propagate. No pixel data is downloaded or uploaded by this bridge.
+The DRM descriptor transfers to its mapping callback only after all FD exports
+and format checks succeed. Earlier failures close only successfully exported
+FDs and free the descriptor locally. This prevents the callback from retaining
+a freed descriptor or closing uninitialized entries during error cleanup.
+This correction is separate from decoder lifetime and driver synchronization.
 FFmpeg's DMA-BUF mapping callbacks retain the Vulkan frame through the mapped
 VAAPI frame's lifetime. The patch also retains the intermediate DRM mapping in
 the mapped VAAPI frame's second buffer, while preserving the direct Vulkan
@@ -45,6 +112,9 @@ Primary source:
 - [Intel Xe external BO completion fence](https://github.com/intel/media-driver/blob/intel-media-26.2.1/media_softlet/linux/common/os/xe/mos_synchronization_xe.c)
 - [DMA-BUF reader and writer fence semantics](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/dma-buf.h)
 - [Alpine package recipe](https://gitlab.alpinelinux.org/alpine/aports/-/blob/3.24-stable/community/ffmpeg/APKBUILD)
+- [FFmpeg decoder format retry](https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/decode.c)
+- [FFmpeg CLI hardware selection](https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/fftools/ffmpeg_dec.c)
+- [libplacebo software-frame upload](https://github.com/haasn/libplacebo/blob/v7.360.1/src/include/libplacebo/utils/libav_internal.h)
 
 The image also packages `mesa-vulkan-intel` and the Vulkan loader; no host driver
 or device configuration is changed. The packaging check loads libraries and

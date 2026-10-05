@@ -39,7 +39,12 @@ func TestGPUSpriteManagerForwardsStoredProjection(t *testing.T) {
 			if err := os.WriteFile(probe, []byte("#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffprobe version 8.1.2';exit 0;fi\nprintf '%s' '"+metadata+"'\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			g := &SpriteGenerator{Rows: 9, Columns: 9, ImageOutputPath: filepath.Join(dir, "sheet.jpg"), g: &generate.Generator{Probe: ffmpeg.NewFFProbe(probe), LockManager: fsutil.NewReadLockManager(), IntelSprites: &ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD99999"}}}
+			encoder := filepath.Join(dir, "ffmpeg")
+			frame := `VEXXX_GPU_METADATA={"width":1920,"height":1080,"pix_fmt":"nv12","sample_aspect_ratio":"1/1","color_range":"tv","color_space":"bt709","color_primaries":"bt709","color_transfer":"bt709","frame_rate":"25/1"}`
+			if err := os.WriteFile(encoder, []byte("#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = '-hwaccel_metadata' ]; then printf '%s\\n' '"+frame+"';exit 0;fi;done\necho 'unexpected pixel generation' >&2\nexit 77\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			g := &SpriteGenerator{Rows: 9, Columns: 9, ImageOutputPath: filepath.Join(dir, "sheet.jpg"), g: &generate.Generator{Encoder: ffmpeg.NewEncoder(encoder), Probe: ffmpeg.NewFFProbe(probe), LockManager: fsutil.NewReadLockManager(), IntelSprites: &ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD99999"}}}
 			var diagnostic ffmpeg.IntelGenerationDiagnostic
 			g.g.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostic = d }
 			handled, err := g.intelSpriteSheet(context.Background(), spriteRequest{path: filepath.Join(dir, "input"), count: 81, streamDuration: 10, slowSeek: slow, frameCount: 6, vrMode: mode})
@@ -53,10 +58,10 @@ func TestGPUSpriteManagerForwardsStoredProjection(t *testing.T) {
 			} else if diagnostic.Stage != "device" {
 				t.Fatal("supported projection rejected instead of reaching device probe", mode, diagnostic)
 			}
-			// No encoder is present; a fallback would panic. Neither path may
-			// leave the temporary JPEG or concat seek list behind on failure.
+			// Only the metadata command is accepted by the fixture encoder.
+			// No render/fallback may leave a temporary JPEG or concat seek list.
 			entries, _ := os.ReadDir(dir)
-			if len(entries) != 1 {
+			if len(entries) != 2 {
 				t.Fatal("temporary projected assets leaked", entries)
 			}
 		}

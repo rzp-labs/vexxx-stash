@@ -25,7 +25,7 @@ func (t *GenerateSpriteTask) Start(ctx context.Context) error {
 		return nil
 	}
 
-	videoFile, err := instance.generationVideoFile(ctx, t.Scene.Path)
+	videoFile, err := instance.generationSpriteVideoFile(ctx, t.Scene.Path)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr

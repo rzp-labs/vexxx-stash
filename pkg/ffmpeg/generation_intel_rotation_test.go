@@ -3,6 +3,7 @@ package ffmpeg
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -140,7 +141,22 @@ func TestIntelRotationMatchesCanonicalFFmpegAutorotation(t *testing.T) {
 			args = append(args, "-display_"+c.flip)
 		}
 		run(append(args, "-i", base, "-c", "copy", input)...)
-		source, err := NewFFProbe(probe).IntelSource(ctx, input)
+		// This is the explicit CPU geometry oracle, so its canonical metadata
+		// query may use stock FFProbe. Feed the captured JSON to the generation
+		// parser without weakening production's mandatory header-only policy.
+		metadata, err := exec.CommandContext(ctx, probe, "-v", "error", "-show_streams", "-show_format", "-of", "json", input).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadataPath := filepath.Join(dir, "canonical-metadata.json")
+		metadataProbe := filepath.Join(dir, "canonical-metadata-probe")
+		if err := os.WriteFile(metadataPath, metadata, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataProbe, []byte("#!/bin/sh\ncat '"+metadataPath+"'\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		source, err := (&FFProbe{path: metadataProbe}).IntelSource(ctx, input)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -160,7 +176,14 @@ func TestIntelRotationMatchesCanonicalFFmpegAutorotation(t *testing.T) {
 			t.Fatalf("angle%s flip%s differs from canonical autorotation", c.angle, c.flip)
 		}
 		run("-v", "error", "-noautorotate", "-display_rotation", "0", "-i", input, "-frames:v", "1", "-vf", c.direction, "-c:v", "libx264", "-threads", "1", output)
-		encoded, err := NewFFProbe(probe).IntelSource(ctx, output)
+		metadata, err = exec.CommandContext(ctx, probe, "-v", "error", "-show_streams", "-show_format", "-of", "json", output).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, metadata, 0600); err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := (&FFProbe{path: metadataProbe}).IntelSource(ctx, output)
 		if err != nil {
 			t.Fatal(err)
 		}

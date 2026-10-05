@@ -191,7 +191,13 @@ func TestIntelRequestedMarkerRejectsUnsupportedWithoutSoftwareFallback(t *testin
 			binDir := t.TempDir()
 			binary := filepath.Join(binDir, "ffmpeg")
 			counter := filepath.Join(binDir, "calls")
-			script := "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'ffmpeg version 7.1'; exit 0; fi\nprintf x >> '" + counter + "'\nfor last do :; done\nprintf header-only > \"$last\"\nexit 0\n"
+			record := intelMetadataTestRecord()
+			record["width"], record["height"], record["pix_fmt"], record["frame_rate"] = 1920, 1080, "nv12", "30/1"
+			record["color_space"], record["color_primaries"], record["color_transfer"] = "unknown", "unknown", "unknown"
+			if c.name == "eligibility" {
+				record["pix_fmt"] = "p010le"
+			}
+			script := "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'ffmpeg version 7.1'; exit 0; fi\ncase \" $* \" in *'-hwaccel_metadata 1'*) printf '%s\\n' '" + string(intelMetadataTestOutput(record)) + "';exit 0;; esac\nprintf x >> '" + counter + "'\nfor last do :; done\nprintf header-only > \"$last\"\nexit 0\n"
 			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}

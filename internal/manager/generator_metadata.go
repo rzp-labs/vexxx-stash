@@ -73,6 +73,17 @@ func (s *Manager) generationPreviewVideoFile(ctx context.Context, path string) (
 	if s.Config == nil || s.Config.GetIntelPreviewGeneration() == nil {
 		return s.generationVideoFile(ctx, path)
 	}
+	return s.generationHardwareVideoFile(ctx, path)
+}
+
+func (s *Manager) generationSpriteVideoFile(ctx context.Context, path string) (*ffmpeg.VideoFile, error) {
+	if s.Config == nil || s.Config.GetIntelSpriteGeneration() == nil {
+		return s.generationVideoFile(ctx, path)
+	}
+	return s.generationHardwareVideoFile(ctx, path)
+}
+
+func (s *Manager) generationHardwareVideoFile(ctx context.Context, path string) (*ffmpeg.VideoFile, error) {
 	budget := s.Config.GetIntelGenerationBudget()
 	release, err := budget.Acquire(ctx, generationbudget.CPU)
 	if err != nil {
@@ -80,7 +91,7 @@ func (s *Manager) generationPreviewVideoFile(ctx context.Context, path string) (
 	}
 	defer release()
 	if s.FFProbe == nil {
-		return nil, fmt.Errorf("ffprobe unavailable for scene preview metadata")
+		return nil, fmt.Errorf("ffprobe unavailable for GPU generation metadata")
 	}
-	return s.FFProbe.NewVideoFileContext(ctx, path, budget.Settings().Threads)
+	return s.FFProbe.NewVideoFileMetadataContext(ctx, path, budget.Settings().Threads)
 }

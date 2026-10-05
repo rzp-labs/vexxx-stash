@@ -19,6 +19,19 @@ RUN curl --fail --silent --show-error --location \
     https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz -o /ffmpeg/source.tar.xz && \
     python3 build-libavutil.py /ffmpeg/source.tar.xz /ffmpeg/vaapi-vulkan-rgb-export.patch /ffmpeg/output
 
+# Probe policy is independently cached; codec and filter libraries stay packaged.
+FROM ffmpeg-mapping AS ffmpeg-probe
+RUN apk add --no-cache ffmpeg-dev=8.1.2-r0
+COPY scripts/ffmpeg/build-libavformat.py scripts/ffmpeg/no-pixel-probe.patch \
+    scripts/ffmpeg/add-av_stream_get_first_dts-for-chromium.patch /ffmpeg/
+RUN python3 build-libavformat.py /ffmpeg/source.tar.xz /ffmpeg/no-pixel-probe.patch /ffmpeg/probe-output
+
+# Keep the strict CLI layer separate so decoder policy changes reuse libraries.
+FROM ffmpeg-probe AS ffmpeg-strict
+COPY scripts/ffmpeg/build-strict-ffmpeg.py scripts/ffmpeg/strict-hardware-output.patch /ffmpeg/
+RUN cp /ffmpeg/probe-output/libavformat.so.62.12.102 /usr/lib/libavformat.so.62.12.102 && \
+    python3 build-strict-ffmpeg.py /ffmpeg/source.tar.xz /ffmpeg/strict-hardware-output.patch /ffmpeg/strict-output
+
 # Build Frontend
 FROM node:24-alpine AS frontend
 RUN apk add --no-cache make git
@@ -112,6 +125,10 @@ RUN apk add --no-cache ca-certificates vips-tools ffmpeg=8.1.2-r0 ffmpeg-libavut
     intel-media-driver libvpl onevpl-intel-gpu mesa-vulkan-intel vulkan-loader
 COPY --from=ffmpeg-mapping /ffmpeg/output/libavutil.so.60.26.102 /usr/lib/libavutil.so.60.26.102
 COPY --from=ffmpeg-mapping /ffmpeg/output/mapping-build.json /usr/share/vexxx/ffmpeg-mapping-build.json
+COPY --from=ffmpeg-probe /ffmpeg/probe-output/libavformat.so.62.12.102 /usr/lib/libavformat.so.62.12.102
+COPY --from=ffmpeg-probe /ffmpeg/probe-output/probe-build.json /usr/share/vexxx/ffmpeg-probe-build.json
+COPY --from=ffmpeg-strict /ffmpeg/strict-output/ffmpeg /usr/bin/ffmpeg
+COPY --from=ffmpeg-strict /ffmpeg/strict-output/strict-build.json /usr/share/vexxx/ffmpeg-strict-build.json
 COPY scripts/check_intel_runtime.py /usr/local/bin/check_intel_runtime.py
 # Packaging regression check; does not require or initialize a GPU.
 RUN python3 /usr/local/bin/check_intel_runtime.py

@@ -127,6 +127,9 @@ func IntelInputArgs(config IntelGenerationConfig, source IntelSource) Args {
 	} else {
 		args = append(args, "-filter_hw_device", "vex", "-hwaccel", "vaapi", "-hwaccel_device", "vex", "-hwaccel_output_format", "vaapi")
 	}
+	// The packaged CLI rejects software decoder selection before pixels are
+	// decoded. A stock/custom FFmpeg lacking the option fails explicitly too.
+	args = append(args, "-hwaccel_strict", "1")
 	return args
 }
 

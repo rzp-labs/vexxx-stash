@@ -39,6 +39,57 @@ func TestIntelSourceMetadata(t *testing.T) {
 	}
 }
 
+func TestIntelHeaderMetadataRequiresPixelFreeProbe(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	probe := filepath.Join(dir, "ffprobe")
+	// Header metadata may omit VUI fields. The GPU frame probe supplies them
+	// before eligibility; this phase must not reject or invent their values.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsPath + "'\nprintf '%s' '{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":1920,\"height\":1080}]}'\n"
+	if err := os.WriteFile(probe, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	source, err := (&FFProbe{path: probe}).IntelSourceMetadata(context.Background(), "input", true)
+	if err != nil || source.Codec != "h264" || source.ColorTransfer != "" || source.SampleAspectRatio != "" {
+		t.Fatalf("header source changed or guessed incomplete metadata: %+v %v", source, err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil || !strings.Contains(string(args), "-fflags\n+no_pixel_probe\n") {
+		t.Fatalf("header probe can decode software pixels: %s %v", args, err)
+	}
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\necho 'no_pixel_probe is unsupported by this library' >&2\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&FFProbe{path: probe}).IntelSourceMetadata(context.Background(), "input", true); err == nil || !strings.Contains(err.Error(), "no_pixel_probe is unsupported") {
+		t.Fatalf("unsupported pixel-free probing was not explicit: %v", err)
+	}
+}
+
+func TestGPUOutputValidationNeverDecodesPixels(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	probe := filepath.Join(dir, "ffprobe")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsPath + "'\nprintf '%s' '{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"mjpeg\",\"nb_read_packets\":\"1\"}]}'\n"
+	if err := os.WriteFile(probe, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := &FFProbe{path: probe}
+	if err := p.ValidateVideoOutputMetadata(context.Background(), "sheet.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := os.ReadFile(argsPath)
+	if !strings.Contains(string(args), "-nofind_stream_info\n") || !strings.Contains(string(args), "-fflags\n+no_pixel_probe\n") {
+		t.Fatalf("GPU validation can trigger image/video pixel decoding: %s", args)
+	}
+	if err := p.ValidateVideoOutput(context.Background(), "software.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	args, _ = os.ReadFile(argsPath)
+	if strings.Contains(string(args), "no_pixel_probe") || strings.Contains(string(args), "-nofind_stream_info") {
+		t.Fatalf("GPU policy changed explicit software validation: %s", args)
+	}
+}
+
 func TestIntelSpriteSourceIgnoresAudioCountOnly(t *testing.T) {
 	video8 := `{"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":3840,"height":2160,"index":2,"sample_aspect_ratio":"1:1","r_frame_rate":"25/1","avg_frame_rate":"25/1","duration":"1290.400000"}`
 	video10 := `{"codec_type":"video","codec_name":"hevc","profile":"Main 10","pix_fmt":"yuv420p10le","width":8192,"height":4096,"index":2,"color_range":"tv","color_space":"bt709","color_transfer":"bt709","color_primaries":"bt709"}`

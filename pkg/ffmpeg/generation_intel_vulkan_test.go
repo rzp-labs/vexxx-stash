@@ -8,9 +8,19 @@ import (
 func TestIntelVulkanKeepsSelectedDecodeDevice(t *testing.T) {
 	args := IntelVulkanInputArgs(IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD129"}, IntelSource{Codec: "hevc"})
 	joined := strings.Join(args, " ")
-	for _, required := range []string{"vaapi=vex:/dev/dri/renderD129", "vulkan=vexvk@vex", "-filter_hw_device vexvk", "-hwaccel_device vex", "-hwaccel_output_format vaapi"} {
+	for _, required := range []string{"vaapi=vex:/dev/dri/renderD129", "vulkan=vexvk@vex", "-filter_hw_device vexvk", "-hwaccel_device vex", "-hwaccel_output_format vaapi", "-hwaccel_strict 1"} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("missing %q in %s", required, joined)
+		}
+	}
+}
+
+func TestIntelInputRequiresStrictHardwareDecode(t *testing.T) {
+	for _, backend := range []string{"vaapi", "qsv"} {
+		args := IntelInputArgs(IntelGenerationConfig{Backend: backend}, IntelSource{Codec: "hevc"})
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "-hwaccel_strict 1") || !strings.Contains(joined, "-hwaccel_output_format "+backend) {
+			t.Fatalf("%s decoding can silently choose software: %s", backend, joined)
 		}
 	}
 }

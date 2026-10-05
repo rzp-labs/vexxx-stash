@@ -2,6 +2,7 @@ package generate
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,18 @@ func TestIntelUnspecifiedSARCanonicalGeometry(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v %s", err, out)
 	}
-	source, err := ffmpeg.NewFFProbe(probe).IntelSpriteSource(ctx, input, "vaapi")
+	// The stock local binary is a CPU reference, not the patched production
+	// header-only probe. Feed its recorded metadata to the strict parser.
+	metadata, err := exec.CommandContext(ctx, probe, "-v", "error", "-show_streams", "-show_format", "-of", "json", input).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureProbe := filepath.Join(t.TempDir(), "ffprobe")
+	script := "#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffprobe version 8.1';exit 0;fi\ncat <<'METADATA'\n" + string(metadata) + "\nMETADATA\n"
+	if err := os.WriteFile(fixtureProbe, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	source, err := ffmpeg.NewFFProbe(fixtureProbe).IntelSpriteSource(ctx, input, "vaapi")
 	if err != nil {
 		t.Fatal(err)
 	}

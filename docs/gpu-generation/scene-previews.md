@@ -247,7 +247,7 @@ unchanged application CPU comparator.
 
 An earlier concurrent three-segment HLG run crashed one FFmpeg child. Its exact
 standalone command and the complete concurrent run both exited normally under
-GDB, without a captured crash location. The final retained-mapping build
+GDB, without a captured crash location. The earlier retained-mapping build
 (`4799b4d` / `aa68a4af`) then passed three uninstrumented repetitions under the
 original conditions: three simultaneous render commands, total/GPU limits 3/3,
 one FFmpeg thread, 2 CPUs/2 GiB/128 PIDs and the same source/seeks. Each fully
@@ -257,13 +257,93 @@ They completed in 1.27–1.33 seconds. Neutral bands, highlights, hue and ramps
 matched the separate proper HLG CPU tone-policy control. No PID, memory or OOM
 pressure events occurred; peak observed PID count was 122 of 128. All children
 and containers drained and budgets were reusable. These regression repetitions
-show no recurrence on the corrected ownership build; the original crash's
-internal cause was not captured, and these bounded cases do not prove absence
-of every intermittent driver fault.
+showed no recurrence during that batch; they did not establish the crash's
+cause. The subsequent strict-discovery candidate reproduced the fault and
+captured the decoder-lifetime evidence below. These earlier passes do not
+replace that investigation or prove absence of every intermittent driver fault.
 
 Complete PQ/HLG JPEG and combined HDR/VR checks use the same final build;
 see [sprite checks](resident-sprites.md). Release remains subject to the
-parent's merge/publication hold. No CPU pixel fallback is used.
+parent’s merge/publication hold. No CPU pixel fallback is used.
+
+## Strict discovery and decoder teardown
+
+The earlier pixel comparisons exercised resident rendering, but did not exclude
+software decoding during upstream stream discovery. Selected GPU commands now
+require the strict CLI and `+no_pixel_probe` library policy described in
+[the FFmpeg README](../../scripts/ffmpeg/README.md). Header discovery suppresses
+software pixel decoding; a separately admitted hardware frame supplies actual
+geometry, precision, SAR and color before planning. Output packet validation
+also avoids pixel probing. Explicit hardware initialization failure remains an
+error with its bounded FFmpeg reason, no output assets and reusable permits.
+
+The strict-discovery HLG candidate reproduced the concurrent fault. Its native
+core showed `SEGV_MAPERR` at iHD's completed-count pointer during input
+`vaSyncSurface`, while another thread destroyed the decoder context. This was
+before that frame's Vulkan import. Strict decoder teardown now retains the
+context until scheduler workers have joined and filter graphs have been
+destroyed, including libplacebo's final GPU completion wait. Software/audio
+cleanup remains upstream. This fixes that demonstrated lifetime overlap; it
+does not establish universal driver safety for other pipelines.
+
+With application binary `c79a6e3c`, retention CLI `65a6cb2e` and the unchanged
+mapping library `aa68a4af`, three fresh observer-only controls each retained
+three simultaneous GPU render children under 2 CPUs/2 GiB/128 PIDs and total/GPU
+limits 3/3. Each produced 24 fully decoded 640×360 frames over exactly 2.4 seconds,
+with exact 0.1-second PTS, monotonic DTS, SAR1:1, BT.709 limited-range tags and no
+stale HDR metadata. The validated receive-frame observer recorded zero software
+frames and 54 hardware frames in each complete generation process tree. The
+proper CPU tone-policy control preserved all eight ordered neutral bands,
+highlights, color patches and ramps; whole-frame MAE0.884–0.890 and PSNR41.13–41.16
+are diagnostics, without a new threshold. Children drained, permits were reusable
+and PID/memory/OOM pressure events remained zero.
+
+A separate capped event trace recorded every rendering-context destruction
+after the last surface synchronization, with no active or subsequent sync.
+Its positive control detected an intentionally overlapping mock call. Two
+metadata-only contexts never synchronized a surface; an initial analysis
+assertion requiring a prior sync for those contexts was corrected against the
+same retained log, without rerunning the GPU case. Instrumentation changes
+scheduling, so this trace supplements the core and source ordering rather than
+replacing the natural controls.
+
+Final CLI `50d6353f` has byte-identical instructions, constants and relocations to
+the retention control; debug paths, symbol/string ordering and build IDs account
+for the file digest change. The final mapping library `041f6342` independently
+repairs a descriptor/FD error-path ownership bug, with source-extracted sanitizer
+fault controls. Exact final CLI/library hardware checks passed both PQ JPEG and
+HLG MP4 generation with zero software frames, explicit injected metadata refusal,
+full output decoding, timing/color checks and permit reuse. No private media,
+cores or pixel artifacts are published with this documentation.
+
+The exact final runtime also repeated the representative 8192×4096 Main10 SDR
+FISHEYE190 controls under 4 CPUs/6 GiB/256 PIDs. Three segments fully decoded
+134 video and 111 audio frames with every presentation PTS/duration and decoded
+audio matching the retained canonical CPU control. CPU/GPU packet decode order
+and DTS differ with encoder B-frame reorder depth (2 versus 1); both DTS
+sequences remain monotonic. Projection, colors and detail matched across all
+three intervals. The receive-frame observer recorded zero software frames and
+296 hardware frames. This run measured 2.307 seconds wall/1.871 CPU seconds.
+
+The complete twelve-segment case reached all twelve configured render slots,
+fully decoded 534 video and 444 audio frames and preserved the prior reviewed
+twelve-interval timing and content. That reference is a GPU regression control,
+not a CPU twelve-segment speed comparison. It recorded zero software frames and
+977 hardware frames, completed in 4.584 seconds/5.931 CPU seconds, and sampled
+3.404 GB peak process-group RSS. Cgroup memory peaked at 3.248 GB and PID count
+at 146. The unchanged four-CPU quota throttled four periods/1.662 seconds;
+memory-limit, OOM and PID-limit events remained zero. CPU quota enforcement is
+recorded rather than presented as zero resource pressure.
+
+Cancellation at four seconds caught twelve actual progressing render children
+and returned in 4.054 seconds with no final/temp media or live children and
+fresh permit reuse. It recorded zero software frames/856 hardware frames,
+3.257 GB cgroup memory peak and PID peak146. Its CPU quota throttled four
+periods/1.724 seconds, with no memory/OOM/PID-limit events. There was no additional
+forced benchmark cleanup; normal Go cancellation kills its child processes.
+All disposable containers were removed. These measurements include CPU
+orchestration, driver setup and optional audio, and do not imply literal zero
+CPU use, measured GPU VRAM limits or production service responsiveness.
 
 ## Historical hybrid Main10 result (before VEX-41)
 

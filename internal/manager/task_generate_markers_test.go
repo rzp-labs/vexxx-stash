@@ -36,6 +36,12 @@ func markerTaskFixture(t *testing.T, backend, device string) (*GenerateMarkersTa
 	block := filepath.Join(dir, "block")
 	script := `#!/bin/sh
 if [ "$1" = '-version' ]; then echo 'ffmpeg version 7.1'; exit 0; fi
+for arg do
+if [ "$arg" = '-hwaccel_metadata' ]; then
+printf '%s\n' 'VEXXX_GPU_METADATA={"width":640,"height":360,"pix_fmt":"nv12","sample_aspect_ratio":"1/1","color_range":"tv","color_space":"bt709","color_primaries":"bt709","color_transfer":"bt709","frame_rate":"30/1"}'
+exit 0
+fi
+done
 for last do :; done
 if [ "$last" = '-' ]; then exit 0; fi
 : > '` + started + `'
