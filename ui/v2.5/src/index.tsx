@@ -1,12 +1,16 @@
 import { ApolloProvider } from "@apollo/client";
 import ReactDOM from "react-dom";
 import { BrowserRouter } from "react-router-dom";
+import { initializeTelemetry } from "./core/telemetry";
 import { App } from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { getClient } from "./core/StashService";
 import { baseURL, getPlatformURL } from "./core/createClient";
 import "./index.css";
 import "./index.scss";
 import * as serviceWorker from "./serviceWorker";
+
+initializeTelemetry();
 
 ReactDOM.render(
   <>
@@ -15,11 +19,13 @@ ReactDOM.render(
       type="text/css"
       href={getPlatformURL("css").toString()}
     />
-    <BrowserRouter basename={baseURL}>
-      <ApolloProvider client={getClient()}>
-        <App />
-      </ApolloProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter basename={baseURL}>
+        <ApolloProvider client={getClient()}>
+          <App />
+        </ApolloProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   </>,
   document.getElementById("root")
 );

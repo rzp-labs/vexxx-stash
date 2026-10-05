@@ -232,6 +232,10 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         build = next(step for step in jobs["image"]["steps"] if "build-push-action" in step.get("uses", ""))
         self.assertFalse(build["with"]["push"])
         self.assertTrue(build["with"]["load"])
+        self.assertEqual(build["with"]["secrets"].strip(),
+                         "POSTHOG_CLI_API_KEY=${{ needs.plan.outputs.publish == 'true' && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && (inputs.publish_test_image || inputs.publish_latest))) && secrets.POSTHOG_CLI_API_KEY || '' }}")
+        self.assertIn("POSTHOG_UPLOAD_REQUIRED=${{ needs.plan.outputs.publish }}", build["with"]["build-args"])
+
         publisher = jobs["publish"]
         self.assertEqual(publisher["permissions"], {"actions": "read", "packages": "write"})
         self.assertEqual(publisher["needs"], ["plan", "image", "ci-required"])

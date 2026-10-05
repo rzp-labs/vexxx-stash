@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useMemo } from "react";
+import React, { createContext, useContext, useEffect, useMemo } from "react";
+import posthog from "posthog-js/no-external";
 import * as GQL from "src/core/generated-graphql";
 
-interface UserContextType {
+interface IUserContextType {
   user: GQL.CurrentUserDataFragment | null;
   isAdmin: boolean;
   isViewer: boolean;
@@ -16,7 +17,7 @@ interface UserContextType {
   refetch: () => void;
 }
 
-const defaultContext: UserContextType = {
+const defaultContext: IUserContextType = {
   user: null,
   isAdmin: false,
   isViewer: false,
@@ -30,12 +31,16 @@ const defaultContext: UserContextType = {
   refetch: () => {},
 };
 
-const UserContext = createContext<UserContextType>(defaultContext);
+const UserContext = createContext<IUserContextType>(defaultContext);
 
 export const UserProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
-  const { data: userData, loading: userLoading, refetch } = GQL.useCurrentUserQuery({
+  const {
+    data: userData,
+    loading: userLoading,
+    refetch,
+  } = GQL.useCurrentUserQuery({
     fetchPolicy: "cache-and-network",
   });
 
@@ -43,6 +48,21 @@ export const UserProvider: React.FC<{ children: React.ReactNode }> = ({
   const { data: countData, loading: countLoading } = GQL.useUserCountQuery({
     fetchPolicy: "cache-and-network",
   });
+
+  const currentUser = userData?.currentUser;
+  useEffect(() => {
+    if (userLoading || !userData || !posthog.__loaded) return;
+
+    const previousUserId = posthog.get_property("$user_id");
+    if (previousUserId && previousUserId !== currentUser?.id) {
+      posthog.reset();
+    }
+    if (currentUser) {
+      posthog.identify(currentUser.id, {
+        user_role: currentUser.role,
+      });
+    }
+  }, [userLoading, userData, currentUser]);
 
   const value = useMemo(() => {
     const user = userData?.currentUser ?? null;

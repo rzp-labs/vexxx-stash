@@ -2,3 +2,15 @@ onlyBuiltDependencies:
   - '@parcel/watcher'
   - core-js
   - esbuild
+  - '@posthog/cli'
+
+# pnpm 11+ uses allowBuilds; keep the list above for pnpm 10 compatibility.
+allowBuilds:
+  '@parcel/watcher': true
+  core-js: true
+  esbuild: true
+  '@posthog/cli': true
+
+# Chromecast pins this version via Git; use the identical registry release.
+overrides:
+  '@silvermine/videojs-chromecast>webcomponents.js': 0.7.24

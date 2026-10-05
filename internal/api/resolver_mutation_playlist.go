@@ -45,6 +45,7 @@ func (r *mutationResolver) PlaylistCreate(ctx context.Context, input models.Play
 		return nil, err
 	}
 
+	captureAuthenticatedEvent(ctx, "playlist_created")
 	return playlist, nil
 }
 

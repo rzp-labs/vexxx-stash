@@ -1,8 +1,10 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import legacy from "@vitejs/plugin-legacy";
 import tsconfigPaths from "vite-tsconfig-paths";
 import viteCompression from "vite-plugin-compression";
+import posthog from "@posthog/rollup-plugin";
+import { uploadsEnabled } from "./scripts/posthog-build-config.mjs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -12,7 +14,20 @@ const nolegacy = process.env.VITE_APP_NOLEGACY === "true";
 const sourcemap = process.env.VITE_APP_SOURCEMAPS === "true";
 
 // https://vitejs.dev/config/
-export default defineConfig(() => {
+export default defineConfig(({ command, mode }) => {
+  const env = loadEnv(mode, __dirname, "");
+  const uploadSourceMaps = uploadsEnabled(command, env);
+
+  if (
+    command === "build" &&
+    env.POSTHOG_UPLOAD_REQUIRED === "true" &&
+    !uploadSourceMaps
+  ) {
+    throw new Error(
+      "PostHog source map upload requires POSTHOG_API_KEY and POSTHOG_PROJECT_ID"
+    );
+  }
+
   let plugins = [
     react({
       babel: {
@@ -32,6 +47,41 @@ export default defineConfig(() => {
     plugins = [...plugins, legacy()];
   }
 
+  if (uploadSourceMaps) {
+    plugins.push(
+      posthog({
+        personalApiKey: env.POSTHOG_API_KEY,
+        projectId: env.POSTHOG_PROJECT_ID,
+        host: env.POSTHOG_HOST,
+        sourcemaps: {
+          enabled: true,
+          releaseName: "vexxx-ui",
+          releaseVersion:
+            env.VITE_APP_GITHASH || env.GITHUB_SHA || "development",
+          deleteAfterUpload: true,
+        },
+      }),
+      {
+        name: "posthog-omit-polyfill-maps",
+        generateBundle: {
+          order: "post",
+          handler(_options, bundle) {
+            // Vite builds these separately, without PostHog chunk IDs.
+            for (const chunk of Object.values(bundle)) {
+              if (
+                chunk.type === "chunk" &&
+                chunk.facadeModuleId === "\0vite/legacy-polyfills" &&
+                chunk.sourcemapFileName
+              ) {
+                delete bundle[chunk.sourcemapFileName];
+              }
+            }
+          },
+        },
+      }
+    );
+  }
+
   return {
     base: "",
     resolve: {
@@ -41,8 +91,10 @@ export default defineConfig(() => {
     },
     build: {
       outDir: "build",
-      sourcemap: sourcemap,
+      sourcemap: uploadSourceMaps ? "hidden" : sourcemap,
       reportCompressedSize: false,
+      // Bound aggregate memory, including the legacy minifier worker.
+      terserOptions: { maxWorkers: 1 },
     },
     optimizeDeps: {
       entries: "src/index.tsx",
@@ -84,7 +136,7 @@ export default defineConfig(() => {
     css: {
       preprocessorOptions: {
         scss: {
-          api: 'modern-compiler',
+          api: "modern-compiler",
         },
       },
     },

@@ -109,6 +109,7 @@ func (r *mutationResolver) GalleryCreate(ctx context.Context, input GalleryCreat
 	}
 
 	r.hookExecutor.ExecutePostHooks(ctx, newGallery.ID, hook.GalleryCreatePost, input, nil)
+	captureAuthenticatedEvent(ctx, "gallery_created")
 	return r.getGallery(ctx, newGallery.ID)
 }
 

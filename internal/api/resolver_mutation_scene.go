@@ -196,6 +196,7 @@ func (r *mutationResolver) SceneCreate(ctx context.Context, input models.SceneCr
 		return nil, err
 	}
 
+	captureAuthenticatedEvent(ctx, "scene_created")
 	return ret, nil
 }
 
@@ -1771,4 +1772,3 @@ func (r *mutationResolver) SceneDestroyGenerated(ctx context.Context, ids []stri
 	fileDeleter.Commit()
 	return true, nil
 }
-

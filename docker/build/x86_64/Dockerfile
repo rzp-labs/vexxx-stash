@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # This dockerfile should be built with `make docker-build` from the stash root.
 
 # Build Frontend
@@ -15,16 +16,37 @@ COPY ./ui /stash/ui/
 RUN make generate-ui
 ARG GITHASH
 ARG STASH_VERSION
+ARG POSTHOG_UPLOAD_REQUIRED=false
+ARG POSTHOG_CLI_PROJECT_ID
+ARG POSTHOG_CLI_HOST
+ARG VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
+ARG VITE_PUBLIC_POSTHOG_HOST
+ARG GITHUB_ACTIONS
+ARG GITHUB_SHA
+ARG GITHUB_REF_NAME
+ARG GITHUB_REPOSITORY
+ARG GITHUB_SERVER_URL
+ENV POSTHOG_PROJECT_ID=$POSTHOG_CLI_PROJECT_ID \
+    POSTHOG_HOST=$POSTHOG_CLI_HOST \
+    POSTHOG_UPLOAD_REQUIRED=$POSTHOG_UPLOAD_REQUIRED \
+    VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=$VITE_PUBLIC_POSTHOG_PROJECT_TOKEN \
+    VITE_PUBLIC_POSTHOG_HOST=$VITE_PUBLIC_POSTHOG_HOST \
+    GITHUB_ACTIONS=$GITHUB_ACTIONS \
+    GITHUB_SHA=$GITHUB_SHA \
+    GITHUB_REF_NAME=$GITHUB_REF_NAME \
+    GITHUB_REPOSITORY=$GITHUB_REPOSITORY \
+    GITHUB_SERVER_URL=$GITHUB_SERVER_URL
 ARG BUILD_DATE
-# Vite exceeds Node's default ~2 GiB heap; keep its allowance explicit and bounded.
-RUN NODE_OPTIONS=--max-old-space-size=4096 \
+# Keep master's bounded frontend heap and deterministic build date.
+RUN --mount=type=secret,id=POSTHOG_CLI_API_KEY,env=POSTHOG_API_KEY,required=${POSTHOG_UPLOAD_REQUIRED} \
+    NODE_OPTIONS=--max-old-space-size=4096 \
     BUILD_DATE="${BUILD_DATE:-$(date +"%Y-%m-%d %H:%M:%S")}" make ui-only
 
 # Build Backend
 FROM golang:1.26-alpine3.24 AS backend
-# Bound compilation/code generation while the frontend stage also runs.
 ENV GOMAXPROCS=4 GOFLAGS=-p=4 GOMEMLIMIT=2GiB
-RUN apk add --no-cache make alpine-sdk
+RUN apk add --no-cache make alpine-sdk nodejs npm \
+    && npm install -g @posthog/cli@0.16.2
 WORKDIR /stash
 COPY go.mod go.sum /stash/
 RUN go mod download
@@ -41,7 +63,29 @@ COPY --from=frontend /stash /stash/
 ARG GITHASH
 ARG STASH_VERSION
 ARG BUILD_DATE
-RUN BUILD_DATE="${BUILD_DATE:-$(date +"%Y-%m-%d %H:%M:%S")}" make flags-release flags-pie stash
+ENV BUILD_DATE=$BUILD_DATE
+ARG POSTHOG_UPLOAD_REQUIRED=false
+ARG POSTHOG_CLI_PROJECT_ID
+ARG POSTHOG_CLI_HOST
+ARG GITHUB_ACTIONS
+ARG GITHUB_SHA
+ARG GITHUB_REF_NAME
+ARG GITHUB_REPOSITORY
+ARG GITHUB_SERVER_URL
+ENV POSTHOG_CLI_PROJECT_ID=$POSTHOG_CLI_PROJECT_ID \
+    POSTHOG_CLI_HOST=$POSTHOG_CLI_HOST \
+    GITHUB_ACTIONS=$GITHUB_ACTIONS \
+    GITHUB_SHA=$GITHUB_SHA \
+    GITHUB_REF_NAME=$GITHUB_REF_NAME \
+    GITHUB_REPOSITORY=$GITHUB_REPOSITORY \
+    GITHUB_SERVER_URL=$GITHUB_SERVER_URL
+RUN --mount=type=secret,id=POSTHOG_CLI_API_KEY,env=POSTHOG_CLI_API_KEY,required=${POSTHOG_UPLOAD_REQUIRED} \
+    if [ "$POSTHOG_UPLOAD_REQUIRED" = "true" ]; then \
+      make build-release-posthog-linux; \
+    else \
+      mkdir -p dist/posthog && \
+      make flags-pie flags-posthog-linux STASH_OUTPUT="-o dist/posthog/stash" stash; \
+    fi
 
 # Final Runnable Image
 FROM alpine:3.24
@@ -53,7 +97,7 @@ COPY scripts/check_intel_runtime.py /usr/local/bin/check_intel_runtime.py
 RUN python3 /usr/local/bin/check_intel_runtime.py
 # Install Python dependencies for AI services (StashFace, StashTag, MegaFace)
 RUN pip3 install --no-cache-dir --break-system-packages gradio_client==1.8.0
-COPY --from=backend /stash/stash /usr/bin/
+COPY --from=backend /stash/dist/posthog/stash /usr/bin/
 # Copy Python AI service scripts
 COPY --from=backend /stash/pkg/stashface/client.py /usr/lib/stash/stashface/client.py
 COPY --from=backend /stash/pkg/stashtag/client.py /usr/lib/stash/stashtag/client.py

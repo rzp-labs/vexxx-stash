@@ -1,5 +1,6 @@
 import React from "react";
 import { FormattedMessage } from "react-intl";
+import posthog from "posthog-js/no-external";
 import { isLazyComponentError } from "src/utils/lazyComponent";
 
 interface IErrorBoundaryProps {
@@ -29,6 +30,9 @@ export class ErrorBoundary extends React.Component<
     let errorHelpId: string | undefined;
     if (isLazyComponentError(error)) {
       errorHelpId = "errors.lazy_component_error_help";
+    }
+    if (posthog.__loaded) {
+      posthog.captureException(error);
     }
     this.setState({
       error,

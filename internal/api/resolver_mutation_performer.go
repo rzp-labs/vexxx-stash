@@ -137,6 +137,7 @@ func (r *mutationResolver) PerformerCreate(ctx context.Context, input models.Per
 	}
 
 	r.hookExecutor.ExecutePostHooks(ctx, newPerformer.ID, hook.PerformerCreatePost, input, nil)
+	captureAuthenticatedEvent(ctx, "performer_created")
 	return r.getPerformer(ctx, newPerformer.ID)
 }
 

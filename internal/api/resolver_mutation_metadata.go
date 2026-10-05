@@ -21,6 +21,7 @@ func (r *mutationResolver) MetadataScan(ctx context.Context, input manager.ScanM
 		return "", err
 	}
 
+	captureAuthenticatedEvent(ctx, "metadata_scan_started")
 	return strconv.Itoa(jobID), nil
 }
 
@@ -69,6 +70,7 @@ func (r *mutationResolver) MetadataImport(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	captureAuthenticatedEvent(ctx, "metadata_import_started")
 	return strconv.Itoa(jobID), nil
 }
 
@@ -89,6 +91,7 @@ func (r *mutationResolver) MetadataExport(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	captureAuthenticatedEvent(ctx, "metadata_export_started")
 	return strconv.Itoa(jobID), nil
 }
 
@@ -118,11 +121,13 @@ func (r *mutationResolver) MetadataGenerate(ctx context.Context, input manager.G
 		return "", err
 	}
 
+	captureAuthenticatedEvent(ctx, "metadata_generate_started")
 	return strconv.Itoa(jobID), nil
 }
 
 func (r *mutationResolver) MetadataAutoTag(ctx context.Context, input manager.AutoTagMetadataInput) (string, error) {
 	jobID := manager.GetInstance().AutoTag(ctx, input)
+	captureAuthenticatedEvent(ctx, "metadata_auto_tag_started")
 	return strconv.Itoa(jobID), nil
 }
 
@@ -130,6 +135,7 @@ func (r *mutationResolver) MetadataIdentify(ctx context.Context, input identify.
 	t := manager.CreateIdentifyJob(input)
 	jobID := manager.GetInstance().JobManager.Add(ctx, "Identifying...", t)
 
+	captureAuthenticatedEvent(ctx, "metadata_identify_started")
 	return strconv.Itoa(jobID), nil
 }
 

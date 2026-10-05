@@ -42,13 +42,14 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/natefinch/pie v0.0.0-20170715172608-9a0d72014007
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
+	github.com/posthog/posthog-go v1.32.0
 	github.com/remeh/sizedwaitgroup v1.0.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cast v1.6.0
 	github.com/spf13/pflag v1.0.6
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/gjson v1.16.0
 	github.com/vearutop/statigz v1.4.0
 	github.com/vektah/dataloaden v0.3.0
@@ -56,6 +57,9 @@ require (
 	github.com/vektra/mockery/v2 v2.10.0
 	github.com/xWTF/chardet v0.0.0-20230208095535-c780f2ac244e
 	github.com/zencoder/go-dash/v3 v3.0.2
+	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.5.0
+	go.opentelemetry.io/otel/log v0.5.0
+	go.opentelemetry.io/otel/sdk/log v0.5.0
 	golang.org/x/crypto v0.45.0
 	golang.org/x/image v0.18.0
 	golang.org/x/net v0.47.0
@@ -75,7 +79,25 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
 )
 
-require github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect
+require (
+	github.com/andybalholm/brotli v1.1.1 // indirect
+	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
+	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect
+	github.com/go-logr/logr v1.4.2 // indirect
+	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/goccy/go-json v0.10.6 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
+	github.com/klauspost/compress v1.17.11 // indirect
+	go.opentelemetry.io/otel v1.29.0 // indirect
+	go.opentelemetry.io/otel/metric v1.29.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.29.0 // indirect
+	go.opentelemetry.io/otel/trace v1.29.0 // indirect
+	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20240822170219-fc7c04adadcd // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240822170219-fc7c04adadcd // indirect
+	google.golang.org/grpc v1.65.0 // indirect
+	google.golang.org/protobuf v1.36.6 // indirect
+)
 
 require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
