@@ -13,8 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/posthog/posthog-go"
-
 	"github.com/spf13/pflag"
 
 	"github.com/stashapp/stash/internal/analytics"
@@ -196,10 +194,7 @@ func recoverPanic() {
 		logger.Errorf("panic: %v\n%s", err, debug.Stack())
 
 		if client := analytics.Client(); client != nil {
-			exception := posthog.NewDefaultException(time.Now(), "server", "ApplicationPanic", "application panic (message redacted)")
-			version, revision, _ := build.Version()
-			exception.Properties = posthog.NewProperties().Set("app_version", version).Set("app_revision", revision).Set("$process_person_profile", false)
-			client.Enqueue(exception)
+			client.Enqueue(analytics.PanicException(err))
 		}
 
 		if desktop.IsDesktop() {

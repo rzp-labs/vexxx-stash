@@ -1,6 +1,7 @@
 import posthog, { CaptureResult, PostHogConfig } from "posthog-js/no-external";
 // Bundle the error parser locally; never load remote code into the private UI.
 import "posthog-js/dist/exception-autocapture";
+import { diagnosticMessage } from "./telemetry-redaction";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const identity = /^(\d+|[0-9a-f-]{36})$/i;
@@ -38,7 +39,29 @@ const errorTypes = new Set([
   "URIError",
   "EvalError",
   "UnhandledRejection",
+  "AggregateError",
+  "DOMException",
 ]);
+
+function diagnosticScreen(): string {
+  return (
+    window.location.pathname
+      .split("/")
+      .find((part) =>
+        [
+          "scenes",
+          "images",
+          "galleries",
+          "performers",
+          "studios",
+          "tags",
+          "settings",
+          "stats",
+          "playlists",
+        ].includes(part)
+      ) || "other"
+  );
+}
 
 // Build a new event rather than blacklist sensitive properties. The SDK adds
 // URLs, referrers and persisted campaign/person properties even to manual errors.
@@ -80,32 +103,45 @@ export function sanitizeTelemetry(
   }
   if (event.event === "$pageview") {
     // Only fixed screen categories, never item IDs, titles, queries or proxy paths.
-    const screen = window.location.pathname
-      .split("/")
-      .find((part) =>
-        [
-          "scenes",
-          "images",
-          "galleries",
-          "performers",
-          "studios",
-          "tags",
-          "settings",
-          "stats",
-          "playlists",
-        ].includes(part)
-      );
-    properties.screen = screen || "other";
+    properties.screen = diagnosticScreen();
   }
   if (event.event === "$exception") {
+    properties.screen = diagnosticScreen();
+    properties.app_revision = import.meta.env.VITE_APP_GITHASH || "development";
+    if (
+      ["fatal", "error", "warning", "log", "info", "debug"].includes(
+        source.$exception_level
+      )
+    )
+      properties.$exception_level = source.$exception_level;
     properties.$exception_list = (
       Array.isArray(source.$exception_list) ? source.$exception_list : []
     ).map((item) => ({
       type: errorTypes.has(item.type) ? item.type : "Error",
-      value: "Application error (message redacted)",
+      value: diagnosticMessage(item.value),
       mechanism: {
-        handled: item.mechanism?.handled === true,
-        synthetic: item.mechanism?.synthetic === true,
+        ...(typeof item.mechanism?.handled === "boolean"
+          ? { handled: item.mechanism.handled }
+          : {}),
+        ...(typeof item.mechanism?.synthetic === "boolean"
+          ? { synthetic: item.mechanism.synthetic }
+          : {}),
+        ...(["generic", "chained", "onerror", "onunhandledrejection"].includes(
+          item.mechanism?.type
+        )
+          ? { type: item.mechanism.type }
+          : {}),
+        ...(["cause", "member"].includes(item.mechanism?.source)
+          ? { source: item.mechanism.source }
+          : {}),
+        ...Object.fromEntries(
+          ["exception_id", "parent_id"].flatMap((key) =>
+            Number.isSafeInteger(item.mechanism?.[key]) &&
+            item.mechanism[key] >= 0
+              ? [[key, item.mechanism[key]]]
+              : []
+          )
+        ),
       },
       stacktrace: {
         type: "raw",

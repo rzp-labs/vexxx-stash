@@ -43,10 +43,35 @@ describe("pinned PostHog error parser", () => {
     Object.assign(globalThis, { _posthogChunkIds: { [stack]: chunk } });
     const error = new TypeError("private-file.mp4 secret");
     error.stack = stack;
+    const cause = new RangeError("Maximum call stack size exceeded");
+    cause.stack = `RangeError: Maximum call stack size exceeded\n    at playbackFailure (${window.location.origin}/assets/ScenePlayer-BVCijiWf.js:25:35113)`;
+    Object.assign(error, { cause });
     sdk.captureException(error);
     await vi.waitFor(() => expect(captured).toHaveLength(1));
     const safe = captured[0];
     expect(safe.event).toBe("$exception");
+    expect(safe.properties.$exception_level).toBe("error");
+    expect(safe.properties.$exception_list).toHaveLength(2);
+    expect(safe.properties.$exception_list[0].mechanism).toMatchObject({
+      type: "generic",
+      handled: true,
+      synthetic: false,
+      exception_id: 0,
+    });
+    expect(safe.properties.$exception_list[1]).toMatchObject({
+      type: "RangeError",
+      value: "Maximum call stack size exceeded",
+      mechanism: {
+        type: "chained",
+        source: "cause",
+        synthetic: false,
+        exception_id: 1,
+        parent_id: 0,
+      },
+    });
+    expect(safe.properties.$exception_list[1].mechanism).not.toHaveProperty(
+      "handled"
+    );
     // The pinned parser keeps call-site order (outer frame first); only the
     // bundle identified by the injected chunk map receives its chunk ID.
     expect(safe.properties.$exception_list[0].stacktrace.frames).toEqual([
