@@ -45,6 +45,9 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     # These job outputs reference the classifier (id: plan), not the test step.
     # Each step has its own GITHUB_OUTPUT file; writes to the test step's file
     # do not set steps.plan.outputs below.
@@ -65,6 +68,17 @@ jobs:
       latest_ref: ${{ steps.plan.outputs.latest_ref }}
       version: ${{ steps.plan.outputs.version }}
       build_date: ${{ steps.plan.outputs.build_date }}
+      execute_tests: ${{ steps.reuse.outputs.execute_tests }}
+      execute_backend: ${{ steps.reuse.outputs.execute_backend }}
+      execute_frontend: ${{ steps.reuse.outputs.execute_frontend }}
+      execute_python: ${{ steps.reuse.outputs.execute_python }}
+      reused_backend: ${{ steps.reuse.outputs.reused_backend }}
+      reused_frontend: ${{ steps.reuse.outputs.reused_frontend }}
+      reused_python: ${{ steps.reuse.outputs.reused_python }}
+      reuse_run: ${{ steps.reuse.outputs.reuse_run }}
+      reuse_attempt: ${{ steps.reuse.outputs.reuse_attempt }}
+      reuse_revision: ${{ steps.reuse.outputs.reuse_revision }}
+      reuse_workflow_digest: ${{ steps.reuse.outputs.reuse_workflow_digest }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -74,13 +88,22 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_image_publication_policy.py
           python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
+          python3 -m unittest discover -s scripts -p test_reuse_master_validation.py
       - name: Classify changed inputs and deliberate publication
         id: plan
         run: python3 scripts/image_publication_policy.py
+      - name: Verify exact-master validation evidence
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUIRED_BACKEND: ${{ steps.plan.outputs.backend }}
+          REQUIRED_FRONTEND: ${{ steps.plan.outputs.frontend }}
+          REQUIRED_PYTHON: ${{ steps.plan.outputs.python }}
+        run: python3 scripts/reuse_master_validation.py
 
   test:
     needs: plan
-    if: needs.plan.outputs.run_tests == 'true'
+    if: needs.plan.outputs.execute_tests == 'true'
     env:
       BUILD_DATE: ${{ needs.plan.outputs.build_date }}
       GITHASH: ${{ github.sha }}
@@ -91,56 +114,57 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - if: needs.plan.outputs.backend == 'true'
+      - if: needs.plan.outputs.execute_backend == 'true'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-      - if: needs.plan.outputs.frontend == 'true'
+      - if: needs.plan.outputs.execute_frontend == 'true'
         uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 10.34.4
       - name: Configure pnpm store before restoring cache
-        if: needs.plan.outputs.frontend == 'true'
+        if: needs.plan.outputs.execute_frontend == 'true'
         # Keep setup-node's cache path aligned with make pre-ui in CI.
         run: pnpm config set store-dir ~/.pnpm-store
-      - if: needs.plan.outputs.frontend == 'true'
+      - if: needs.plan.outputs.execute_frontend == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: ui/v2.5/pnpm-lock.yaml
       - name: Install media tools
-        if: needs.plan.outputs.backend == 'true'
+        if: needs.plan.outputs.execute_backend == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg libvips-tools
       - name: Install frozen frontend dependencies and generate operations
-        if: needs.plan.outputs.frontend == 'true'
+        if: needs.plan.outputs.execute_frontend == 'true'
         run: make pre-ui generate-ui
       - name: Generate backend and login locales
-        if: needs.plan.outputs.backend == 'true'
+        if: needs.plan.outputs.execute_backend == 'true'
         run: make generate-backend generate-login-locale
       - name: Go unit and integration tests
-        if: needs.plan.outputs.backend == 'true'
+        if: needs.plan.outputs.execute_backend == 'true'
         # Keep build/module caches, but execute tests again against this tree.
         run: |
           go test -count=1 ./...
           go test -count=1 -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
       - name: Frontend tests and type check
-        if: needs.plan.outputs.frontend == 'true'
+        if: needs.plan.outputs.execute_frontend == 'true'
         working-directory: ui/v2.5
         run: |
           pnpm test
           pnpm run check
       - name: Production frontend compilation
-        if: needs.plan.outputs.frontend == 'true'
+        if: needs.plan.outputs.execute_frontend == 'true' && needs.plan.outputs.build_image != 'true'
+        # Image candidates compile once in Docker with release maps/metadata.
         run: make ui-only
       - name: Production backend compilation
-        if: needs.plan.outputs.backend == 'true'
+        if: needs.plan.outputs.execute_backend == 'true' && needs.plan.outputs.build_image != 'true'
         # When frontend is selected this embeds its real production assets.
         run: make flags-release flags-pie stash
       - name: Python regression tests
-        if: needs.plan.outputs.python == 'true'
+        if: needs.plan.outputs.execute_python == 'true'
         run: |
           python3 -m unittest discover -s scripts -p 'test_*.py'
           if test -d scripts/gpu_generation; then
@@ -152,8 +176,8 @@ jobs:
     if: >-
       always() && needs.plan.result == 'success' &&
       needs.plan.outputs.build_image == 'true' &&
-      ((needs.plan.outputs.run_tests == 'true' && needs.test.result == 'success') ||
-       (needs.plan.outputs.run_tests == 'false' && needs.test.result == 'skipped'))
+      ((needs.plan.outputs.execute_tests == 'true' && needs.test.result == 'success') ||
+       (needs.plan.outputs.execute_tests == 'false' && needs.test.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -196,10 +220,11 @@ jobs:
         env:
           LOCAL_IMAGE: ${{ needs.plan.outputs.local_ref }}
         run: |
+          docker image inspect --format '{{ .Id }}' "$LOCAL_IMAGE" > image.id
           docker run --detach --name vexxx-smoke \
             --publish 127.0.0.1:9999:9999 \
             --env STASH_HOST=0.0.0.0 \
-            "$LOCAL_IMAGE"
+            "$(cat image.id)"
           trap 'docker logs vexxx-smoke; docker rm --force vexxx-smoke' EXIT
           curl --fail --silent --show-error --retry 30 \
             --retry-all-errors --retry-delay 2 --max-time 5 \
@@ -210,7 +235,7 @@ jobs:
           LOCAL_IMAGE: ${{ needs.plan.outputs.local_ref }}
         run: |
           docker save "$LOCAL_IMAGE" --output image.tar
-          sha256sum image.tar > image.tar.sha256
+          sha256sum image.tar image.id > image.tar.sha256
       - name: Transfer tested image to publication job
         if: needs.plan.outputs.publish == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -219,11 +244,15 @@ jobs:
           path: |
             image.tar
             image.tar.sha256
+            image.id
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
 
   ci-required:
+    # Drafts emit only a separate informational context. Ready runs always create
+    # the real required context and validate the current merge revision.
+    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'validation-deferred' || 'ci-required' }}
     needs: [plan, test, image]
     if: always()
     runs-on: ubuntu-latest
@@ -235,22 +264,60 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           TEST_RESULT: ${{ needs.test.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
-          RUN_TESTS: ${{ needs.plan.outputs.run_tests }}
+          RUN_TESTS: ${{ needs.plan.outputs.execute_tests }}
+          REQUIRED_TESTS: ${{ needs.plan.outputs.run_tests }}
+          DRAFT_EVENT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
+          EXPECTED_SHA: ${{ github.sha }}
+          REUSE_ALLOWED: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag') }}
+          REUSE_RUN: ${{ needs.plan.outputs.reuse_run }}
+          REUSE_ATTEMPT: ${{ needs.plan.outputs.reuse_attempt }}
+          REUSE_REVISION: ${{ needs.plan.outputs.reuse_revision }}
+          REUSE_WORKFLOW_DIGEST: ${{ needs.plan.outputs.reuse_workflow_digest }}
           BUILD_IMAGE: ${{ needs.plan.outputs.build_image }}
           DEFERRED: ${{ needs.plan.outputs.deferred }}
-          BACKEND: ${{ needs.plan.outputs.backend }}
-          FRONTEND: ${{ needs.plan.outputs.frontend }}
-          PYTHON: ${{ needs.plan.outputs.python }}
+          BACKEND: ${{ needs.plan.outputs.execute_backend }}
+          REQUIRED_BACKEND: ${{ needs.plan.outputs.backend }}
+          REUSED_BACKEND: ${{ needs.plan.outputs.reused_backend }}
+          FRONTEND: ${{ needs.plan.outputs.execute_frontend }}
+          REQUIRED_FRONTEND: ${{ needs.plan.outputs.frontend }}
+          REUSED_FRONTEND: ${{ needs.plan.outputs.reused_frontend }}
+          PYTHON: ${{ needs.plan.outputs.execute_python }}
+          REQUIRED_PYTHON: ${{ needs.plan.outputs.python }}
+          REUSED_PYTHON: ${{ needs.plan.outputs.reused_python }}
         run: |
           python3 - <<'PYCODE'
           import os
+          import re
           from pathlib import Path
           e = os.environ
           errors = []
           if e['PLAN_RESULT'] != 'success':
               errors.append('Planner did not succeed')
-          if e['DEFERRED'] != 'false':
-              errors.append('Draft: substantive validation deferred; not merge eligible')
+          draft = e['DRAFT_EVENT'] == 'true'
+          if e['DRAFT_EVENT'] not in ('true', 'false') or e['DEFERRED'] != ('true' if draft else 'false'):
+              errors.append('Draft event does not match planner deferral')
+          reused = False
+          for domain in ('BACKEND', 'FRONTEND', 'PYTHON'):
+              values = [e[domain], e['REQUIRED_' + domain], e['REUSED_' + domain]]
+              if any(value not in ('true', 'false') for value in values):
+                  errors.append('Invalid domain coverage: ' + domain)
+                  continue
+              execute, required, reuse = [value == 'true' for value in values]
+              if required != (execute or reuse) or (execute and reuse):
+                  errors.append('Missing or conflicting coverage: ' + domain)
+              reused |= reuse
+              if draft and (execute or required or reuse):
+                  errors.append('Draft must defer substantive checks')
+          if reused and (e['REUSE_ALLOWED'] != 'true' or not re.fullmatch(r'[1-9][0-9]*', e['REUSE_RUN']) or
+                         not re.fullmatch(r'[1-9][0-9]*', e['REUSE_ATTEMPT']) or
+                         e['REUSE_REVISION'] != e['EXPECTED_SHA'] or
+                         not re.fullmatch(r'[0-9a-f]{64}', e['REUSE_WORKFLOW_DIGEST'])):
+              errors.append('Missing exact workflow/source proof')
+          required_groups = [e['REQUIRED_' + key] for key in ('BACKEND', 'FRONTEND', 'PYTHON')]
+          if e['REQUIRED_TESTS'] not in ('true', 'false') or (e['REQUIRED_TESTS'] == 'true') != ('true' in required_groups):
+              errors.append('Required tests do not match planned domains')
+          if draft and e['BUILD_IMAGE'] != 'false':
+              errors.append('Draft must defer image checks')
           groups = [e[key] for key in ('BACKEND', 'FRONTEND', 'PYTHON')]
           if any(value not in ('true', 'false') for value in groups):
               errors.append('Invalid planner domain')
@@ -262,7 +329,9 @@ jobs:
               elif e[result] != ('success' if e[selected] == 'true' else 'skipped'):
                   errors.append(selected + ': unexpected job result ' + e[result])
           Path(e['GITHUB_STEP_SUMMARY']).write_text(
-              '\n'.join(errors) if errors else 'All selected validation obligations passed.')
+              '\n'.join(errors) if errors else (
+                  'Draft: validation deferred. This informational context is not ci-required; ready-for-review starts required validation.'
+                  if draft else 'All selected validation obligations passed (executed or proven exact-master reuse).'))
           if errors:
               raise SystemExit('\n'.join(errors))
           PYCODE
@@ -292,6 +361,7 @@ jobs:
         run: |
           sha256sum --check image.tar.sha256
           docker load --input image.tar
+          test "$(docker image inspect --format '{{ .Id }}' "$LOCAL_IMAGE")" = "$(cat image.id)"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$LOCAL_IMAGE")" = "$EXPECTED_SHA"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$LOCAL_IMAGE")" = "$EXPECTED_VERSION"
           test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "$LOCAL_IMAGE")" = 'linux/amd64'

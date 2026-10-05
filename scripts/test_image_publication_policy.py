@@ -223,8 +223,10 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertFalse(document["on"]["workflow_dispatch"]["inputs"]["publish_test_image"]["default"])
         self.assertFalse(document['on']['workflow_dispatch']['inputs']['publish_latest']['default'])
         jobs = document["jobs"]
+        self.assertEqual(jobs["plan"]["permissions"], {"contents": "read", "actions": "read"})
         for name in ("plan", "test", "image"):
-            self.assertNotIn("permissions", jobs[name])
+            if name != "plan":
+                self.assertNotIn("permissions", jobs[name])
             self.assertFalse(any("login-action" in step.get("uses", "") for step in jobs[name]["steps"]))
         checks = jobs["plan"]["steps"][1]["run"]
         self.assertIn("test_image_publication_policy.py", checks)
@@ -251,6 +253,14 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertIn('ready_for_review', document['on']['pull_request']['types'])
         self.assertIn('converted_to_draft', document['on']['pull_request']['types'])
         self.assertEqual(document['env']['POSTHOG_UPLOAD_REQUIRED'], 'false')
+        self.assertIn("'validation-deferred' || 'ci-required'", jobs['ci-required']['name'])
+        self.assertIn('github.event.pull_request.draft', jobs['ci-required']['name'])
+        self.assertEqual(jobs['test']['if'], "needs.plan.outputs.execute_tests == 'true'")
+        self.assertIn('needs.plan.outputs.execute_tests', jobs['image']['if'])
+        compiles = [step for step in jobs['test']['steps'] if step.get('name', '').startswith('Production ')]
+        self.assertEqual(len(compiles), 2)
+        for step in compiles:
+            self.assertIn("needs.plan.outputs.build_image != 'true'", step['if'])
         aggregate = jobs['ci-required']['steps'][0]['run']
         for selected in ('true', 'false'):
             for test_result in ('success', 'failure', 'cancelled', 'skipped'):
@@ -258,7 +268,10 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                     for image_result in ('success', 'failure', 'cancelled', 'skipped'):
                         with tempfile.TemporaryDirectory() as directory:
                             env = {**os.environ, 'PLAN_RESULT': 'success', 'DEFERRED': 'false',
-                                   'RUN_TESTS': selected, 'TEST_RESULT': test_result,
+                                   'RUN_TESTS': selected, 'REQUIRED_TESTS': selected, 'TEST_RESULT': test_result,
+                                   'DRAFT_EVENT': 'false', 'REQUIRED_BACKEND': selected,
+                                   'REQUIRED_FRONTEND': 'false', 'REQUIRED_PYTHON': 'false',
+                                   'REUSED_BACKEND': 'false', 'REUSED_FRONTEND': 'false', 'REUSED_PYTHON': 'false',
                                    'BUILD_IMAGE': image_selected, 'IMAGE_RESULT': image_result,
                                    'BACKEND': selected, 'FRONTEND': 'false', 'PYTHON': 'false',
                                    'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary')}
@@ -270,7 +283,10 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                          {'RUN_TESTS': ''}, {'BUILD_IMAGE': 'invalid'}, {'BACKEND': 'true'}):
             with tempfile.TemporaryDirectory() as directory:
                 env = {**os.environ, 'PLAN_RESULT': 'success', 'DEFERRED': 'false',
-                       'RUN_TESTS': 'false', 'TEST_RESULT': 'skipped', 'BUILD_IMAGE': 'false',
+                       'RUN_TESTS': 'false', 'REQUIRED_TESTS': 'false', 'TEST_RESULT': 'skipped', 'BUILD_IMAGE': 'false',
+                       'DRAFT_EVENT': 'false', 'REQUIRED_BACKEND': 'false',
+                       'REQUIRED_FRONTEND': 'false', 'REQUIRED_PYTHON': 'false',
+                       'REUSED_BACKEND': 'false', 'REUSED_FRONTEND': 'false', 'REUSED_PYTHON': 'false',
                        'IMAGE_RESULT': 'skipped', 'BACKEND': 'false', 'FRONTEND': 'false', 'PYTHON': 'false',
                        'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary'), **override}
                 result = subprocess.run(['bash'], input=aggregate, text=True, env=env, capture_output=True)
