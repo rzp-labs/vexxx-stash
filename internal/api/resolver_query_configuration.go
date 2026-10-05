@@ -288,6 +288,7 @@ func makeConfigGeneralResult() *ConfigGeneralResult {
 		CalculateMd5:                 config.IsCalculateMD5(),
 		VideoFileNamingAlgorithm:     config.GetVideoFileNamingAlgorithm(),
 		ParallelTasks:                config.GetParallelTasks(),
+		GenerationPreviewBackend:     requestedGeneration.PreviewBackend,
 		GenerationMarkerBackend:      requestedGeneration.MarkerBackend,
 		GenerationSpriteBackend:      requestedGeneration.SpriteBackend,
 		GenerationDevice:             requestedGeneration.Device,
@@ -298,7 +299,7 @@ func makeConfigGeneralResult() *ConfigGeneralResult {
 		GenerationRestartRequired:    config.GenerationRestartRequired(),
 		GenerationConfigurationError: generationError,
 		ActiveGeneration: &GenerationConfiguration{
-			MarkerBackend: activeGeneration.MarkerBackend, SpriteBackend: activeGeneration.SpriteBackend, Device: activeGeneration.Device,
+			PreviewBackend: activeGeneration.PreviewBackend, MarkerBackend: activeGeneration.MarkerBackend, SpriteBackend: activeGeneration.SpriteBackend, Device: activeGeneration.Device,
 			BudgetEnabled: activeGeneration.BudgetEnabled, MaxProcesses: activeGeneration.MaxProcesses, MaxGPUProcesses: activeGeneration.MaxGPUProcesses, Threads: activeGeneration.Threads,
 		},
 		PreviewAudio:                  config.GetPreviewAudio(),

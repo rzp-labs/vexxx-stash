@@ -62,6 +62,7 @@ beforeEach(() => {
   mocks.persisted = {
     generationMarkerBackend: "software",
     generationSpriteBackend: "software",
+    generationPreviewBackend: "software",
     generationDevice: "/dev/dri/renderD128",
     generationBudgetEnabled: false,
     generationMaxProcesses: 0,
@@ -72,6 +73,7 @@ beforeEach(() => {
     activeGeneration: {
       markerBackend: "software",
       spriteBackend: "software",
+      previewBackend: "software",
       device: "/dev/dri/renderD128",
       budgetEnabled: false,
       maxProcesses: 0,
@@ -98,7 +100,7 @@ describe("Intel generation settings rendered controls", () => {
     ).toBeInTheDocument();
     expect(
       screen.getAllByRole("combobox").map((v) => (v as HTMLSelectElement).value)
-    ).toEqual(["software", "software"]);
+    ).toEqual(["software", "software", "software"]);
     const qsvOptions = screen.getAllByRole("option", { name: /Intel QSV/ });
     expect(qsvOptions[0]).toBeDisabled();
     expect(qsvOptions[1]).not.toBeDisabled();
@@ -125,6 +127,7 @@ describe("Intel generation settings rendered controls", () => {
     expect(mocks.save.mock.calls[0][0].variables.input).toEqual({
       generationMarkerBackend: "vaapi",
       generationSpriteBackend: "software",
+      generationPreviewBackend: "software",
       generationDevice: "/dev/dri/renderD128",
       generationBudgetEnabled: false,
       generationMaxProcesses: 0,
@@ -196,7 +199,7 @@ describe("Intel generation settings rendered controls", () => {
     render(panel());
     expect(
       screen.getAllByRole("combobox").map((v) => (v as HTMLSelectElement).value)
-    ).toEqual(["software", "software"]);
+    ).toEqual(["software", "software", "software"]);
     const save = screen.getByRole("button", {
       name: "Save generation settings",
     });
@@ -206,6 +209,7 @@ describe("Intel generation settings rendered controls", () => {
     expect(mocks.save.mock.calls[0][0].variables.input).toEqual({
       generationMarkerBackend: "software",
       generationSpriteBackend: "software",
+      generationPreviewBackend: "software",
       generationDevice: "/dev/dri/renderD128",
       generationBudgetEnabled: false,
       generationMaxProcesses: 4,
@@ -507,6 +511,7 @@ describe("Intel generation settings rendered controls", () => {
     expect(mocks.save.mock.calls[0][0].variables.input).toMatchObject({
       generationMarkerBackend: "software",
       generationSpriteBackend: "software",
+      generationPreviewBackend: "software",
       generationBudgetEnabled: false,
     });
   });
@@ -528,4 +533,26 @@ describe("Intel generation settings rendered controls", () => {
       screen.getByText(/Saved requests: markers software, sprites software/)
     ).toBeInTheDocument();
   });
+});
+
+it("saves the scene backend independently and rolls it back with generation settings", async () => {
+  render(panel());
+  const scene = screen.getAllByRole("combobox")[2];
+  expect(
+    within(scene).queryByRole("option", { name: /QSV/ })
+  ).not.toBeInTheDocument();
+  fireEvent.change(scene, { target: { value: "vaapi" } });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Save generation settings" })
+  );
+  await waitFor(() => expect(mocks.save).toHaveBeenCalledOnce());
+  expect(mocks.save.mock.calls[0][0].variables.input).toMatchObject({
+    generationPreviewBackend: "vaapi",
+    generationMarkerBackend: "software",
+    generationSpriteBackend: "software",
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Select software rollback" })
+  );
+  expect(scene).toHaveValue("software");
 });

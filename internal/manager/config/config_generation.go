@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	PreviewGenerationBackend  = "generation.previews.backend"
 	MarkerGenerationBackend   = "generation.markers.backend"
 	SpriteGenerationBackend   = "generation.sprites.backend"
 	GenerationDevice          = "generation.device"
@@ -19,10 +20,10 @@ const (
 )
 
 type generationSettings struct {
-	marker, sprite, device string
-	budget                 *generationbudget.Budget
-	requested              GenerationConfiguration
-	fallback               bool
+	marker, sprite, preview, device string
+	budget                          *generationbudget.Budget
+	requested                       GenerationConfiguration
+	fallback                        bool
 }
 
 // readGenerationSettings assumes the configuration read lock is held. These
@@ -32,10 +33,10 @@ func (i *Config) readGenerationSettings() (generationSettings, error) {
 	if err != nil {
 		return generationSettings{requested: requested}, err
 	}
-	s := generationSettings{marker: requested.MarkerBackend, sprite: requested.SpriteBackend, device: requested.Device, requested: requested}
+	s := generationSettings{marker: requested.MarkerBackend, sprite: requested.SpriteBackend, preview: requested.PreviewBackend, device: requested.Device, requested: requested}
 	// Intel stages always have bounded admission. Ordinary CPU generation shares
 	// this scheduler only when the caller explicitly enables the shared budget.
-	if requested.BudgetEnabled || s.marker != "software" || s.sprite != "software" {
+	if requested.BudgetEnabled || s.marker != "software" || s.sprite != "software" || s.preview != "software" {
 		s.budget, err = generationbudget.New(requested.Limits())
 		if err != nil {
 			return s, err
@@ -53,7 +54,7 @@ func (i *Config) generation() generationSettings {
 		s, err := i.readGenerationSettings()
 		if err != nil {
 			logger.Warnf("[generation] invalid settings, Intel disabled and conservative CPU budget used: %v", err)
-			s = generationSettings{marker: "software", sprite: "software", device: "/dev/dri/renderD128", requested: s.requested, fallback: true}
+			s = generationSettings{marker: "software", sprite: "software", preview: "software", device: "/dev/dri/renderD128", requested: s.requested, fallback: true}
 			s.budget, _ = generationbudget.New(generationbudget.Settings{})
 		}
 		i.generationSnapshot = s
@@ -94,4 +95,13 @@ func (i *Config) GetIntelSpriteGeneration() *ffmpeg.IntelGenerationConfig {
 		return nil
 	}
 	return &ffmpeg.IntelGenerationConfig{Backend: s.sprite, Device: s.device, ProbeTimeout: 10 * time.Second}
+}
+
+func (i *Config) GetPreviewGenerationBackend() string { return i.generation().preview }
+func (i *Config) GetIntelPreviewGeneration() *ffmpeg.IntelGenerationConfig {
+	s := i.generation()
+	if s.preview == "software" {
+		return nil
+	}
+	return &ffmpeg.IntelGenerationConfig{Backend: s.preview, Device: s.device, ProbeTimeout: 10 * time.Second}
 }

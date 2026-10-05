@@ -3,11 +3,13 @@ package generate
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/ffmpeg/transcoder"
@@ -80,8 +82,10 @@ func (g PreviewOptions) getStepSizeAndOffset(videoDuration float64) (stepSize fl
 }
 
 func (g Generator) PreviewVideo(ctx context.Context, input string, videoDuration float64, hash string, options PreviewOptions, vrMode string, fallback bool, useVsync2 bool) error {
-	lockCtx := g.LockManager.ReadLock(ctx, input)
+	done := make(chan struct{})
+	lockCtx := g.LockManager.ReadLockWithCompletion(ctx, input, done)
 	defer lockCtx.Cancel()
+	defer close(done)
 
 	output := g.ScenePaths.GetVideoPreviewPath(hash)
 	if !g.Overwrite {
@@ -92,7 +96,10 @@ func (g Generator) PreviewVideo(ctx context.Context, input string, videoDuration
 
 	logger.Infof("[generator] generating video preview for %s", input)
 
-	if err := g.generateFile(lockCtx, g.ScenePaths, mp4Pattern, output, g.previewVideo(input, videoDuration, options, vrMode, fallback, useVsync2)); err != nil {
+	if g.IntelPreviews != nil && g.IntelPreviews.Enabled() {
+		g = g.WithIntelGenerationBudget()
+	}
+	if err := g.generateFile(lockCtx, g.ScenePaths, mp4Pattern, output, g.scenePreviewVideo(input, videoDuration, options, vrMode, fallback, useVsync2)); err != nil {
 		return err
 	}
 
@@ -102,6 +109,11 @@ func (g Generator) PreviewVideo(ctx context.Context, input string, videoDuration
 }
 
 func (g *Generator) previewVideo(input string, videoDuration float64, options PreviewOptions, vrMode string, fallback bool, useVsync2 bool) generateFn {
+	if options.Segments < 1 {
+		return func(*fsutil.LockContext, string) error {
+			return fmt.Errorf("scene preview requires at least one segment")
+		}
+	}
 	// #2496 - generate a single preview video for videos shorter than segments * segment duration
 	if videoDuration < options.SegmentDuration*float64(options.Segments) {
 		return g.previewVideoSingle(input, videoDuration, options, vrMode, fallback, useVsync2)
@@ -124,27 +136,27 @@ func (g *Generator) previewVideo(input string, videoDuration float64, options Pr
 			logger.Warnf("[generator] Segment duration (%f) too short. Using %f instead.", options.SegmentDuration, minSegmentDuration)
 		}
 
-		for i := 0; i < options.Segments; i++ {
+		chunks := make([]previewChunkOptions, options.Segments)
+		for i := range chunks {
 			chunkFile, err := g.tempFile(g.ScenePaths, mp4Pattern)
 			if err != nil {
 				return fmt.Errorf("generating video preview chunk file: %w", err)
 			}
-
 			tmpFiles = append(tmpFiles, chunkFile.Name())
-
-			time := offset + (float64(i) * stepSize)
-
-			chunkOptions := previewChunkOptions{
-				StartTime:  time,
-				Duration:   segmentDuration,
-				OutputPath: chunkFile.Name(),
-				Audio:      options.Audio,
-				Preset:     options.Preset,
+			chunks[i] = previewChunkOptions{StartTime: offset + float64(i)*stepSize, Duration: segmentDuration,
+				OutputPath: chunkFile.Name(), Audio: options.Audio, Preset: options.Preset}
+		}
+		workers := 1 // Legacy software defaults remain sequential.
+		if budget := g.generationBudget(); budget != nil {
+			workers = budget.Settings().MaxProcesses
+			if g.previewIntelPlan != nil {
+				workers = budget.Settings().MaxGPUProcesses
 			}
-
-			if err := g.previewVideoChunk(lockCtx, input, chunkOptions, vrMode, fallback, useVsync2); err != nil {
-				return err
-			}
+		}
+		if err := runPreviewChunks(lockCtx, len(chunks), workers, func(ctx context.Context, i int) error {
+			return g.previewVideoChunk(lockCtx, ctx, input, chunks[i], vrMode, fallback, useVsync2)
+		}); err != nil {
+			return err
 		}
 
 		// generate concat file based on generated video chunks
@@ -176,7 +188,7 @@ func (g *Generator) previewVideoSingle(input string, videoDuration float64, opti
 			Preset:     options.Preset,
 		}
 
-		return g.previewVideoChunk(lockCtx, input, chunkOptions, vrMode, fallback, useVsync2)
+		return g.previewVideoChunk(lockCtx, lockCtx, input, chunkOptions, vrMode, fallback, useVsync2)
 	}
 }
 
@@ -188,7 +200,7 @@ type previewChunkOptions struct {
 	Preset     string
 }
 
-func (g Generator) previewVideoChunk(lockCtx *fsutil.LockContext, fn string, options previewChunkOptions, vrMode string, fallback bool, useVsync2 bool) error {
+func (g Generator) previewVideoChunk(lockCtx *fsutil.LockContext, ctx context.Context, fn string, options previewChunkOptions, vrMode string, fallback bool, useVsync2 bool) error {
 	var videoFilter ffmpeg.VideoFilter
 	if vrMode == "LR180" {
 		videoFilter = videoFilter.Append("v360=input=hequirect:output=flat:in_stereo=sbs:out_stereo=2d:d_fov=120:w=1280:h=720")
@@ -229,10 +241,9 @@ func (g Generator) previewVideoChunk(lockCtx *fsutil.LockContext, fn string, opt
 		VideoCodec: ffmpeg.VideoCodecLibX264,
 		VideoArgs:  videoArgs,
 
-		// Preview generation always uses CPU (libx264). Do not pass the global
-		// transcode hardware-acceleration input/output args here, as those may
-		// include -hwaccel flags that saturate the GPU when many previews are
-		// generated concurrently alongside auto-identify.
+		// The canonical software branch excludes playback hardware arguments.
+		// Scene VAAPI generation is selected independently and shares the
+		// configured generation process budget.
 	}
 
 	if options.Audio {
@@ -243,9 +254,12 @@ func (g Generator) previewVideoChunk(lockCtx *fsutil.LockContext, fn string, opt
 		trimOptions.AudioArgs = audioArgs
 	}
 
+	if g.previewIntelPlan != nil {
+		return g.generateWithContext(ctx, lockCtx, previewIntelArgs(fn, options, *g.previewIntelPlan, useVsync2))
+	}
 	args := transcoder.Transcode(fn, trimOptions)
 
-	return g.generate(lockCtx, args)
+	return g.generateWithContext(ctx, lockCtx, args)
 }
 
 func (g Generator) generateConcatFile(chunkFiles []string) (fn string, err error) {
@@ -298,6 +312,7 @@ func (g Generator) PreviewWebp(ctx context.Context, input string, hash string) e
 	}
 
 	logger.Infof("[generator] generating webp preview for %s", input)
+	g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: "software", Actual: "software", Stage: "webp", Reason: "lossless WebP encoding is CPU work"})
 
 	src := g.ScenePaths.GetVideoPreviewPath(hash)
 
@@ -344,4 +359,57 @@ func (g Generator) previewVideoToImage(input string) generateFn {
 
 		return g.generate(lockCtx, args)
 	}
+}
+
+// Queue coordinators hold no permits. Each subprocess takes the existing shared
+// budget; cancellation stops admission and drains every worker before cleanup.
+func runPreviewChunks(ctx context.Context, count, workers int, run func(context.Context, int) error) error {
+	if count < 1 {
+		return fmt.Errorf("scene preview requires at least one segment")
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > count {
+		workers = count
+	}
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []error
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if workCtx.Err() != nil {
+					continue
+				}
+				if err := run(workCtx, i); err != nil {
+					mu.Lock()
+					if len(errs) == 0 {
+						errs = append(errs, fmt.Errorf("preview segment %d: %w", i, err))
+					}
+					mu.Unlock()
+					cancel()
+				}
+			}
+		}()
+	}
+send:
+	for i := 0; i < count; i++ {
+		select {
+		case jobs <- i:
+		case <-workCtx.Done():
+			break send
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return errors.Join(errs...)
 }

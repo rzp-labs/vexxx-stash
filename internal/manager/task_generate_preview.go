@@ -42,7 +42,7 @@ func (t *GeneratePreviewTask) Start(ctx context.Context) error {
 			t.Options.LimitEnd = t.Scene.EndPoint
 		}
 
-		videoFile, err := instance.generationVideoFile(ctx, t.Scene.Path)
+		videoFile, err := instance.generationPreviewVideoFile(ctx, t.Scene.Path)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -51,7 +51,7 @@ func (t *GeneratePreviewTask) Start(ctx context.Context) error {
 				return err
 			}
 			logger.Errorf("error reading video file: %v", err)
-			return nil
+			return fmt.Errorf("reading scene preview source: %w", err)
 		}
 
 		duration := videoFile.VideoStreamDuration
@@ -62,7 +62,7 @@ func (t *GeneratePreviewTask) Start(ctx context.Context) error {
 		if err := t.generateVideo(ctx, videoChecksum, duration, videoFile.FrameRate); err != nil {
 			logger.Errorf("error generating preview: %v", err)
 			logErrorOutput(err)
-			return nil
+			return fmt.Errorf("generating scene preview: %w", err)
 		}
 		previewValid = true
 	} else if t.videoPreviewExists != nil && *t.videoPreviewExists {
@@ -86,6 +86,7 @@ func (t *GeneratePreviewTask) Start(ctx context.Context) error {
 		if err := t.generateWebp(ctx, videoChecksum); err != nil {
 			logger.Errorf("error generating preview webp: %v", err)
 			logErrorOutput(err)
+			return fmt.Errorf("generating scene preview WebP: %w", err)
 		}
 	}
 	return nil
@@ -122,6 +123,13 @@ func (t *GeneratePreviewTask) generateVideo(ctx context.Context, videoChecksum s
 	}
 
 	if err := t.generator.PreviewVideo(ctx, videoFilename, videoDuration, videoChecksum, t.Options, vrModeStr, false, useVsync2); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// The Intel coordinator already performed its one canonical slow-seek retry.
+		if t.generator.IntelPreviews != nil && t.generator.IntelPreviews.Enabled() {
+			return err
+		}
 		logger.Warnf("[generator] failed generating scene preview, trying fallback")
 		if err := t.generator.PreviewVideo(ctx, videoFilename, videoDuration, videoChecksum, t.Options, vrModeStr, true, useVsync2); err != nil {
 			return err

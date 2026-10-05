@@ -14,6 +14,7 @@ import (
 // GenerationConfiguration describes persisted requests, not device capability or
 // the actual backend used by an individual job. Zero limits mean conservative auto.
 type GenerationConfiguration struct {
+	PreviewBackend  string
 	MarkerBackend   string
 	SpriteBackend   string
 	Device          string
@@ -24,6 +25,7 @@ type GenerationConfiguration struct {
 }
 
 type GenerationConfigurationPatch struct {
+	PreviewBackend  *string
 	MarkerBackend   *string
 	SpriteBackend   *string
 	Device          *string
@@ -35,6 +37,9 @@ type GenerationConfigurationPatch struct {
 
 func (p GenerationConfigurationPatch) values() map[string]interface{} {
 	values := map[string]interface{}{}
+	if p.PreviewBackend != nil {
+		values[PreviewGenerationBackend] = *p.PreviewBackend
+	}
 	if p.MarkerBackend != nil {
 		values[MarkerGenerationBackend] = *p.MarkerBackend
 	}
@@ -62,7 +67,7 @@ func (p GenerationConfigurationPatch) values() map[string]interface{} {
 // readRequestedGeneration assumes the config lock is held. Validate a merged
 // proposal without touching either the saved request or running scheduler.
 func (i *Config) readRequestedGeneration(proposal map[string]interface{}) (GenerationConfiguration, error) {
-	s := GenerationConfiguration{MarkerBackend: "software", SpriteBackend: "software", Device: "/dev/dri/renderD128"}
+	s := GenerationConfiguration{PreviewBackend: "software", MarkerBackend: "software", SpriteBackend: "software", Device: "/dev/dri/renderD128"}
 	// Report invalid configuration without hiding independently readable later
 	// fields from the correction form. Activation and proposals still fail closed.
 	var firstErr error
@@ -82,7 +87,7 @@ func (i *Config) readRequestedGeneration(proposal map[string]interface{}) (Gener
 		key  string
 		dest *string
 	}{
-		{MarkerGenerationBackend, &s.MarkerBackend}, {SpriteGenerationBackend, &s.SpriteBackend}, {GenerationDevice, &s.Device},
+		{PreviewGenerationBackend, &s.PreviewBackend}, {MarkerGenerationBackend, &s.MarkerBackend}, {SpriteGenerationBackend, &s.SpriteBackend}, {GenerationDevice, &s.Device},
 	} {
 		if v, ok := get(field.key); ok {
 			value := fmt.Sprint(v)
@@ -100,6 +105,9 @@ func (i *Config) readRequestedGeneration(proposal map[string]interface{}) (Gener
 		default:
 			recordError(fmt.Errorf("generation backend must be software, qsv or vaapi"))
 		}
+	}
+	if s.PreviewBackend != "software" && s.PreviewBackend != "vaapi" {
+		recordError(fmt.Errorf("scene preview backend must be software or vaapi"))
 	}
 	if !regexp.MustCompile(`^/dev/dri/renderD[0-9]+$`).MatchString(s.Device) {
 		recordError(fmt.Errorf("%s must select an absolute /dev/dri/renderD device", GenerationDevice))
@@ -159,7 +167,7 @@ func (i *Config) GetRequestedGenerationConfiguration() (GenerationConfiguration,
 func (i *Config) GetActiveGenerationConfiguration() GenerationConfiguration {
 	s := i.generation()
 	active := s.requested
-	active.MarkerBackend, active.SpriteBackend, active.Device = s.marker, s.sprite, s.device
+	active.MarkerBackend, active.SpriteBackend, active.PreviewBackend, active.Device = s.marker, s.sprite, s.preview, s.device
 	active.BudgetEnabled = s.requested.BudgetEnabled || s.fallback
 	if s.budget != nil {
 		limits := s.budget.Settings()

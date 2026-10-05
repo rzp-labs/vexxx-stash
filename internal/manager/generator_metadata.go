@@ -68,3 +68,19 @@ func (s *Manager) generationReadFrameCount(ctx context.Context, path string) (in
 	})
 	return result, err
 }
+
+func (s *Manager) generationPreviewVideoFile(ctx context.Context, path string) (*ffmpeg.VideoFile, error) {
+	if s.Config == nil || s.Config.GetIntelPreviewGeneration() == nil {
+		return s.generationVideoFile(ctx, path)
+	}
+	budget := s.Config.GetIntelGenerationBudget()
+	release, err := budget.Acquire(ctx, generationbudget.CPU)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if s.FFProbe == nil {
+		return nil, fmt.Errorf("ffprobe unavailable for scene preview metadata")
+	}
+	return s.FFProbe.NewVideoFileContext(ctx, path, budget.Settings().Threads)
+}

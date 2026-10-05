@@ -334,7 +334,7 @@ func TestGenerationAtomicPersistencePreservesFileModeAndSymlink(t *testing.T) {
 }
 
 func TestGenerationInvalidSavedFieldPreservesReadableValues(t *testing.T) {
-	valid := GenerationConfiguration{MarkerBackend: "qsv", SpriteBackend: "vaapi", Device: "/dev/dri/renderD129", BudgetEnabled: true, MaxProcesses: 4, MaxGPUProcesses: 2, Threads: 3}
+	valid := GenerationConfiguration{PreviewBackend: "software", MarkerBackend: "qsv", SpriteBackend: "vaapi", Device: "/dev/dri/renderD129", BudgetEnabled: true, MaxProcesses: 4, MaxGPUProcesses: 2, Threads: 3}
 	for _, key := range []string{MarkerGenerationBackend, GenerationDevice, GenerationBudgetEnabled, GenerationMaxProcesses, GenerationMaxGPUProcesses, GenerationThreads} {
 		t.Run(key, func(t *testing.T) {
 			c := InitializeEmpty()
