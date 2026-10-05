@@ -21,9 +21,12 @@ def evidence():
                head_repository={'full_name': REPO}, status='completed', conclusion='success')
     jobs = [dict(name=name, head_sha=SHA, run_id=123, run_attempt=2,
                  status='completed', conclusion='success', steps=[])
-            for name in ('plan', 'test', 'ci-required')]
-    jobs[1]['steps'] = [dict(name=name, status='completed', conclusion='success')
+            for name in ('ci-required',)]
+    jobs[0]['steps'] = [dict(name=name, status='completed', conclusion='success')
                         for names in reuse.DOMAINS.values() for name in names]
+    jobs[0]['steps'] += [dict(name=name, status='completed', conclusion='success') for name in (
+        'Publication policy and packaging tests', 'Classify changed inputs and deliberate publication',
+        'Verify exact-master validation evidence', 'Verify every selected obligation')]
     return run, jobs
 
 
@@ -74,7 +77,7 @@ class ReuseTests(unittest.TestCase):
 
     def test_missing_failed_skipped_or_stale_required_jobs_rejects_all_domains(self):
         run, jobs = evidence()
-        for index in range(3):
+        for index in range(len(jobs)):
             self.assertEqual(reuse.coverage(run, jobs[:index] + jobs[index + 1:], REPO, SHA, 45), set())
             self.assertEqual(reuse.coverage(run, jobs + [jobs[index]], REPO, SHA, 45), set())
             for field, value in [('conclusion', 'skipped'), ('conclusion', 'failure'),
@@ -84,19 +87,28 @@ class ReuseTests(unittest.TestCase):
                 changed[index][field] = value
                 self.assertEqual(reuse.coverage(run, changed, REPO, SHA, 45), set())
 
+    def test_classifier_and_final_gate_must_have_executed_successfully(self):
+        run, jobs = evidence()
+        for name in ('Publication policy and packaging tests', 'Classify changed inputs and deliberate publication',
+                     'Verify exact-master validation evidence', 'Verify every selected obligation'):
+            for outcome in ('skipped', 'failure', 'cancelled'):
+                changed = copy.deepcopy(jobs)
+                next(step for step in changed[0]['steps'] if step['name'] == name)['conclusion'] = outcome
+                self.assertEqual(reuse.coverage(run, changed, REPO, SHA, 45), set())
+
     def test_domain_coverage_is_proven_by_executed_steps_not_green_job(self):
         run, jobs = evidence()
         for domain, names in reuse.DOMAINS.items():
             for name in names:
                 for outcome in ('skipped', 'failure', 'cancelled', None):
                     changed = copy.deepcopy(jobs)
-                    next(step for step in changed[1]['steps'] if step['name'] == name)['conclusion'] = outcome
+                    next(step for step in changed[0]['steps'] if step['name'] == name)['conclusion'] = outcome
                     self.assertEqual(reuse.coverage(run, changed, REPO, SHA, 45), set(reuse.DOMAINS) - {domain})
                 changed = copy.deepcopy(jobs)
-                changed[1]['steps'] = [step for step in changed[1]['steps'] if step['name'] != name]
+                changed[0]['steps'] = [step for step in changed[0]['steps'] if step['name'] != name]
                 self.assertEqual(reuse.coverage(run, changed, REPO, SHA, 45), set(reuse.DOMAINS) - {domain})
                 changed = copy.deepcopy(jobs)
-                changed[1]['steps'].append(next(step for step in changed[1]['steps'] if step['name'] == name))
+                changed[0]['steps'].append(next(step for step in changed[0]['steps'] if step['name'] == name))
                 self.assertEqual(reuse.coverage(run, changed, REPO, SHA, 45), set(reuse.DOMAINS) - {domain})
 
     def test_workflow_revision_and_checked_out_bytes_must_match(self):
@@ -106,7 +118,7 @@ class ReuseTests(unittest.TestCase):
 
     def test_partial_coverage_runs_only_unproven_domains(self):
         run, jobs = evidence()
-        jobs[1]['steps'][-1]['conclusion'] = 'skipped'
+        next(step for step in jobs[0]['steps'] if step['name'] == 'Python regression tests')['conclusion'] = 'skipped'
         source, covered = self.find(self.api(run, jobs))
         self.assertEqual(covered, {'backend', 'frontend'})
         self.assertEqual(source['id'], 123)
@@ -172,7 +184,7 @@ class RequiredContextTests(unittest.TestCase):
         workflow = Path(__file__).resolve().parent.parent / reuse.WORKFLOW
         cls.jobs = json.loads(subprocess.check_output([
             'ruby', '-ryaml', '-rjson', '-e', 'puts JSON.generate(YAML.load_file(ARGV[0]))', str(workflow)]))['jobs']
-        cls.aggregate = cls.jobs['ci-required']['steps'][0]['run']
+        cls.aggregate = next(step['run'] for step in cls.jobs['ci-required']['steps'] if step.get('name') == 'Verify every selected obligation')
 
     def gate(self, success, **overrides):
         with tempfile.TemporaryDirectory() as directory:
@@ -184,6 +196,12 @@ class RequiredContextTests(unittest.TestCase):
                    **{prefix + domain.upper(): 'false' for prefix in ('', 'REQUIRED_', 'REUSED_')
                       for domain in reuse.DOMAINS},
                    'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary'), **overrides}
+            for domain in ('BACKEND', 'FRONTEND', 'PYTHON'):
+                selected = env[domain] == 'true'
+                env.setdefault(domain + '_RESULT', env.get('TEST_RESULT', 'success') if selected else 'skipped')
+                if domain != 'PYTHON':
+                    env.setdefault(domain + '_GENERATE_RESULT', 'success' if selected else 'skipped')
+                    env.setdefault(domain + '_COMPILE_RESULT', 'success' if selected and env['BUILD_IMAGE'] == 'false' and env[domain + '_RESULT'] == 'success' else 'skipped')
             result = subprocess.run(['bash'], input=self.aggregate, text=True, env=env, capture_output=True)
             self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
 
@@ -210,7 +228,7 @@ class RequiredContextTests(unittest.TestCase):
         # Old-sha, incomplete coverage, foreign events and missing proof fail.
         for override in ({'REUSE_REVISION': 'b' * 40}, {'REUSE_RUN': ''}, {'REUSE_ATTEMPT': ''},
                          {'REUSE_WORKFLOW_DIGEST': ''}, {'REUSE_ALLOWED': 'false'},
-                         {'REUSED_PYTHON': 'false'}, {'TEST_RESULT': 'success'}, {'PLAN_RESULT': 'cancelled'}):
+                         {'REUSED_PYTHON': 'false'}, {'BACKEND_RESULT': 'success'}, {'PLAN_RESULT': 'cancelled'}):
             self.gate(False, **{**reused, **override})
         partial = {**reused, 'REUSED_PYTHON': 'false', 'PYTHON': 'true', 'RUN_TESTS': 'true'}
         self.gate(True, **{**partial, 'TEST_RESULT': 'success'})
@@ -224,7 +242,7 @@ class RequiredContextTests(unittest.TestCase):
         self.gate(True, **{**proof, 'IMAGE_RESULT': 'success'})
         for result in ('skipped', 'cancelled', 'failure'):
             self.gate(False, **{**proof, 'IMAGE_RESULT': result})
-        steps = self.jobs['image']['steps']
+        steps = self.jobs['ci-required']['steps']
         smoke = next(step['run'] for step in steps if step.get('name') == 'Smoke test container')
         save = next(step['run'] for step in steps if step.get('name') == 'Save the exact smoke-tested image')
         load = next(step['run'] for step in self.jobs['publish']['steps'] if step.get('name') == 'Load and verify tested source identity')
@@ -233,6 +251,18 @@ class RequiredContextTests(unittest.TestCase):
         self.assertIn('sha256sum --check image.tar.sha256', load)
         self.assertIn('"$(cat image.id)"', load)
         self.assertNotIn('build-push-action', str(self.jobs['publish']))
+
+    def test_selected_generation_and_nonimage_compilation_cannot_be_skipped(self):
+        for domain in ('BACKEND', 'FRONTEND'):
+            selected = {'REQUIRED_TESTS': 'true', 'RUN_TESTS': 'true', 'TEST_RESULT': 'success',
+                        domain: 'true', 'REQUIRED_' + domain: 'true'}
+            self.gate(True, **selected)
+            for step in ('_GENERATE_RESULT', '_COMPILE_RESULT', '_RESULT'):
+                for outcome in ('failure', 'cancelled', 'skipped'):
+                    self.gate(False, **{**selected, domain + step: outcome})
+            image = {**selected, 'BUILD_IMAGE': 'true', 'IMAGE_RESULT': 'success'}
+            self.gate(True, **image)  # Docker supplies compile coverage.
+            self.gate(False, **{**image, domain + '_COMPILE_RESULT': 'success'})
 
 
 if __name__ == '__main__':

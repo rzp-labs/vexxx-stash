@@ -37,18 +37,20 @@ def trusted_run(run, repository, sha, workflow_id):
 def coverage(run, jobs, repository, sha, workflow_id):
     if not trusted_run(run, repository, sha, workflow_id):
         return set()
-    selected = {}
-    for name in ('plan', 'test', 'ci-required'):
-        matches = [job for job in jobs if job.get('name') == name]
-        if len(matches) != 1:
+    matches = [job for job in jobs if job.get('name') == 'ci-required']
+    if len(matches) != 1:
+        return set()
+    job = matches[0]
+    if not (job.get('head_sha') == sha and job.get('run_id') == run['id']
+            and job.get('run_attempt') == run['run_attempt']
+            and job.get('status') == 'completed' and job.get('conclusion') == 'success'):
+        return set()
+    steps = job.get('steps', [])
+    for name in ('Publication policy and packaging tests', 'Classify changed inputs and deliberate publication',
+                 'Verify exact-master validation evidence', 'Verify every selected obligation'):
+        matches = [step for step in steps if step.get('name') == name]
+        if len(matches) != 1 or matches[0].get('status') != 'completed' or matches[0].get('conclusion') != 'success':
             return set()
-        job = matches[0]
-        if not (job.get('head_sha') == sha and job.get('run_id') == run['id']
-                and job.get('run_attempt') == run['run_attempt']
-                and job.get('status') == 'completed' and job.get('conclusion') == 'success'):
-            return set()
-        selected[name] = job
-    steps = selected['test'].get('steps', [])
     return {domain for domain, names in DOMAINS.items() if all(
         len(matches := [step for step in steps if step.get('name') == name]) == 1
         and matches[0].get('status') == 'completed' and matches[0].get('conclusion') == 'success'

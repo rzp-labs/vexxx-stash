@@ -223,45 +223,44 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertFalse(document["on"]["workflow_dispatch"]["inputs"]["publish_test_image"]["default"])
         self.assertFalse(document['on']['workflow_dispatch']['inputs']['publish_latest']['default'])
         jobs = document["jobs"]
-        self.assertEqual(jobs["plan"]["permissions"], {"contents": "read", "actions": "read"})
-        for name in ("plan", "test", "image"):
-            if name != "plan":
-                self.assertNotIn("permissions", jobs[name])
-            self.assertFalse(any("login-action" in step.get("uses", "") for step in jobs[name]["steps"]))
-        checks = jobs["plan"]["steps"][1]["run"]
-        self.assertIn("test_image_publication_policy.py", checks)
-        self.assertIn("test_check_intel_runtime.py", checks)
-        build = next(step for step in jobs["image"]["steps"] if "build-push-action" in step.get("uses", ""))
+        validator = jobs['ci-required']
+        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read'})
+        self.assertNotIn('needs', validator)  # Required check starts immediately.
+        self.assertNotIn('if', validator)  # It must never be skipped for a draft.
+        self.assertFalse(any('login-action' in step.get('uses', '') for step in validator['steps']))
+        self.assertEqual(sum('checkout' in step.get('uses', '') for step in validator['steps']), 1)
+        checks = next(step['run'] for step in validator['steps'] if step.get('id') == 'policy_tests')
+        self.assertIn('test_image_publication_policy.py', checks)
+        self.assertIn('test_check_intel_runtime.py', checks)
+        build = next(step for step in validator['steps'] if 'build-push-action' in step.get('uses', ''))
         self.assertFalse(build["with"]["push"])
         self.assertTrue(build["with"]["load"])
         self.assertEqual(build["with"]["secrets"].strip(),
-                         "POSTHOG_CLI_API_KEY=${{ needs.plan.outputs.publish == 'true' && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && (inputs.publish_test_image || inputs.publish_latest))) && secrets.POSTHOG_CLI_API_KEY || '' }}")
-        self.assertIn("POSTHOG_UPLOAD_REQUIRED=${{ needs.plan.outputs.publish }}", build["with"]["build-args"])
+                         "POSTHOG_CLI_API_KEY=${{ steps.plan.outputs.publish == 'true' && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && (inputs.publish_test_image || inputs.publish_latest))) && secrets.POSTHOG_CLI_API_KEY || '' }}")
+        self.assertIn("POSTHOG_UPLOAD_REQUIRED=${{ steps.plan.outputs.publish }}", build["with"]["build-args"])
 
         publisher = jobs["publish"]
         self.assertEqual(publisher["permissions"], {"actions": "read", "packages": "write"})
-        self.assertEqual(publisher["needs"], ["plan", "image", "ci-required"])
+        self.assertEqual(publisher["needs"], 'ci-required')
         self.assertIn("github.ref_type == 'tag'", publisher["if"])
         self.assertIn("inputs.publish_test_image", publisher["if"])
         self.assertIn("inputs.publish_latest", publisher["if"])
         self.assertIn("github.ref == 'refs/heads/master'", publisher["if"])
         self.assertIn('docker tag "$LOCAL_IMAGE" "$LATEST_REF"', publisher['steps'][-1]['run'])
         self.assertFalse(any("checkout" in step.get("uses", "") for step in publisher["steps"]))
-        self.assertEqual(jobs['ci-required']['if'], 'always()')
-        self.assertEqual(jobs['ci-required']['needs'], ['plan', 'test', 'image'])
         self.assertEqual(document['concurrency']['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}")
         self.assertIn('ready_for_review', document['on']['pull_request']['types'])
         self.assertIn('converted_to_draft', document['on']['pull_request']['types'])
         self.assertEqual(document['env']['POSTHOG_UPLOAD_REQUIRED'], 'false')
         self.assertIn("'validation-deferred' || 'ci-required'", jobs['ci-required']['name'])
         self.assertIn('github.event.pull_request.draft', jobs['ci-required']['name'])
-        self.assertEqual(jobs['test']['if'], "needs.plan.outputs.execute_tests == 'true'")
-        self.assertIn('needs.plan.outputs.execute_tests', jobs['image']['if'])
-        compiles = [step for step in jobs['test']['steps'] if step.get('name', '').startswith('Production ')]
+        compiles = [step for step in validator['steps'] if step.get('name', '').startswith('Production ')]
         self.assertEqual(len(compiles), 2)
         for step in compiles:
-            self.assertIn("needs.plan.outputs.build_image != 'true'", step['if'])
-        aggregate = jobs['ci-required']['steps'][0]['run']
+            self.assertIn("steps.plan.outputs.build_image != 'true'", step['if'])
+        aggregate_step = next(step for step in validator['steps'] if step.get('name') == 'Verify every selected obligation')
+        self.assertEqual(aggregate_step['if'], 'always()')
+        aggregate = aggregate_step['run']
         for selected in ('true', 'false'):
             for test_result in ('success', 'failure', 'cancelled', 'skipped'):
                 for image_selected in ('true', 'false'):
@@ -275,6 +274,11 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                                    'BUILD_IMAGE': image_selected, 'IMAGE_RESULT': image_result,
                                    'BACKEND': selected, 'FRONTEND': 'false', 'PYTHON': 'false',
                                    'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary')}
+                            env.update(BACKEND_RESULT=test_result,
+                                       BACKEND_GENERATE_RESULT='success' if selected == 'true' else 'skipped',
+                                       BACKEND_COMPILE_RESULT='success' if selected == 'true' and image_selected == 'false' and test_result == 'success' else 'skipped',
+                                       FRONTEND_RESULT='skipped', FRONTEND_GENERATE_RESULT='skipped',
+                                       FRONTEND_COMPILE_RESULT='skipped', PYTHON_RESULT='skipped')
                             result = subprocess.run(['bash'], input=aggregate, text=True, env=env, capture_output=True)
                             expected = test_result == ('success' if selected == 'true' else 'skipped') and image_result == (
                                 'success' if image_selected == 'true' else 'skipped')
@@ -289,6 +293,9 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                        'REUSED_BACKEND': 'false', 'REUSED_FRONTEND': 'false', 'REUSED_PYTHON': 'false',
                        'IMAGE_RESULT': 'skipped', 'BACKEND': 'false', 'FRONTEND': 'false', 'PYTHON': 'false',
                        'GITHUB_STEP_SUMMARY': str(Path(directory) / 'summary'), **override}
+                env.update(BACKEND_RESULT='skipped', BACKEND_GENERATE_RESULT='skipped', BACKEND_COMPILE_RESULT='skipped',
+                           FRONTEND_RESULT='skipped', FRONTEND_GENERATE_RESULT='skipped', FRONTEND_COMPILE_RESULT='skipped',
+                           PYTHON_RESULT='skipped')
                 result = subprocess.run(['bash'], input=aggregate, text=True, env=env, capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
         for job in jobs.values():
