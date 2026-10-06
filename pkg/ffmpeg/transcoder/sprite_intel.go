@@ -21,36 +21,70 @@ func intelJPEGOutputArgs(output string) ffmpeg.Args {
 	return ffmpeg.Args{"-c:v", "mjpeg_vaapi", "-global_quality", "95", "-color_range", "tv", "-f", "image2", "-update", "1", output}
 }
 
-// IntelSpriteSheet preserves hardware surfaces through metadata-only selection,
-// trim, split and PTS normalization. One source decoder processes independently
-// sought concat segments; xstack_vaapi performs all pixel composition.
+// IntelSpriteSheet renders one concat input. IntelSpriteSheetInputs allows the
+// caller to distribute the segments across independently admitted decoders.
 func IntelSpriteSheet(seekList string, plan ffmpeg.IntelGenerationPlan, count, columns, rows int, output string) (ffmpeg.Args, error) {
-	if count <= 0 || columns <= 0 || rows <= 0 || count > columns*rows {
+	return IntelSpriteSheetInputs([]string{seekList}, plan, []int{count}, columns, rows, output)
+}
+
+// IntelSpriteSheetInputs preserves hardware surfaces through metadata-only
+// selection, trim, split and PTS normalization. Each input contains consecutive
+// tiles in canonical order; xstack_vaapi performs all pixel composition.
+func IntelSpriteSheetInputs(seekLists []string, plan ffmpeg.IntelGenerationPlan, counts []int, columns, rows int, output string) (ffmpeg.Args, error) {
+	if len(seekLists) == 0 || len(seekLists) != len(counts) || columns <= 0 || rows <= 0 {
 		return nil, fmt.Errorf("invalid GPU sprite grid")
 	}
+	count := 0
+	for i, inputCount := range counts {
+		if seekLists[i] == "" || inputCount <= 0 || inputCount > int(^uint(0)>>1)-count {
+			return nil, fmt.Errorf("invalid GPU sprite input %d", i)
+		}
+		count += inputCount
+	}
+	if (count-1)/columns >= rows {
+		return nil, fmt.Errorf("invalid GPU sprite grid")
+	}
+	globalArgs, inputArgs, err := intelSpriteInputArgs(plan.InputArgs)
+	if err != nil {
+		return nil, err
+	}
 	args := ffmpeg.Args{"-v", "error", "-y", "-nostdin", "-abort_on", "empty_output", "-copyts"}
-	args = append(args, plan.InputArgs...)
-	args = append(args, "-f", "concat", "-safe", "0", "-protocol_whitelist", "file,crypto", "-segment_time_metadata", "1", "-i", seekList)
+	args = append(args, globalArgs...)
+	for _, seekList := range seekLists {
+		args = append(args, inputArgs...)
+		args = append(args, "-f", "concat", "-safe", "0", "-protocol_whitelist", "file,crypto", "-segment_time_metadata", "1", "-i", seekList)
+	}
 	// Pick the first frame in each one-second segment, using source timestamps.
 	// concatdec_select excludes packet preroll, while trim:end excludes the next
 	// segment if a requested frame is absent instead of substituting another tile.
-	graph := fmt.Sprintf("[0:%d]select='concatdec_select*if(isnan(prev_pts),1,lt(prev_pts*TB,floor(t)))',%s", plan.Source.StreamIndex, plan.Filter)
-	if count > 1 {
-		graph += fmt.Sprintf(",split=%d", count)
-		for i := 0; i < count; i++ {
-			graph += fmt.Sprintf("[s%d]", i)
+	graph := ""
+	offset := 0
+	for input, inputCount := range counts {
+		if input > 0 {
+			graph += ";"
 		}
-	} else {
-		graph += "[s0]"
+		graph += fmt.Sprintf("[%d:%d]select='concatdec_select*if(isnan(prev_pts),1,lt(prev_pts*TB,floor(t)))',%s", input, plan.Source.StreamIndex, plan.Filter)
+		if inputCount > 1 {
+			graph += fmt.Sprintf(",split=%d", inputCount)
+		}
+		for i := 0; i < inputCount; i++ {
+			graph += fmt.Sprintf("[s%d]", offset+i)
+		}
+		offset += inputCount
 	}
-	partial := count < columns*rows
-	for i := 0; i < count; i++ {
-		graph += fmt.Sprintf(";[s%d]trim=start=%d:end=%d,trim=end_frame=1,setpts=PTS-STARTPTS", i, i, i+1)
-		if partial && i == 0 {
-			graph += ",split=2[t0][blacksource]"
-		} else {
-			graph += fmt.Sprintf("[t%d]", i)
+	partial := count/columns < rows || count%columns != 0
+	offset = 0
+	for _, inputCount := range counts {
+		for local := 0; local < inputCount; local++ {
+			i := offset + local
+			graph += fmt.Sprintf(";[s%d]trim=start=%d:end=%d,trim=end_frame=1,setpts=PTS-STARTPTS", i, local, local+1)
+			if partial && i == 0 {
+				graph += ",split=2[t0][blacksource]"
+			} else {
+				graph += fmt.Sprintf("[t%d]", i)
+			}
 		}
+		offset += inputCount
 	}
 	if partial {
 		// Derive a limited-range black hardware tile without uploading pixels.
@@ -117,6 +151,24 @@ func IntelSpriteSheet(seekList string, plan ffmpeg.IntelGenerationPlan, count, c
 	graph += "," + ffmpeg.IntelJPEGRangeFilter() + "[sheet]"
 	args = append(args, "-filter_complex", graph, "-map", "[sheet]", "-an", "-frames:v", "1")
 	return append(args, intelJPEGOutputArgs(output)...), nil
+}
+
+// Device definitions and the filter device are global CLI options. Decoder,
+// strict-mode, rotation and demux options must be repeated before every input.
+func intelSpriteInputArgs(args ffmpeg.Args) (global, input ffmpeg.Args, err error) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-init_hw_device", "-filter_hw_device":
+			if i+1 == len(args) {
+				return nil, nil, fmt.Errorf("missing GPU sprite device option value")
+			}
+			global = append(global, args[i], args[i+1])
+			i++
+		default:
+			input = append(input, args[i])
+		}
+	}
+	return global, input, nil
 }
 
 // IntelSpriteSheetFrames selects canonical frame numbers for short clips using

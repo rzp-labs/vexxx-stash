@@ -14,6 +14,7 @@ import (
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/ffmpeg/transcoder"
 	"github.com/stashapp/stash/pkg/generationbudget"
+	"github.com/stashapp/stash/pkg/logger"
 )
 
 // IntelSpriteTiles is retained for explicitly selected software callers. GPU
@@ -145,31 +146,27 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 		return fail("output", err)
 	}
 	var args ffmpeg.Args
+	lanes := 1
 	if frames == nil {
-		seekData, seekErr := ffmpeg.IntelSpriteSeekList(input, source, times)
+		lanes = g.spriteWorkers(generationbudget.GPU, count)
+		seekLists, counts, cleanup, seekErr := intelSpriteSeekInputs(input, source, times, lanes, filepath.Dir(output))
 		if seekErr != nil {
 			return fail("plan", seekErr)
 		}
-		seekFile, seekErr := os.CreateTemp(filepath.Dir(output), ".sprite-seeks-*.ffconcat")
-		if seekErr != nil {
-			return fail("output", seekErr)
-		}
-		defer os.Remove(seekFile.Name())
-		if _, seekErr = seekFile.WriteString(seekData); seekErr != nil {
-			_ = seekFile.Close()
-			return fail("output", seekErr)
-		}
-		if seekErr = seekFile.Close(); seekErr != nil {
-			return fail("output", seekErr)
-		}
-		args, err = transcoder.IntelSpriteSheet(seekFile.Name(), plan, count, columns, rows, tmp.Name())
+		defer cleanup()
+		args, err = transcoder.IntelSpriteSheetInputs(seekLists, plan, counts, columns, rows, tmp.Name())
 	} else {
 		args, err = transcoder.IntelSpriteSheetFrames(input, plan, frames, columns, rows, tmp.Name())
 	}
 	if err != nil {
 		return fail("plan", err)
 	}
-	d, err = ffmpeg.RunIntelGenerationWork(workCtx, plan, func(ctx context.Context) error { return g.generateWithContext(ctx, lockCtx, args) }, nil, func(ctx context.Context, args ffmpeg.Args) error { return g.generateWithContext(ctx, lockCtx, args) })
+	logger.Infof("[generator] GPU sprite decoder lanes=%d tiles=%d", lanes, count)
+	runWork := g.intelSpriteWork
+	if runWork == nil {
+		runWork = ffmpeg.RunIntelGenerationWork
+	}
+	d, err = runWork(workCtx, plan, func(ctx context.Context) error { return g.generateWithContextN(ctx, lockCtx, args, lanes) }, nil, func(ctx context.Context, args ffmpeg.Args) error { return g.generateWithContext(ctx, lockCtx, args) })
 	if err != nil {
 		if frames == nil {
 			return d, fmt.Errorf("GPU sprite failed without software fallback (a requested frame must occur within its one-second seek interval): %w", err)
@@ -208,6 +205,52 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 		return fail("output", err)
 	}
 	return d, nil
+}
+
+// Contiguous, balanced partitions retain canonical tile order while each input
+// owns an independent decoder and accurate seeks. A sheet reserves all lanes
+// atomically at its render leaf; capability probes still consume a single slot.
+func intelSpriteSeekInputs(input string, source ffmpeg.IntelSource, times []float64, lanes int, dir string) ([]string, []int, func(), error) {
+	var paths []string
+	cleanup := func() {
+		for _, path := range paths {
+			_ = os.Remove(path)
+		}
+	}
+	if lanes < 1 || lanes > len(times) {
+		return nil, nil, cleanup, fmt.Errorf("invalid GPU sprite decoder lane count")
+	}
+	counts := make([]int, lanes)
+	offset := 0
+	for lane := range counts {
+		count := len(times) / lanes
+		if lane < len(times)%lanes {
+			count++
+		}
+		counts[lane] = count
+		data, err := ffmpeg.IntelSpriteSeekList(input, source, times[offset:offset+count])
+		if err != nil {
+			cleanup()
+			return nil, nil, cleanup, err
+		}
+		f, err := os.CreateTemp(dir, ".sprite-seeks-*.ffconcat")
+		if err != nil {
+			cleanup()
+			return nil, nil, cleanup, err
+		}
+		paths = append(paths, f.Name())
+		_, writeErr := f.WriteString(data)
+		closeErr := f.Close()
+		if writeErr != nil || closeErr != nil {
+			cleanup()
+			if writeErr != nil {
+				return nil, nil, cleanup, writeErr
+			}
+			return nil, nil, cleanup, closeErr
+		}
+		offset += count
+	}
+	return paths, counts, cleanup, nil
 }
 
 func intelSpriteEligibility(source ffmpeg.IntelSource, backend string) error {

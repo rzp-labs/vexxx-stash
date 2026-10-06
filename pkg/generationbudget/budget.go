@@ -49,6 +49,7 @@ const (
 
 type waiter struct {
 	class   Class
+	slots   int
 	ready   chan struct{}
 	granted bool
 }
@@ -77,19 +78,32 @@ func (b *Budget) Settings() Settings { return b.settings }
 // and must be deferred immediately, covering success, failure and cancellation.
 // A nil budget preserves the legacy unbounded admission behavior.
 func (b *Budget) Acquire(ctx context.Context, class Class) (func(), error) {
+	return b.AcquireN(ctx, class, 1)
+}
+
+// AcquireN atomically reserves slots for independent stages sharing a subprocess,
+// such as parallel hardware decoders in one resident sprite render. A stage never
+// holds a partial reservation while waiting for the rest of its slots.
+func (b *Budget) AcquireN(ctx context.Context, class Class, slots int) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if b == nil {
-		return func() {}, nil
 	}
 	if class != CPU && class != GPU {
 		return nil, errors.New("invalid generation budget class")
 	}
+	if slots < 1 {
+		return nil, errors.New("generation budget reservation must request at least one slot")
+	}
+	if b == nil {
+		return func() {}, nil
+	}
+	if slots > b.settings.MaxProcesses || (class == GPU && slots > b.settings.MaxGPUProcesses) {
+		return nil, errors.New("generation budget reservation exceeds configured limits")
+	}
 	if ctx.Value(scopeKey{}) == b {
 		return nil, errors.New("nested generation budget acquisition; acquire only at leaf stages")
 	}
-	w := &waiter{class: class, ready: make(chan struct{})}
+	w := &waiter{class: class, slots: slots, ready: make(chan struct{})}
 	b.mu.Lock()
 	b.queue = append(b.queue, w)
 	b.dispatch()
@@ -106,7 +120,7 @@ func (b *Budget) Acquire(ctx context.Context, class Class) (func(), error) {
 				}
 			}
 		} else {
-			b.finish(class)
+			b.finish(class, slots)
 		}
 		b.dispatch()
 		b.mu.Unlock()
@@ -117,7 +131,7 @@ func (b *Budget) Acquire(ctx context.Context, class Class) (func(), error) {
 		once.Do(func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
-			b.finish(class)
+			b.finish(class, slots)
 			b.dispatch()
 		})
 	}
@@ -129,23 +143,23 @@ func (b *Budget) Acquire(ctx context.Context, class Class) (func(), error) {
 	return release, nil
 }
 
-func (b *Budget) finish(class Class) {
-	b.active--
+func (b *Budget) finish(class Class, slots int) {
+	b.active -= slots
 	if class == GPU {
-		b.gpuActive--
+		b.gpuActive -= slots
 	}
 }
 
 func (b *Budget) dispatch() {
 	for len(b.queue) > 0 {
 		w := b.queue[0]
-		if b.active >= b.settings.MaxProcesses || (w.class == GPU && b.gpuActive >= b.settings.MaxGPUProcesses) {
+		if w.slots > b.settings.MaxProcesses-b.active || (w.class == GPU && w.slots > b.settings.MaxGPUProcesses-b.gpuActive) {
 			return
 		}
 		b.queue = b.queue[1:]
-		b.active++
+		b.active += w.slots
 		if w.class == GPU {
-			b.gpuActive++
+			b.gpuActive += w.slots
 		}
 		w.granted = true
 		close(w.ready)

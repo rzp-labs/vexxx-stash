@@ -137,7 +137,7 @@ func TestMarkerPacketEvidenceBoundAndCancellation(t *testing.T) {
 }
 
 func TestLabRejectsNonFiniteFlagsBeforeCreatingOutput(t *testing.T) {
-	for _, tc := range []struct{ option, value string }{{"-start", "NaN"}, {"-start", "+Inf"}, {"-start", "-Inf"}, {"-duration", "NaN"}, {"-duration", "+Inf"}} {
+	for _, tc := range []struct{ option, value string }{{"-start", "NaN"}, {"-start", "+Inf"}, {"-start", "-Inf"}, {"-duration", "NaN"}, {"-duration", "+Inf"}, {"-timeout", "0s"}, {"-timeout", "-1s"}, {"-timeout", "121s"}} {
 		t.Run(tc.option+tc.value, func(t *testing.T) {
 			out := filepath.Join(t.TempDir(), "must-not-exist")
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

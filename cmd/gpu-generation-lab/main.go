@@ -57,6 +57,7 @@ func main() {
 	workload := flag.String("workload", "marker", "marker, preview, webp, sprites or mixed")
 	hashFixture := flag.String("phash-fixture", "", "mixed only: separate authorized 640x360 synthetic fixture")
 	cancelAfter := flag.Duration("cancel-after", 0, "cancel generation after this duration (0 disables; maximum50s)")
+	timeout := flag.Duration("timeout", 50*time.Second, "bounded generation deadline (maximum120s)")
 	backend := flag.String("backend", "software", "software, qsv or vaapi")
 	device := flag.String("device", "/dev/dri/renderD128", "explicit render device")
 	legacyCPU := flag.Bool("legacy-cpu", false, "software baseline without candidate budget")
@@ -93,15 +94,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "isolated preview segment count must be2..12")
 		os.Exit(2)
 	}
-	if *cancelAfter < 0 || *cancelAfter > 50*time.Second || (*workload == "mixed" && (*legacyCPU || *hashFixture == "" || *vr != "" || *audio)) {
-		fmt.Fprintln(os.Stderr, "mixed requires phash-fixture, shared budget, non-VR/no-audio fixtures; cancel-after must be0..50s")
+	if *timeout <= 0 || *timeout > 120*time.Second || *cancelAfter < 0 || *cancelAfter > 50*time.Second || *cancelAfter > *timeout || (*workload == "mixed" && (*legacyCPU || *hashFixture == "" || *vr != "" || *audio)) {
+		fmt.Fprintln(os.Stderr, "mixed requires phash-fixture, shared budget, non-VR/no-audio fixtures; timeout must bepositive and<=120s; cancel-after must be0..50s and<=timeout")
 		os.Exit(2)
 	}
 	if err := os.Mkdir(*out, 0750); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	if *cancelAfter > 0 {
 		timer := time.AfterFunc(*cancelAfter, cancel)
