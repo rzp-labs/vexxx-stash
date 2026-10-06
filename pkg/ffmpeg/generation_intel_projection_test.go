@@ -219,6 +219,67 @@ func TestIntelProjectedUnknownSDRMatchesCanonicalMatrixAndRange(t *testing.T) {
 	}
 }
 
+func TestIntelProjectionRejectsUnmappedColorAndPrecisionWithoutTruncation(t *testing.T) {
+	for _, mutate := range []func(*IntelSource){
+		func(s *IntelSource) { s.BitDepth = 12 },
+		func(s *IntelSource) { s.BitDepth = 16 },
+		func(s *IntelSource) { s.ColorPrimaries = "reserved" },
+		func(s *IntelSource) { s.ColorSpace = "chroma-derived-c" },
+		func(s *IntelSource) { s.ColorSpace = "ipt-c2" },
+		func(s *IntelSource) { s.ColorSpace = "gbr"; s.IsRGB = false },
+		func(s *IntelSource) { s.ColorTransfer = "log100" },
+		func(s *IntelSource) { s.ColorTransfer = "log316" },
+		func(s *IntelSource) { s.ColorRange = "reserved" },
+	} {
+		for _, transfer := range []string{"bt709", "smpte2084", "arib-std-b67"} {
+			source := intelHDRFixture(transfer)
+			mutate(&source)
+			for _, jpeg := range []bool{false, true} {
+				if _, err := newIntelProjectionPlan(IntelGenerationConfig{Backend: "vaapi"}, source, "input", 0, 640, "LR180", jpeg); err == nil {
+					t.Fatalf("unmapped color/precision silently changed: %+v", source)
+				}
+			}
+		}
+	}
+}
+
+func TestIntelProjectionPreservesMappedSMPTE428Transfer(t *testing.T) {
+	source := intelHDRFixture("smpte428")
+	source.ColorPrimaries, source.ColorSpace = "smpte428", "bt709"
+	for _, jpeg := range []bool{false, true} {
+		plan, err := newIntelProjectionPlan(IntelGenerationConfig{Backend: "vaapi"}, source, "input", 0, 640, "MONO360", jpeg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(plan.Filter, ":color_primaries=smpte428:color_trc=17,") || plan.Source.ColorTransfer != "smpte428" {
+			t.Fatal("mapped transfer missing or reinterpreted:", plan.Filter)
+		}
+	}
+}
+
+func TestIntelProjectionNonSquareSARUsesCanonicalPhysicalEyes(t *testing.T) {
+	source := intelHDRFixture("arib-std-b67")
+	source.Codec, source.Profile, source.PixelFormat = "av1", "Main", "p010le"
+	source.Width, source.Height, source.SampleAspectRatio, source.Rotation = 720, 576, "16:15", 90
+	source.RuntimeFingerprint = "actual-gpu-runtime"
+	shader, err := IntelProjectionShader("LR180", 576, 720)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, jpeg := range []bool{false, true} {
+		plan, err := newIntelProjectionPlan(IntelGenerationConfig{Backend: "vaapi"}, source, "input", 0, 640, "LR180", jpeg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(plan.Filter, "custom_shader_bin="+hex.EncodeToString([]byte(shader))) || !strings.Contains(plan.Filter, ":reset_sar=1:fit_mode=fill:") {
+			t.Fatal("projection changed canonical physical eye coordinates", plan.Filter)
+		}
+		if plan.Source.SampleAspectRatio != "1:1" || plan.Source.DisplayAspectRatio != "16:9" || plan.InputSource.SampleAspectRatio != "16:15" || plan.InputSource.Rotation != 90 || plan.RuntimeFingerprint != source.RuntimeFingerprint {
+			t.Fatalf("projection output geometry or input identity lost: %+v", plan)
+		}
+	}
+}
+
 // Verify the shader's actual numeric ray constants and mapping against a real
 // independent v360 control. A 16-bit linear coordinate ramp exposes incorrect
 // FOV, eye, axis or half-pixel conventions without involving JPEG quality.

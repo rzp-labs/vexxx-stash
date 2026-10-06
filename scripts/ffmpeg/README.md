@@ -19,7 +19,16 @@ software format; libplacebo can upload those CPU-decoded pixels. `-xerror` and
 `-hwaccel_output_format vaapi` alone do not prohibit that path. The patched CLI
 returns `AV_PIX_FMT_NONE` before selecting software, and also rejects video
 decoders without a matching hardware-device configuration before opening them.
-The latter covers decoders which never invoke format negotiation. Invalid strict
+Strict inputs use FFmpeg's existing installed-decoder enumeration and require
+the requested device type, hardware output format and `HW_DEVICE_CTX` method.
+For example, AV1 can select the installed native `av1` decoder's VAAPI
+configuration even when the default software decoder is `libdav1d`; there is no
+codec or decoder-name whitelist. A missing match fails before opening a decoder,
+and an explicitly named incompatible decoder fails rather than being replaced.
+Advertised configurations remain subject to the actual driver, profile and
+source properties when the first hardware frame is decoded.
+The same device/format requirement applies during format negotiation and device
+setup, covering decoders which never invoke format negotiation. Invalid strict
 settings fail explicitly. Opt-out, automatic acceleration, software playback and
 audio preserve upstream behavior.
 
@@ -54,8 +63,15 @@ discovery. A stock/custom library missing the flag fails explicitly.
 
 Header-only probing can omit H.264 VUI/SAR or in-band HEVC properties. The CLI's
 `-hwaccel_metadata 1` therefore requires strict hardware output and reports the
-first actual hardware frame's dimensions, underlying pixel format, SAR, color
-enums and decoder rate. Generation releases CPU probe admission before acquiring
+first actual hardware frame's input stream index, dimensions, underlying pixel
+format, component bit depth and RGB flag, SAR, color enums and decoder rate. Bit depth
+comes from the actual hardware pool's software-format descriptor, so callers
+can preserve precision without a pixel-format-name whitelist. The RGB flag also
+comes from that descriptor, independently of the frame's color-matrix tags.
+The index is carried from the input
+`AVStream`, so callers can associate the automatically selected video with its
+header metadata instead of approximating FFmpeg's stream selection.
+Generation releases CPU probe admission before acquiring
 a bounded GPU permit for this frame, then merges its actual properties before
 eligibility and graph planning. Container timing remains authoritative; missing
 or invalid frame metadata is an error. No image is downloaded or software

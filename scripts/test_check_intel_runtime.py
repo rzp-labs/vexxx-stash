@@ -4,6 +4,7 @@ import subprocess
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -252,6 +253,251 @@ class ProbeManifestTest(unittest.TestCase):
         self.output.return_value = "     other_probe .D......... another option\n"
         with self.assertRaisesRegex(RuntimeError, "lacks header-only"):
             self.check()
+
+
+class StrictDecoderSelectionTest(unittest.TestCase):
+    def test_actual_patched_selector_with_installed_decoder_registry(self):
+        """Compile the patch's real selector against a small fake codec registry.
+
+        This exercises CLI selection without compiling FFmpeg or opening a GPU.
+        It does not establish that a driver can decode a particular source.
+        """
+        compiler = shutil.which("cc")
+        if not compiler:
+            self.skipTest("a C compiler is required for the isolated selector test")
+        patch_text = (Path(__file__).parent / "ffmpeg/strict-hardware-output.patch").read_text()
+        section = patch_text.split("+++ b/fftools/ffmpeg_demux.c\n", 1)[1].split("--- a/", 1)[0]
+        # The demux hunk includes the complete existing selector; compile its
+        # new side rather than maintaining a Python copy of the selection logic.
+        postimage = "".join(line[1:] for line in section.splitlines(keepends=True)
+                            if line.startswith(("+", " ")))
+        selector = postimage.split("static int decoder_supports_hw_output", 1)[1]
+        selector = "static int decoder_supports_hw_output" + selector.split(
+            "static int guess_input_channel_layout", 1)[0]
+        decoder_section = patch_text.split("+++ b/fftools/ffmpeg_dec.c\n", 1)[1].split("--- a/", 1)[0]
+        decoder_postimage = "".join(line[1:] for line in decoder_section.splitlines(keepends=True)
+                                    if line.startswith(("+", " ")))
+        validation = "static int hwaccel_output_required" + decoder_postimage.split(
+            "static int hwaccel_output_required", 1)[1].split("static enum AVPixelFormat get_format", 1)[0]
+        metadata = "static int emit_hwaccel_metadata" + decoder_postimage.split(
+            "static int emit_hwaccel_metadata", 1)[1].split("static int video_frame_process", 1)[0]
+        fixture = r'''
+#define _POSIX_C_SOURCE 200809L
+#include <assert.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#define AVERROR(x) (-(x))
+#define AV_PIX_FMT_FLAG_HWACCEL 1
+#define AV_PIX_FMT_FLAG_RGB 2
+#define AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX 1
+#define AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX 2
+#define AV_LOG_ERROR 1
+#define AV_LOG_VERBOSE 2
+#define FFMAX(a, b) ((a) > (b) ? (a) : (b))
+enum HWAccelID { HWACCEL_NONE, HWACCEL_GENERIC, HWACCEL_AUTO };
+enum AVHWDeviceType { AV_HWDEVICE_TYPE_NONE, AV_HWDEVICE_TYPE_VAAPI, AV_HWDEVICE_TYPE_CUDA };
+enum AVPixelFormat { AV_PIX_FMT_NONE = -1, AV_PIX_FMT_VAAPI, AV_PIX_FMT_CUDA,
+                     AV_PIX_FMT_YUV420P, AV_PIX_FMT_DEPTH10, AV_PIX_FMT_DEPTH12,
+                     AV_PIX_FMT_BAD_DEPTH, AV_PIX_FMT_RGB10 };
+enum { AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO, AV_CODEC_ID_AV1 = 10, AV_CODEC_ID_HEVC = 11 };
+typedef struct AVCodecHWConfig {
+    int methods;
+    enum AVHWDeviceType device_type;
+    enum AVPixelFormat pix_fmt;
+} AVCodecHWConfig;
+typedef struct AVCodec {
+    int id, type, decoder;
+    const char *name;
+    const AVCodecHWConfig *configs[4];
+} AVCodec;
+typedef struct AVCodecParameters { int codec_type, codec_id; } AVCodecParameters;
+typedef struct AVStream { AVCodecParameters *codecpar; } AVStream;
+typedef struct AVFormatContext { int unused; } AVFormatContext;
+typedef struct OptionsContext { const char *codec_names; } OptionsContext;
+typedef struct AVPixFmtDescriptor {
+    int flags, nb_components;
+    struct { int depth; } comp[4];
+} AVPixFmtDescriptor;
+typedef struct AVRational { int num, den; } AVRational;
+typedef struct AVBufferRef { unsigned char *data; } AVBufferRef;
+typedef struct AVHWFramesContext { enum AVPixelFormat format, sw_format; } AVHWFramesContext;
+typedef struct AVCodecContext { AVRational framerate; } AVCodecContext;
+typedef struct AVFrame {
+    enum AVPixelFormat format;
+    AVBufferRef *hw_frames_ctx;
+    int width, height, color_range, colorspace, color_primaries, color_trc;
+    AVRational sample_aspect_ratio;
+} AVFrame;
+typedef struct DecoderPriv {
+    struct { int type; } dec;
+    int hwaccel_strict;
+    enum HWAccelID hwaccel_id;
+    enum AVHWDeviceType hwaccel_device_type;
+    enum AVPixelFormat hwaccel_output_format;
+    int input_stream_index, hwaccel_metadata_emitted;
+    AVCodecContext *dec_ctx;
+} DecoderPriv;
+static const AVCodec *installed[8];
+static int recast_media, default_lookups;
+static const AVCodecHWConfig *avcodec_get_hw_config(const AVCodec *codec, int index) {
+    return index < 4 ? codec->configs[index] : NULL;
+}
+static const AVCodec *av_codec_iterate(void **opaque) {
+    uintptr_t index = (uintptr_t)*opaque;
+    *opaque = (void *)(index + 1);
+    return installed[index];
+}
+static int av_codec_is_decoder(const AVCodec *codec) { return codec->decoder; }
+static const AVPixFmtDescriptor *av_pix_fmt_desc_get(enum AVPixelFormat format) {
+    static const AVPixFmtDescriptor hardware = { AV_PIX_FMT_FLAG_HWACCEL, 0 },
+        software8 = { 0, 3, { {8}, {8}, {8} } },
+        software10 = { 0, 3, { {8}, {10}, {8} } },
+        software12 = { 0, 3, { {12}, {10}, {10} } },
+        bad_depth = { 0, 3, { {0}, {0}, {0} } },
+        rgb10 = { AV_PIX_FMT_FLAG_RGB, 3, { {10}, {10}, {10} } };
+    switch (format) {
+    case AV_PIX_FMT_NONE: return NULL;
+    case AV_PIX_FMT_YUV420P: return &software8;
+    case AV_PIX_FMT_DEPTH10: return &software10;
+    case AV_PIX_FMT_DEPTH12: return &software12;
+    case AV_PIX_FMT_BAD_DEPTH: return &bad_depth;
+    case AV_PIX_FMT_RGB10: return &rgb10;
+    default: return &hardware;
+    }
+}
+static void av_log(void *context, int level, const char *format, ...) { }
+static const char *av_hwdevice_get_type_name(enum AVHWDeviceType type) { return "device"; }
+static const char *av_get_pix_fmt_name(enum AVPixelFormat format) { return "format"; }
+static const char *av_color_range_name(int value) { return "tv"; }
+static const char *av_color_space_name(int value) { return "bt709"; }
+static const char *av_color_primaries_name(int value) { return "bt709"; }
+static const char *av_color_transfer_name(int value) { return "bt709"; }
+static const char *avcodec_get_name(int codec) { return "codec"; }
+static void opt_match_per_stream_str(void *context, const char *const *option,
+                                    AVFormatContext *format, AVStream *stream, const char **value) {
+    *value = *option;
+}
+static int find_codec(void *context, const char *name, int type, int encoder, const AVCodec **codec) {
+    for (int i = 0; installed[i]; i++) {
+        if (!strcmp(name, installed[i]->name) && installed[i]->decoder) {
+            *codec = installed[i];
+            return 0;
+        }
+    }
+    return AVERROR(ENOENT);
+}
+static const AVCodec *avcodec_find_decoder(int id) {
+    default_lookups++;
+    for (int i = 0; installed[i]; i++)
+        if (installed[i]->id == id && installed[i]->decoder)
+            return installed[i];
+    return NULL;
+}
+'''
+        cases = r'''
+int main(void) {
+    const AVCodecHWConfig vaapi = { 1, AV_HWDEVICE_TYPE_VAAPI, AV_PIX_FMT_VAAPI };
+    const AVCodecHWConfig frames_only = { 2, AV_HWDEVICE_TYPE_VAAPI, AV_PIX_FMT_VAAPI };
+    const AVCodecHWConfig wrong_format = { 1, AV_HWDEVICE_TYPE_VAAPI, AV_PIX_FMT_CUDA };
+    const AVCodecHWConfig wrong_device = { 1, AV_HWDEVICE_TYPE_CUDA, AV_PIX_FMT_VAAPI };
+    const AVCodec software = { AV_CODEC_ID_AV1, AVMEDIA_TYPE_VIDEO, 1, "libdav1d", { NULL } };
+    const AVCodec native = { AV_CODEC_ID_AV1, AVMEDIA_TYPE_VIDEO, 1, "av1", { &wrong_format, &vaapi, NULL } };
+    const AVCodec encoder = { AV_CODEC_ID_AV1, AVMEDIA_TYPE_VIDEO, 0, "av1_encoder", { &vaapi, NULL } };
+    const AVCodec other_codec = { AV_CODEC_ID_HEVC, AVMEDIA_TYPE_VIDEO, 1, "hevc", { &vaapi, NULL } };
+    AVCodec incompatible = { AV_CODEC_ID_AV1, AVMEDIA_TYPE_VIDEO, 1, "other_av1", { &frames_only, NULL } };
+    AVCodecParameters par = { AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_AV1 };
+    AVStream stream = { &par };
+    AVFormatContext format = { 0 };
+    OptionsContext options = { NULL };
+    const AVCodec *selected = NULL;
+    DecoderPriv decoder = { { AVMEDIA_TYPE_VIDEO }, 1, HWACCEL_GENERIC,
+                            AV_HWDEVICE_TYPE_VAAPI, AV_PIX_FMT_VAAPI };
+    installed[0] = &software; installed[1] = &encoder; installed[2] = &other_codec;
+    installed[3] = &incompatible; installed[4] = &native;
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_VAAPI, &selected) == 0);
+    assert(selected == &native && default_lookups == 0);
+    options.codec_names = "libdav1d";
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_VAAPI, &selected) == 0);
+    assert(selected == &software && hwaccel_decoder_check(&decoder, selected) == AVERROR(ENOSYS));
+    options.codec_names = "av1";
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_VAAPI, &selected) == 0 && selected == &native);
+    assert(hwaccel_decoder_check(&decoder, selected) == 0);
+    options.codec_names = NULL;
+    installed[4] = NULL;
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_VAAPI, &selected) == 0);
+    assert(selected == &software && hwaccel_decoder_check(&decoder, selected) == AVERROR(ENOSYS));
+    assert(hwaccel_decoder_check(&decoder, &incompatible) == AVERROR(ENOSYS));
+    incompatible.configs[0] = &wrong_format;
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_VAAPI, &selected) == 0);
+    assert(hwaccel_decoder_check(&decoder, &incompatible) == AVERROR(ENOSYS));
+    incompatible.configs[0] = &wrong_device;
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_VAAPI, &selected) == 0);
+    assert(hwaccel_decoder_check(&decoder, &incompatible) == AVERROR(ENOSYS));
+    assert(default_lookups == 3);
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_NONE,
+                          AV_HWDEVICE_TYPE_NONE, 0, AV_PIX_FMT_NONE, &selected) == 0 && selected == &software);
+    assert(default_lookups == 4);
+    decoder.hwaccel_strict = 0;
+    assert(hwaccel_decoder_check(&decoder, selected) == 0);
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_YUV420P, &selected) == AVERROR(EINVAL));
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_NONE, &selected) == AVERROR(EINVAL));
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_AUTO,
+                          AV_HWDEVICE_TYPE_VAAPI, 1, AV_PIX_FMT_VAAPI, &selected) == AVERROR(EINVAL));
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_NONE, 1, AV_PIX_FMT_VAAPI, &selected) == AVERROR(EINVAL));
+    assert(choose_decoder(&options, NULL, &format, &stream, HWACCEL_GENERIC,
+                          AV_HWDEVICE_TYPE_VAAPI, 2, AV_PIX_FMT_VAAPI, &selected) == AVERROR(EINVAL));
+    AVHWFramesContext pool = { AV_PIX_FMT_VAAPI, AV_PIX_FMT_YUV420P };
+    AVBufferRef reference = { (unsigned char *)&pool };
+    AVCodecContext context = { { 60000, 1001 } };
+    AVFrame frame = { AV_PIX_FMT_VAAPI, &reference, 1920, 1080, 0, 0, 0, 0, { 1, 1 } };
+    decoder.input_stream_index = 5;
+    decoder.dec_ctx = &context;
+    assert(emit_hwaccel_metadata(&decoder, &frame) == 0);
+    pool.sw_format = AV_PIX_FMT_DEPTH10;
+    assert(emit_hwaccel_metadata(&decoder, &frame) == 0);
+    pool.sw_format = AV_PIX_FMT_DEPTH12;
+    assert(emit_hwaccel_metadata(&decoder, &frame) == 0);
+    pool.sw_format = AV_PIX_FMT_RGB10;
+    assert(emit_hwaccel_metadata(&decoder, &frame) == 0);
+    pool.sw_format = AV_PIX_FMT_BAD_DEPTH;
+    assert(emit_hwaccel_metadata(&decoder, &frame) == AVERROR(EINVAL));
+    pool.sw_format = AV_PIX_FMT_NONE;
+    assert(emit_hwaccel_metadata(&decoder, &frame) == AVERROR(EINVAL));
+    pool.sw_format = AV_PIX_FMT_VAAPI;
+    assert(emit_hwaccel_metadata(&decoder, &frame) == AVERROR(EINVAL));
+    frame.hw_frames_ctx = NULL;
+    assert(emit_hwaccel_metadata(&decoder, &frame) == AVERROR(EINVAL));
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="vexxx-decoder-selection-") as directory:
+            directory = Path(directory)
+            source, executable = directory / "selector.c", directory / "selector"
+            source.write_text(fixture + selector + validation + metadata + cases)
+            subprocess.run([compiler, "-std=c11", "-Werror=implicit-function-declaration",
+                            str(source), "-o", str(executable)], check=True, timeout=30,
+                           capture_output=True, text=True)
+            result = subprocess.run([str(executable)], check=True, timeout=5,
+                                    capture_output=True, text=True)
+            records = [json.loads(line.removeprefix("VEXXX_GPU_METADATA="))
+                       for line in result.stdout.splitlines()]
+            self.assertEqual([record["bit_depth"] for record in records], [8, 10, 12, 10])
+            self.assertEqual([record["is_rgb"] for record in records], [False, False, False, True])
+            for record in records:
+                self.assertEqual(record["stream_index"], 5)
+                self.assertEqual((record["width"], record["height"]), (1920, 1080))
+                self.assertEqual(record["frame_rate"], "60000/1001")
 
 
 if __name__ == "__main__":

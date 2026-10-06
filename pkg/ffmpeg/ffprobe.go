@@ -388,9 +388,14 @@ func parse(filePath string, probeJSON *FFProbeJSON) (*VideoFile, error) {
 		}
 
 		result.VideoStreamDuration, err = strconv.ParseFloat(videoStream.Duration, 64)
-		if err != nil {
-			// Revert to the historical behaviour, which is still correct in the vast majority of cases.
-			result.VideoStreamDuration = result.FileDuration
+		if err != nil || result.VideoStreamDuration <= 0 || math.IsNaN(result.VideoStreamDuration) || math.IsInf(result.VideoStreamDuration, 0) {
+			// Prefer the video's own timing, falling back to the container only
+			// when it supplies a finite positive duration. Unavailable timing
+			// stays zero rather than producing invalid sprite/preview targets.
+			result.VideoStreamDuration = 0
+			if result.FileDuration > 0 && !math.IsNaN(result.FileDuration) && !math.IsInf(result.FileDuration, 0) {
+				result.VideoStreamDuration = result.FileDuration
+			}
 		}
 	}
 

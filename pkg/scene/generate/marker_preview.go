@@ -131,15 +131,15 @@ func markerIntelArgs(input, output string, options sceneMarkerOptions, plan ffmp
 			videoArgs = append(videoArgs, tag.key, tag.value)
 		}
 	}
+	// Native mapping preserves FFmpeg's video and audio choice, including its
+	// default-disposition and packet-presence preferences across multiple tracks.
 	o := transcoder.TranscodeOptions{StartTime: options.Seconds, Duration: options.Duration, OutputPath: output,
 		VideoCodec: ffmpeg.VideoCodec{Name: "h264_" + plan.Config.Backend, CodeName: "h264_" + plan.Config.Backend}, VideoArgs: videoArgs,
-		ExtraInputArgs:  append(append([]string{}, plan.InputArgs...), "-threads", "1"),
-		ExtraOutputArgs: []string{"-map", fmt.Sprintf("0:%d", plan.Source.StreamIndex)},
+		ExtraInputArgs: append(append([]string{}, plan.InputArgs...), "-threads", "1"),
 	}
 	if options.Audio {
 		o.AudioCodec = ffmpeg.AudioCodecAAC
 		o.AudioArgs = ffmpeg.Args{}.AudioBitrate(markerPreviewAudioBitrate)
-		o.ExtraOutputArgs = append(o.ExtraOutputArgs, "-map", "0:a:0?")
 	}
 	return transcoder.Transcode(input, o)
 }

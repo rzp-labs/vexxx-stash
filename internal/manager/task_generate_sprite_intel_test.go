@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stashapp/stash/internal/manager/config"
+	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/generationbudget"
 	"github.com/stashapp/stash/pkg/job"
 	"github.com/stashapp/stash/pkg/models"
@@ -26,8 +27,15 @@ func TestGPUSpriteTaskErrorsReachJobAndPreserveAssets(t *testing.T) {
 			t.Cleanup(func() { instance = previous })
 			mgr.Config.SetInterface(config.SpriteGenerationBackend, "vaapi")
 			mgr.Config.SetInterface(config.GenerationDevice, "/dev/dri/renderD999")
-			// No encoder is supplied: a software retry would panic rather than
-			// accidentally satisfying this task/job regression test.
+			// Accept only strict hardware metadata. Any software render attempt
+			// fails the fixture rather than accidentally satisfying this test.
+			binary := filepath.Join(filepath.Dir(input), "ffmpeg")
+			frame := `VEXXX_GPU_METADATA={"stream_index":0,"bit_depth":8,"is_rgb":false,"width":64,"height":36,"pix_fmt":"nv12","sample_aspect_ratio":"1/1","color_range":"tv","color_space":"bt709","color_primaries":"bt709","color_transfer":"bt709","frame_rate":"24/1"}`
+			script := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = '-hwaccel_metadata' ]; then printf '%s\\n' '" + frame + "';exit 0;fi;done\necho 'unexpected pixel generation' >&2\nexit 77\n"
+			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			mgr.FFMpeg = ffmpeg.NewEncoder(binary)
 			var metadata map[string]any
 			if err := json.Unmarshal([]byte(generationMetadataJSON), &metadata); err != nil {
 				t.Fatal(err)

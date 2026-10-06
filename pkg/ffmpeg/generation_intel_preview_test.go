@@ -5,14 +5,14 @@ import (
 	"testing"
 )
 
-func TestIntelPreviewMain10IndependentEligibility(t *testing.T) {
+func TestIntelPreviewSDRDepthRequiresActualHardwareProbes(t *testing.T) {
 	source := IntelSource{Codec: "hevc", Profile: "Main 10", PixelFormat: "yuv420p10le", Width: 3840, Height: 2160,
 		SampleAspectRatio: "1:1", ColorPrimaries: "bt709", ColorTransfer: "bt709", ColorSpace: "bt709", ColorRange: "tv"}
 	if err := source.ValidatePreview(); err != nil {
 		t.Fatal(err)
 	}
-	if err := source.Validate(); err == nil {
-		t.Fatal("scene Main10 support broadened marker eligibility")
+	if err := source.Validate(); err != nil {
+		t.Fatal("generic validity must not whitelist SDR bit depth", err)
 	}
 	plan, err := NewIntelPreviewPlan(IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}, source, "input.mp4", 12.125, 640)
 	if err != nil {
@@ -33,13 +33,26 @@ func TestIntelPreviewMain10IndependentEligibility(t *testing.T) {
 		}
 	}
 	for _, mutate := range []func(*IntelSource){
-		func(s *IntelSource) { s.ColorTransfer = "smpte2084" }, func(s *IntelSource) { s.ColorRange = "pc" },
-		func(s *IntelSource) { s.Rotation = 45 }, func(s *IntelSource) { s.SampleAspectRatio = "4:3" },
+		func(s *IntelSource) { s.ColorTransfer, s.ColorPrimaries = "smpte2084", "unknown" },
+		func(s *IntelSource) { s.Rotation = 45 }, func(s *IntelSource) { s.SampleAspectRatio = "1:0" },
 	} {
 		s := source
 		mutate(&s)
 		if s.ValidatePreview() == nil {
 			t.Fatalf("unsupported source accepted %+v", s)
+		}
+	}
+	for _, candidate := range []struct{ codec, profile, format string }{
+		{"av1", "Main", "yuv420p10le"}, {"vp9", "Profile 2", "yuv422p10le"},
+		{"hevc", "Main 12", "yuv420p12le"}, {"h264", "High 4:4:4 Predictive", "yuv444p"},
+		{"mpeg2video", "Main", "yuv420p"},
+	} {
+		s := source
+		s.Codec, s.Profile, s.PixelFormat = candidate.codec, candidate.profile, candidate.format
+		s.ColorRange, s.SampleAspectRatio = "pc", "4:3"
+		plan, err := NewIntelPreviewPlan(IntelGenerationConfig{Backend: "vaapi"}, s, "source", 0, 640)
+		if err != nil || len(plan.Probes) != 3 {
+			t.Fatalf("metadata whitelist replaced actual capability probes: %+v %v", candidate, err)
 		}
 	}
 	source.Codec = "h264"
@@ -109,10 +122,10 @@ func TestIntelHDRRoutingRetainsStrictSourceInterpretation(t *testing.T) {
 			func(s *IntelSource) { s.Width = 0 },
 			func(s *IntelSource) { s.Height = -1 },
 			func(s *IntelSource) { s.Rotation = 45 },
-			func(s *IntelSource) { s.SampleAspectRatio = "4:3" },
-			func(s *IntelSource) { s.ColorSpace = "bt709" },
-			func(s *IntelSource) { s.ColorPrimaries = "bt709" },
-			func(s *IntelSource) { s.ColorRange = "pc" },
+			func(s *IntelSource) { s.SampleAspectRatio = "1:0" },
+			func(s *IntelSource) { s.ColorSpace = "unknown" },
+			func(s *IntelSource) { s.ColorPrimaries = "unknown" },
+			func(s *IntelSource) { s.ColorRange = "unknown" },
 		} {
 			invalid := source
 			mutate(&invalid)

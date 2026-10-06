@@ -5,30 +5,37 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	stashExec "github.com/stashapp/stash/pkg/exec"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	stashExec "github.com/stashapp/stash/pkg/exec"
 )
 
-// IntelSource inspects all streams with a bounded, cancellable ffprobe process.
-// Multiple video streams are rejected rather than changing FFmpeg's stream choice.
+// IntelSource inspects headers with a bounded, cancellable ffprobe process. Its
+// bootstrap header is not an automatic stream selection decision: production
+// generation selects through FFmpeg's native GPU frame metadata probe.
 func (f *FFProbe) IntelSource(ctx context.Context, input string) (IntelSource, error) {
 	result, err := f.intelSource(ctx, input, true)
 	if err != nil {
 		return result, err
 	}
+	if result.MetadataError != nil {
+		return result, result.MetadataError
+	}
 	return result, result.Validate()
 }
 
 // IntelSpriteSource keeps sprite eligibility separate from marker validation.
-// Sprites explicitly map video and disable audio, so audio stream count cannot
-// change their output or introduce ambiguous automatic audio selection.
+// Audio and video stream counts are not GPU capability restrictions.
 func (f *FFProbe) IntelSpriteSource(ctx context.Context, input, backend string) (IntelSource, error) {
 	result, err := f.intelSource(ctx, input, false)
 	if err != nil {
 		return result, err
+	}
+	if result.MetadataError != nil {
+		return result, result.MetadataError
 	}
 	return result, result.ValidateSprite(backend)
 }
@@ -36,11 +43,14 @@ func (f *FFProbe) IntelSpriteSource(ctx context.Context, input, backend string) 
 // IntelSourceMetadata reads container/header information without software pixel
 // decoding. Eligibility follows a strict GPU frame metadata probe, which supplies
 // VUI color and aspect metadata that header-only probing can leave incomplete.
-func (f *FFProbe) IntelSourceMetadata(ctx context.Context, input string, requireUnambiguousAudio bool) (IntelSource, error) {
-	return f.intelSource(ctx, input, requireUnambiguousAudio)
+// All video headers remain available for matching FFmpeg's actual chosen index.
+// The audio argument is retained for caller compatibility; native FFmpeg chooses
+// audio when requested, and otherwise disables it with -an.
+func (f *FFProbe) IntelSourceMetadata(ctx context.Context, input string, _ bool) (IntelSource, error) {
+	return f.intelSource(ctx, input, false)
 }
 
-func (f *FFProbe) intelSource(ctx context.Context, input string, requireUnambiguousAudio bool) (IntelSource, error) {
+func (f *FFProbe) intelSource(ctx context.Context, input string, _ bool) (IntelSource, error) {
 	var result IntelSource
 	if f == nil {
 		return result, fmt.Errorf("ffprobe unavailable for generation eligibility")
@@ -71,26 +81,26 @@ func (f *FFProbe) intelSource(ctx context.Context, input string, requireUnambigu
 	if data.Format.StartTime == "" {
 		data.Format.StartTime = "N/A"
 	}
-	count := 0
-	audioCount := 0
+	var candidates []IntelSource
 	for _, s := range data.Streams {
-		if s.CodecType == "audio" {
-			audioCount++
-		}
-		if s.CodecType != "video" || s.Disposition.AttachedPic != 0 {
+		if s.CodecType != "video" {
 			continue
 		}
-		count++
 		rotation, _ := strconv.Atoi(s.Tags.Rotate)
 		var matrix *[9]int32
+		var metadataErr error
+		matrixSeen := false
 		for _, sd := range s.SideDataList {
 			if sd.SideDataType == "Display Matrix" || sd.DisplayMatrix != "" {
-				if matrix != nil {
-					return result, fmt.Errorf("generation metadata contains multiple display matrices")
+				if matrixSeen {
+					metadataErr = fmt.Errorf("generation metadata contains multiple display matrices")
+					break
 				}
+				matrixSeen = true
 				parsed, err := intelParseDisplayMatrix(sd.DisplayMatrix)
 				if err != nil {
-					return result, err
+					metadataErr = err
+					break
 				}
 				matrix = &parsed
 				rotation = sd.Rotation
@@ -98,14 +108,13 @@ func (f *FFProbe) intelSource(ctx context.Context, input string, requireUnambigu
 				rotation = sd.Rotation
 			}
 		}
-		result = IntelSource{Profile: s.Profile, Codec: s.CodecName, PixelFormat: s.PixFmt, Width: s.Width, Height: s.Height, Rotation: rotation, DisplayMatrix: matrix, StreamIndex: s.Index, ColorTransfer: s.ColorTransfer, ColorPrimaries: s.ColorPrimaries, ColorSpace: s.ColorSpace, ColorRange: s.ColorRange, FrameRate: s.RFrameRate, AverageFrameRate: s.AvgFrameRate, Duration: s.Duration, SampleAspectRatio: s.SampleAspectRatio, DisplayAspectRatio: s.DisplayAspectRatio, StartTime: data.Format.StartTime}
+		candidates = append(candidates, IntelSource{Profile: s.Profile, Codec: s.CodecName, PixelFormat: s.PixFmt, Width: s.Width, Height: s.Height, Rotation: rotation, DisplayMatrix: matrix, StreamIndex: s.Index, ColorTransfer: s.ColorTransfer, ColorPrimaries: s.ColorPrimaries, ColorSpace: s.ColorSpace, ColorRange: s.ColorRange, FrameRate: s.RFrameRate, AverageFrameRate: s.AvgFrameRate, Duration: s.Duration, SampleAspectRatio: s.SampleAspectRatio, DisplayAspectRatio: s.DisplayAspectRatio, StartTime: data.Format.StartTime, MetadataError: metadataErr})
 	}
-	if requireUnambiguousAudio && audioCount > 1 {
-		return result, fmt.Errorf("multiple audio streams require software generation to preserve automatic audio selection")
+	if len(candidates) == 0 {
+		return result, fmt.Errorf("generation input has no video stream")
 	}
-	if count != 1 {
-		return result, fmt.Errorf("generation requires exactly one video stream; found %d", count)
-	}
+	result = candidates[0]
+	result.MetadataCandidates = candidates
 	return result, nil
 }
 

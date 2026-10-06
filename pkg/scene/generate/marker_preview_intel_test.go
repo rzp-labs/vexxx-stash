@@ -87,16 +87,16 @@ func TestMarkerIntelCommandPreservesContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			a := strings.Join(markerIntelArgs("in.mp4", "tmp.mp4", sceneMarkerOptions{Seconds: 3.25, Duration: 7.5, Audio: audio}, p), " ")
-			for _, want := range []string{"-ss 3.25", "-t 7.5", "-c:v h264_" + backend, "-profile:v high", "-level:v 4.2", "scale_" + backend + "=w=640:h=360:format=nv12", "-movflags +faststart", "-map 0:0", "tmp.mp4"} {
+			for _, want := range []string{"-ss 3.25", "-t 7.5", "-c:v h264_" + backend, "-profile:v high", "-level:v 4.2", "scale_" + backend + "=w=640:h=360:format=nv12", "-movflags +faststart", "tmp.mp4"} {
 				if !strings.Contains(a, want) {
 					t.Fatalf("missing %q: %s", want, a)
 				}
 			}
-			if strings.Contains(a, "hwdownload") || strings.Contains(a, "-crf") || strings.Contains(a, "-pix_fmt yuv420p") {
+			if strings.Contains(a, "-map ") || strings.Contains(a, "hwdownload") || strings.Contains(a, "-crf") || strings.Contains(a, "-pix_fmt yuv420p") {
 				t.Fatalf("CPU transfer or incompatible quality: %s", a)
 			}
 			if audio {
-				if !strings.Contains(a, "-c:a aac") || !strings.Contains(a, "-b:a 64k") || !strings.Contains(a, "-map 0:a:0?") {
+				if !strings.Contains(a, "-c:a aac") || !strings.Contains(a, "-b:a 64k") {
 					t.Fatal(a)
 				}
 			} else if !strings.Contains(a, "-an") {

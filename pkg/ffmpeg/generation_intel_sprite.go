@@ -7,20 +7,12 @@ import (
 	"strings"
 )
 
-func (s IntelSource) isMain10Sprite() bool {
-	return s.Codec == "hevc" && s.Profile == "Main 10" && s.PixelFormat == "yuv420p10le" && s.ColorTransfer == "bt709" && s.ColorPrimaries == "bt709" && s.ColorSpace == "bt709" && s.ColorRange == "tv"
-}
 func (s IntelSource) ValidateSprite(backend string) error {
 	if IntelSourceHDR(s) {
 		if backend != "vaapi" || !IntelHDRSourceValid(s) {
-			return fmt.Errorf("GPU HDR JPEG requires VAAPI and explicit HEVC Main10 PQ/HLG BT.2020 limited-range interpretation")
+			return fmt.Errorf("GPU HDR JPEG requires VAAPI and an explicit supported PQ/HLG color interpretation")
 		}
-		// Only the validation copy loses HDR tags. Rendering retains them until
-		// the dedicated GPU tone/gamut conversion produces SDR pixels.
-		s.PixelFormat = "yuv420p"
-		s.ColorTransfer, s.ColorPrimaries, s.ColorSpace = "", "", ""
-	} else if backend == "vaapi" && (s.isMain10Sprite() || s.PixelFormat == "yuvj420p") {
-		s.PixelFormat = "yuv420p"
+		s.ColorTransfer = ""
 	}
 	return s.Validate()
 }
@@ -43,8 +35,7 @@ func IntelSpriteScaleFilter(config IntelGenerationConfig, source IntelSource, wi
 	}
 	matrix := source.ColorSpace
 	switch matrix {
-	case "bt709", "bt470bg", "smpte170m", "smpte240m", "fcc":
-	default:
+	case "", "unknown", "unspecified":
 		matrix = "bt470bg"
 	}
 	filter := fmt.Sprintf("setparams=range=%s:colorspace=%s", sourceRange, matrix)
@@ -73,13 +64,15 @@ func IntelSpriteScaleFilter(config IntelGenerationConfig, source IntelSource, wi
 // Matching matrix/range forces allocation instead of FFmpeg's same-format
 // passthrough, without resizing, changing format or converting sample range.
 func IntelJPEGRangeFilter() string {
-	return "procamp_vaapi=c=1.1643835616438356:b=-16:s=0.9776785714285714,setparams=range=limited:colorspace=bt470bg,scale_vaapi=w=iw:h=ih:format=nv12:out_color_matrix=bt470bg:out_range=limited"
+	// CPU image composition emits a square-pixel JPEG canvas. Keep physical
+	// tile geometry and clear source SAR only as metadata before JPEG encoding.
+	return "procamp_vaapi=c=1.1643835616438356:b=-16:s=0.9776785714285714,setparams=range=limited:colorspace=bt470bg,scale_vaapi=w=iw:h=ih:format=nv12:out_color_matrix=bt470bg:out_range=limited,setsar=1"
 }
 
 // NewIntelSpritePlan probes actual source pixels through the GPU JPEG pipeline.
 // No raw pixels transfer to the CPU for scaling, composition or encoding.
 func NewIntelSpritePlan(config IntelGenerationConfig, source IntelSource, input string, start float64, width int) (IntelGenerationPlan, error) {
-	p := IntelGenerationPlan{Config: config, Source: source}
+	p := IntelGenerationPlan{Config: config, Source: source, InputSource: source, RuntimeFingerprint: source.RuntimeFingerprint}
 	if config.Backend != "vaapi" {
 		return p, fmt.Errorf("GPU JPEG requires VAAPI composition and mjpeg_vaapi; backend %q has no validated GPU JPEG path", config.Backend)
 	}
@@ -88,9 +81,6 @@ func NewIntelSpritePlan(config IntelGenerationConfig, source IntelSource, input 
 	}
 	if IntelSourceHDR(source) {
 		return NewIntelHDRSpritePlan(config, source, input, start, width)
-	}
-	if !source.HasSquareOrUnspecifiedSampleAspectRatio() {
-		return p, fmt.Errorf("GPU JPEG does not support sample aspect ratio %q (display aspect ratio %q)", source.SampleAspectRatio, source.DisplayAspectRatio)
 	}
 	if width <= 0 || width%2 != 0 {
 		return p, fmt.Errorf("Intel output width must be positive and even")

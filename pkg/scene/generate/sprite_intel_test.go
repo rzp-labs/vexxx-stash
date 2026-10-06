@@ -22,14 +22,14 @@ func TestIntelSpriteEligibilityGPU(t *testing.T) {
 	if err := intelSpriteEligibility(source, "vaapi"); err != nil {
 		t.Fatal("timestamp-based VFR seeking rejected", err)
 	}
-	for _, sar := range []string{"", "N/A", "0:1", "1:1"} {
+	for _, sar := range []string{"", "N/A", "0:1", "1:1", "4:3", "16:15"} {
 		s := source
 		s.SampleAspectRatio = sar
 		if err := intelSpriteEligibility(s, "vaapi"); err != nil {
 			t.Fatal(sar, err)
 		}
 	}
-	for _, change := range []func(*ffmpeg.IntelSource){func(s *ffmpeg.IntelSource) { s.Rotation = 45 }, func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "4:3" }, func(s *ffmpeg.IntelSource) { s.ColorTransfer = "smpte2084" }} {
+	for _, change := range []func(*ffmpeg.IntelSource){func(s *ffmpeg.IntelSource) { s.Rotation = 45 }, func(s *ffmpeg.IntelSource) { s.SampleAspectRatio = "1:0" }, func(s *ffmpeg.IntelSource) { s.ColorTransfer = "smpte2084" }} {
 		s := source
 		change(&s)
 		if err := intelSpriteEligibility(s, "vaapi"); err == nil {

@@ -270,13 +270,7 @@ func intelSpriteSeekInputs(input string, source ffmpeg.IntelSource, times []floa
 }
 
 func intelSpriteEligibility(source ffmpeg.IntelSource, backend string) error {
-	if err := source.ValidateSprite(backend); err != nil {
-		return err
-	}
-	if !source.HasSquareOrUnspecifiedSampleAspectRatio() {
-		return fmt.Errorf("sprite sample aspect ratio %q (display aspect ratio %q) is not supported by the GPU grid", source.SampleAspectRatio, source.DisplayAspectRatio)
-	}
-	return nil
+	return source.ValidateSprite(backend)
 }
 
 // IntelSpriteFrameInfo replaces ffprobe -count_frames for short GPU sprites.

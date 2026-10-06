@@ -154,7 +154,8 @@ func TestGenerationMetadataCanonicalAndIndependentDefaults(t *testing.T) {
 func TestGPUGenerationMetadataUsesHeaderOnlyPolicy(t *testing.T) {
 	for _, kind := range []string{"sprite", "preview"} {
 		t.Run(kind, func(t *testing.T) {
-			mgr, input, argsPath, _ := metadataFixture(t)
+			mgr, input, _ := selectedMetadataFixture(t)
+			argsPath := filepath.Join(filepath.Dir(input), "args")
 			setting := config.SpriteGenerationBackend
 			probe := mgr.generationSpriteVideoFile
 			if kind == "preview" {

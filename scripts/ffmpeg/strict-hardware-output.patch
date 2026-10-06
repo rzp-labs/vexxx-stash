@@ -8,17 +8,18 @@
  #include "libavutil/log.h"
  #include "libavutil/mem.h"
  #include "libavutil/opt.h"
-@@ -58,6 +59,9 @@
+@@ -58,6 +59,10 @@
      enum HWAccelID      hwaccel_id;
      enum AVHWDeviceType hwaccel_device_type;
      enum AVPixelFormat  hwaccel_output_format;
 +    int                hwaccel_strict;
 +    int                hwaccel_metadata;
 +    int                hwaccel_metadata_emitted;
++    int                input_stream_index;
  
      // pts/estimated duration of the last decoded frame
      // * in decoder timebase for video,
-@@ -382,6 +386,50 @@
+@@ -382,6 +387,60 @@
  fail:
      av_frame_free(&output);
      return err;
@@ -28,8 +29,9 @@
 +{
 +    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(frame->format);
 +    const AVHWFramesContext *frames;
++    const AVPixFmtDescriptor *software_desc;
 +    const char *format, *range, *space, *primaries, *transfer;
-+    int written, flushed;
++    int written, flushed, bit_depth = 0;
 +
 +    if (!desc || !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL) ||
 +        !frame->hw_frames_ctx || frame->width <= 0 || frame->height <= 0) {
@@ -38,6 +40,14 @@
 +    }
 +    frames = (const AVHWFramesContext *)frame->hw_frames_ctx->data;
 +    if (frames->format != frame->format)
++        return AVERROR(EINVAL);
++    software_desc = av_pix_fmt_desc_get(frames->sw_format);
++    if (!software_desc || !software_desc->nb_components ||
++        (software_desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
++        return AVERROR(EINVAL);
++    for (int i = 0; i < software_desc->nb_components; i++)
++        bit_depth = FFMAX(bit_depth, software_desc->comp[i].depth);
++    if (bit_depth <= 0)
 +        return AVERROR(EINVAL);
 +    format = av_get_pix_fmt_name(frames->sw_format);
 +    range = av_color_range_name(frame->color_range);
@@ -51,12 +61,13 @@
 +     * Emit after decoder cropping and before filters, once for this decoder. */
 +    flockfile(stdout);
 +    written = fprintf(stdout,
-+        "VEXXX_GPU_METADATA={\"width\":%d,\"height\":%d,"
-+        "\"pix_fmt\":\"%s\",\"sample_aspect_ratio\":\"%d/%d\","
++        "VEXXX_GPU_METADATA={\"stream_index\":%d,\"width\":%d,\"height\":%d,"
++        "\"pix_fmt\":\"%s\",\"bit_depth\":%d,\"is_rgb\":%s,\"sample_aspect_ratio\":\"%d/%d\","
 +        "\"color_range\":\"%s\",\"color_space\":\"%s\","
 +        "\"color_primaries\":\"%s\",\"color_transfer\":\"%s\","
 +        "\"frame_rate\":\"%d/%d\"}\n",
-+        frame->width, frame->height, format,
++        dp->input_stream_index, frame->width, frame->height, format, bit_depth,
++        (software_desc->flags & AV_PIX_FMT_FLAG_RGB) ? "true" : "false",
 +        frame->sample_aspect_ratio.num, frame->sample_aspect_ratio.den,
 +        range, space, primaries, transfer,
 +        dp->dec_ctx->framerate.num, dp->dec_ctx->framerate.den);
@@ -69,7 +80,7 @@
  }
  
  static int video_frame_process(DecoderPriv *dp, AVFrame *frame,
-@@ -447,6 +495,12 @@
+@@ -447,6 +506,12 @@
          }
      }
  
@@ -82,7 +93,20 @@
      if (frame->opaque)
          *outputs_mask = (uintptr_t)frame->opaque;
  
-@@ -1317,11 +1371,20 @@
+@@ -1023,7 +1088,11 @@
+ 
+ finish:
+     dec_thread_uninit(&dt);
+-    avcodec_free_context(&dp->dec_ctx);
++    /* Strict hardware frames can remain queued in filters after decoder EOF.
++     * Retain the codec's hardware context until dec_free(), after scheduler
++     * threads and filter graphs have stopped using those frames. */
++    if (!dp->hwaccel_strict)
++        avcodec_free_context(&dp->dec_ctx);
+ 
+     return ret;
+ }
+@@ -1317,11 +1386,40 @@
      }
  }
  
@@ -95,6 +119,26 @@
 +           (desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
 +}
 +
++static int hwaccel_decoder_check(const DecoderPriv *dp, const AVCodec *codec)
++{
++    const AVCodecHWConfig *config;
++
++    if (!hwaccel_output_required(dp))
++        return 0;
++    for (int i = 0; (config = avcodec_get_hw_config(codec, i)); i++) {
++        if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
++            config->device_type == dp->hwaccel_device_type &&
++            config->pix_fmt == dp->hwaccel_output_format)
++            return 0;
++    }
++    av_log((void *)dp, AV_LOG_ERROR,
++           "Decoder %s has no %s hardware configuration for %s; "
++           "refusing software decoding.\n", codec->name,
++           av_hwdevice_get_type_name(dp->hwaccel_device_type),
++           av_get_pix_fmt_name(dp->hwaccel_output_format));
++    return AVERROR(ENOSYS);
++}
++
  static enum AVPixelFormat get_format(AVCodecContext *s, const enum AVPixelFormat *pix_fmts)
  {
      DecoderPriv  *dp = s->opaque;
@@ -104,9 +148,12 @@
  
      ret = multiview_setup(dp, s);
      if (ret < 0) {
-@@ -1352,8 +1415,17 @@
+@@ -1351,9 +1449,20 @@
+             }
          }
          if (config && config->device_type == dp->hwaccel_device_type) {
++            if (hwaccel_output_required(dp) && *p != dp->hwaccel_output_format)
++                continue;
              dp->hwaccel_pix_fmt = *p;
 +            hw_selected = 1;
              break;
@@ -122,37 +169,21 @@
      }
  
      return *p;
-@@ -1403,6 +1475,24 @@
+@@ -1403,6 +1512,7 @@
      enum AVHWDeviceType type;
      HWDevice *dev = NULL;
      int err, auto_device = 0;
 +
-+    if (hwaccel_output_required(dp)) {
-+        for (int i = 0;; i++) {
-+            config = avcodec_get_hw_config(codec, i);
-+            if (!config)
-+                break;
-+            if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
-+                config->device_type == dp->hwaccel_device_type)
-+                break;
-+        }
-+        if (!config) {
-+            av_log(dp, AV_LOG_ERROR,
-+                   "Decoder %s has no %s hardware configuration; "
-+                   "explicit hardware output required.\n",
-+                   codec->name, av_hwdevice_get_type_name(dp->hwaccel_device_type));
-+            return AVERROR(ENOSYS);
-+        }
-+    }
  
      if (hwaccel_device) {
          dev = hw_device_get_by_name(hwaccel_device);
-@@ -1539,6 +1629,23 @@
+@@ -1539,6 +1649,28 @@
      dp->hwaccel_id              = o->hwaccel_id;
      dp->hwaccel_device_type     = o->hwaccel_device_type;
      dp->hwaccel_output_format   = o->hwaccel_output_format;
 +    dp->hwaccel_strict          = o->hwaccel_strict;
 +    dp->hwaccel_metadata        = o->hwaccel_metadata;
++    dp->input_stream_index      = o->input_stream_index;
 +
 +    if (dp->hwaccel_strict < 0 || dp->hwaccel_strict > 1 ||
 +        (dp->hwaccel_strict && !hwaccel_output_required(dp))) {
@@ -168,6 +199,10 @@
 +               "-hwaccel_metadata requires 0 or strict video hardware output.\n");
 +        return AVERROR(EINVAL);
 +    }
++
++    ret = hwaccel_decoder_check(dp, codec);
++    if (ret < 0)
++        return ret;
  
      snprintf(dp->log_name, sizeof(dp->log_name), "dec:%s", codec->name);
  
@@ -182,18 +217,153 @@
      SpecifierOptList hwaccel_devices;
      SpecifierOptList hwaccel_output_formats;
      SpecifierOptList autorotate;
-@@ -456,6 +458,8 @@
+@@ -456,6 +458,9 @@
      enum AVHWDeviceType         hwaccel_device_type;
      char                       *hwaccel_device;
      enum AVPixelFormat          hwaccel_output_format;
 +    int                        hwaccel_strict;
 +    int                        hwaccel_metadata;
++    int                        input_stream_index;
  
      AVRational                  time_base;
  
 --- a/fftools/ffmpeg_demux.c
 +++ b/fftools/ffmpeg_demux.c
-@@ -1367,6 +1367,10 @@
+@@ -1131,66 +1131,98 @@
+ 
+     opts->name = av_strdup(ds->dec_name);
+     if (!opts->name)
+         return AVERROR(ENOMEM);
+ 
+     opts->flags |= IFILTER_FLAG_AUTOROTATE * !!(ds->autorotate) |
+                    IFILTER_FLAG_REINIT     * !!(ds->reinit_filters) |
+                    IFILTER_FLAG_DROPCHANGED* !!(ds->drop_changed);
+ 
+     return 0;
+ }
+ 
++static int decoder_supports_hw_output(const AVCodec *codec,
++                                      enum AVHWDeviceType device_type,
++                                      enum AVPixelFormat output_format)
++{
++    const AVCodecHWConfig *config;
++
++    for (int i = 0; (config = avcodec_get_hw_config(codec, i)); i++) {
++        if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
++            config->device_type == device_type && config->pix_fmt == output_format)
++            return 1;
++    }
++    return 0;
++}
++
+ static int choose_decoder(const OptionsContext *o, void *logctx,
+                           AVFormatContext *s, AVStream *st,
+                           enum HWAccelID hwaccel_id, enum AVHWDeviceType hwaccel_device_type,
++                          int hwaccel_strict, enum AVPixelFormat hwaccel_output_format,
+                           const AVCodec **pcodec)
+ 
+ {
+     const char *codec_name = NULL;
++
++    if (hwaccel_strict) {
++        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(hwaccel_output_format);
++
++        if (hwaccel_strict != 1 || st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO ||
++            hwaccel_id != HWACCEL_GENERIC || hwaccel_device_type == AV_HWDEVICE_TYPE_NONE ||
++            !desc || !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
++            av_log(logctx, AV_LOG_ERROR, "Strict decoder selection requires explicit video hardware output.\n");
++            return AVERROR(EINVAL);
++        }
++    }
+ 
+     opt_match_per_stream_str(logctx, &o->codec_names, s, st, &codec_name);
+     if (codec_name) {
+         int ret = find_codec(NULL, codec_name, st->codecpar->codec_type, 0, pcodec);
+         if (ret < 0)
+             return ret;
+         st->codecpar->codec_id = (*pcodec)->id;
+         if (recast_media && st->codecpar->codec_type != (*pcodec)->type)
+             st->codecpar->codec_type = (*pcodec)->type;
+         return 0;
+     } else {
+         if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+             hwaccel_id == HWACCEL_GENERIC &&
+             hwaccel_device_type != AV_HWDEVICE_TYPE_NONE) {
+             const AVCodec *c;
+             void *i = NULL;
+ 
+             while ((c = av_codec_iterate(&i))) {
+                 const AVCodecHWConfig *config;
+ 
+                 if (c->id != st->codecpar->codec_id ||
+                     !av_codec_is_decoder(c))
+                     continue;
++                if (hwaccel_strict &&
++                    !decoder_supports_hw_output(c, hwaccel_device_type, hwaccel_output_format))
++                    continue;
+ 
+                 for (int j = 0; config = avcodec_get_hw_config(c, j); j++) {
+                     if (config->device_type == hwaccel_device_type) {
+                         av_log(logctx, AV_LOG_VERBOSE, "Selecting decoder '%s' because of requested hwaccel method %s\n",
+                                c->name, av_hwdevice_get_type_name(hwaccel_device_type));
+                         *pcodec = c;
+                         return 0;
+                     }
+                 }
+             }
+         }
+ 
++        /* Discovery includes unselected video streams. Keep their descriptor;
++         * strict validation rejects a selected incompatible decoder in dec_open,
++         * before allocating or opening its codec context. */
+         *pcodec = avcodec_find_decoder(st->codecpar->codec_id);
+         return 0;
+     }
+ }
+ 
+ static int guess_input_channel_layout(InputStream *ist, AVCodecParameters *par,
+                                       int guess_layout_max)
+ {
+     if (par->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC) {
+         char layout_name[256];
+ 
+         if (par->ch_layout.nb_channels > guess_layout_max)
+@@ -1306,24 +1338,25 @@
+     ds  = demux_stream_alloc(d, st);
+     if (!ds)
+         return AVERROR(ENOMEM);
+ 
+     ist = &ds->ist;
+ 
+     ds->discard     = 1;
+     st->discard  = AVDISCARD_ALL;
+     ds->first_dts   = AV_NOPTS_VALUE;
+     ds->next_dts    = AV_NOPTS_VALUE;
+ 
+     ds->dec_opts.time_base = st->time_base;
++    ds->dec_opts.input_stream_index = st->index;
+ 
+     ds->ts_scale = 1.0;
+     opt_match_per_stream_dbl(ist, &o->ts_scale, ic, st, &ds->ts_scale);
+ 
+     ds->autorotate = 1;
+     opt_match_per_stream_int(ist, &o->autorotate, ic, st, &ds->autorotate);
+ 
+     ds->apply_cropping = CROP_ALL;
+     opt_match_per_stream_str(ist, &o->apply_cropping, ic, st, &apply_cropping);
+     if (apply_cropping) {
+         const AVOption opts[] = {
+             { "apply_cropping", NULL, 0, AV_OPT_TYPE_INT,
+@@ -1358,24 +1391,28 @@
+             tag = AV_RL32(buf);
+         }
+ 
+         st->codecpar->codec_tag = tag;
+     }
+ 
+     if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+         ret = add_display_matrix_to_stream(o, ic, ist);
+         if (ret < 0)
              return ret;
  
          opt_match_per_stream_str(ist, &o->hwaccels, ic, st, &hwaccel);
@@ -204,7 +374,53 @@
          opt_match_per_stream_str(ist, &o->hwaccel_output_formats, ic, st,
                                         &hwaccel_output_format);
          if (!hwaccel_output_format && hwaccel && !strcmp(hwaccel, "cuvid")) {
-@@ -2009,6 +2013,17 @@
+             av_log(ist, AV_LOG_WARNING,
+                 "WARNING: defaulting hwaccel_output_format to cuda for compatibility "
+                 "with old commandlines. This behaviour is DEPRECATED and will be removed "
+                 "in the future. Please explicitly set \"-hwaccel_output_format cuda\".\n");
+             ds->dec_opts.hwaccel_output_format = AV_PIX_FMT_CUDA;
+         } else if (!hwaccel_output_format && hwaccel && !strcmp(hwaccel, "qsv")) {
+             av_log(ist, AV_LOG_WARNING,
+                 "WARNING: defaulting hwaccel_output_format to qsv for compatibility "
+                 "with old commandlines. This behaviour is DEPRECATED and will be removed "
+@@ -1426,25 +1463,26 @@
+             }
+         }
+ 
+         opt_match_per_stream_str(ist, &o->hwaccel_devices, ic, st, &hwaccel_device);
+         if (hwaccel_device) {
+             ds->dec_opts.hwaccel_device = av_strdup(hwaccel_device);
+             if (!ds->dec_opts.hwaccel_device)
+                 return AVERROR(ENOMEM);
+         }
+     }
+ 
+     ret = choose_decoder(o, ist, ic, st, ds->dec_opts.hwaccel_id,
+-                         ds->dec_opts.hwaccel_device_type, &ist->dec);
++                         ds->dec_opts.hwaccel_device_type, ds->dec_opts.hwaccel_strict,
++                         ds->dec_opts.hwaccel_output_format, &ist->dec);
+     if (ret < 0)
+         return ret;
+ 
+     if (ist->dec) {
+         ret = filter_codec_opts(o->g->codec_opts, ist->st->codecpar->codec_id,
+                                 ic, st, ist->dec, &ds->decoder_opts, opts_used);
+         if (ret < 0)
+             return ret;
+     }
+ 
+     ds->reinit_filters = -1;
+     opt_match_per_stream_int(ist, &o->reinit_filters, ic, st, &ds->reinit_filters);
+@@ -2000,24 +2038,35 @@
+     ic->subtitle_codec_id  = subtitle_codec_name ? ic->subtitle_codec->id : AV_CODEC_ID_NONE;
+     ic->data_codec_id      = data_codec_name     ? ic->data_codec->id     : AV_CODEC_ID_NONE;
+ 
+     ic->flags |= AVFMT_FLAG_NONBLOCK;
+     if (o->bitexact)
+         ic->flags |= AVFMT_FLAG_BITEXACT;
+     ic->interrupt_callback = int_cb;
+ 
+     if (!av_dict_get(o->g->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
          av_dict_set(&o->g->format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
          scan_all_pmts_set = 1;
      }
@@ -222,6 +438,41 @@
      /* open the input file with generic avformat function */
      err = avformat_open_input(&ic, filename, file_iformat, &o->g->format_opts);
      if (err < 0) {
+         if (err != AVERROR_EXIT)
+             av_log(d, AV_LOG_ERROR,
+                    "Error opening input: %s\n", av_err2str(err));
+         if (err == AVERROR_PROTOCOL_NOT_FOUND)
+             av_log(d, AV_LOG_ERROR, "Did you mean file:%s?\n", filename);
+         return err;
+     }
+     f->ctx = ic;
+ 
+@@ -2029,24 +2078,25 @@
+     if (scan_all_pmts_set)
+         av_dict_set(&o->g->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
+     remove_avoptions(&o->g->format_opts, o->g->codec_opts);
+ 
+     ret = check_avoptions(o->g->format_opts);
+     if (ret < 0)
+         return ret;
+ 
+     /* apply forced codec ids */
+     for (int i = 0; i < ic->nb_streams; i++) {
+         const AVCodec *dummy;
+         ret = choose_decoder(o, f, ic, ic->streams[i], HWACCEL_NONE, AV_HWDEVICE_TYPE_NONE,
++                             0, AV_PIX_FMT_NONE,
+                              &dummy);
+         if (ret < 0)
+             return ret;
+     }
+ 
+     if (o->find_stream_info) {
+         AVDictionary **opts;
+         int orig_nb_streams = ic->nb_streams;
+ 
+         ret = setup_find_stream_info_opts(ic, o->g->codec_opts, &opts);
+         if (ret < 0)
+             return ret;
 --- a/fftools/ffmpeg_opt.c
 +++ b/fftools/ffmpeg_opt.c
 @@ -2005,6 +2005,12 @@
@@ -237,18 +488,3 @@
      { "hwaccel_device",             OPT_TYPE_STRING, OPT_VIDEO | OPT_EXPERT | OPT_PERSTREAM | OPT_INPUT,
          { .off = OFFSET(hwaccel_devices) },
          "select a device for HW acceleration", "devicename" },
---- a/fftools/ffmpeg_dec.c
-+++ b/fftools/ffmpeg_dec.c
-@@ -1023,7 +1023,11 @@
- 
- finish:
-     dec_thread_uninit(&dt);
--    avcodec_free_context(&dp->dec_ctx);
-+    /* Strict hardware frames can remain queued in filters after decoder EOF.
-+     * Retain the codec's hardware context until dec_free(), after scheduler
-+     * threads and filter graphs have stopped using those frames. */
-+    if (!dp->hwaccel_strict)
-+        avcodec_free_context(&dp->dec_ctx);
- 
-     return ret;
- }

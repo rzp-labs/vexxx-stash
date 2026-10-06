@@ -84,25 +84,23 @@ func NewIntelProjectedSpritePlan(config IntelGenerationConfig, source IntelSourc
 }
 
 func newIntelProjectionPlan(config IntelGenerationConfig, source IntelSource, input string, start float64, width int, mode string, jpeg bool) (IntelGenerationPlan, error) {
-	p := IntelGenerationPlan{Config: config, Source: source}
+	p := IntelGenerationPlan{Config: config, Source: source, InputSource: source, RuntimeFingerprint: source.RuntimeFingerprint}
 	if config.Backend != "vaapi" {
 		return p, fmt.Errorf("GPU VR projection requires VAAPI/Vulkan interoperability")
 	}
 	if width <= 0 || width%2 != 0 || math.IsNaN(start) || math.IsInf(start, 0) || start < 0 {
 		return p, fmt.Errorf("invalid GPU projection output width or timestamp")
 	}
-	if IntelSourceHDR(source) && !IntelHDRSourceValid(source) {
-		return p, fmt.Errorf("GPU VR HDR requires HEVC Main10 with explicit PQ/HLG BT.2020 interpretation")
+	if IntelSourceHDR(source) {
+		if err := intelValidateHDRSource(source); err != nil {
+			return p, err
+		}
 	}
-	// libplacebo 7.360 maps these declared color systems/transfers to UNKNOWN.
-	// A resolution-based guess would silently reinterpret known source pixels.
-	switch source.ColorSpace {
-	case "fcc", "smpte2085", "chroma-derived-nc", "chroma-derived-c", "ipt-c2":
-		return p, fmt.Errorf("GPU projection color matrix %q has no supported libplacebo interpretation", source.ColorSpace)
+	if err := intelValidateVulkanColor(source, IntelSourceHDR(source)); err != nil {
+		return p, err
 	}
-	switch source.ColorTransfer {
-	case "log100", "log316":
-		return p, fmt.Errorf("GPU projection transfer %q has no supported libplacebo interpretation", source.ColorTransfer)
+	if err := intelValidateVulkanPrecision(source); err != nil {
+		return p, err
 	}
 	var err error
 	if jpeg {
@@ -112,9 +110,6 @@ func newIntelProjectionPlan(config IntelGenerationConfig, source IntelSource, in
 	}
 	if err != nil {
 		return p, err
-	}
-	if !source.HasSquareOrUnspecifiedSampleAspectRatio() {
-		return p, fmt.Errorf("GPU projection does not support sample aspect ratio %q", source.SampleAspectRatio)
 	}
 	rotation, err := IntelRotationFilter(config, source)
 	if err != nil {
@@ -160,7 +155,13 @@ func newIntelProjectionPlan(config IntelGenerationConfig, source IntelSource, in
 			{"color_primaries", source.ColorPrimaries}, {"color_trc", source.ColorTransfer},
 		} {
 			if tag.value != "" && tag.value != "unknown" && tag.value != "unspecified" {
-				p.Filter += ":" + tag.key + "=" + tag.value
+				value := tag.value
+				if tag.key == "color_trc" && value == "smpte428" {
+					// The pinned filter accepts the mapped AVColorTransfer enum,
+					// but omits its named AVOption constant (unlike primaries).
+					value = "17"
+				}
+				p.Filter += ":" + tag.key + "=" + value
 			}
 		}
 	}

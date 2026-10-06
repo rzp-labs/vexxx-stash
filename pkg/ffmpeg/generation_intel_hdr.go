@@ -18,27 +18,88 @@ func IntelHDRMetadataFilter() string {
 	return strings.Join(filters, ",")
 }
 
-// IntelHDRSourceValid limits the HDR shader path to unambiguous HEVC Main10
-// color interpretation. Decode/filter/encode probes still verify the actual
-// selected device and source; metadata alone never certifies capabilities.
+// IntelHDRSourceValid requires unambiguous HDR color interpretation and a
+// precision-preserving GPU bridge. Codec/profile support is established by the
+// actual decode/filter/encode probes, never by a metadata allowlist.
 func IntelHDRSourceValid(source IntelSource) bool {
-	return source.Codec == "hevc" && source.Profile == "Main 10" && source.PixelFormat == "yuv420p10le" &&
-		IntelSourceHDR(source) && source.ColorPrimaries == "bt2020" &&
-		(source.ColorSpace == "bt2020nc" || source.ColorSpace == "bt2020c") && source.ColorRange == "tv"
+	return intelValidateHDRSource(source) == nil
+}
+
+func intelValidateHDRSource(source IntelSource) error {
+	if !IntelSourceHDR(source) {
+		return fmt.Errorf("GPU HDR requires an explicit PQ or HLG transfer function")
+	}
+	if err := intelValidateVulkanColor(source, true); err != nil {
+		return err
+	}
+	return intelValidateVulkanPrecision(source)
+}
+
+// These are the actual libplacebo 7.360 libav mappings with the packaged
+// FFmpeg 8.1.2 headers. Explicitly unmapped enums cannot authorize a color guess.
+// Unspecified SDR metadata retains the canonical CPU interpretation separately.
+func intelValidateVulkanColor(source IntelSource, requireKnown bool) error {
+	// libplacebo overrides a non-YCbCr matrix on YUV with a resolution guess.
+	// The actual decoded descriptor must authorize RGB interpretation instead.
+	if source.ColorSpace == "gbr" && !source.IsRGB {
+		return fmt.Errorf("GPU Vulkan RGB matrix requires an actual decoded RGB pixel descriptor")
+	}
+	unknown := func(value string) bool { return value == "" || value == "unknown" || value == "unspecified" }
+	for _, field := range []struct {
+		name, value string
+		supported   bool
+	}{
+		{"primaries", source.ColorPrimaries, intelVulkanPrimariesMapped(source.ColorPrimaries)},
+		{"matrix", source.ColorSpace, intelVulkanMatrixMapped(source.ColorSpace)},
+		{"transfer", source.ColorTransfer, intelVulkanTransferMapped(source.ColorTransfer)},
+		{"range", source.ColorRange, source.ColorRange == "tv" || source.ColorRange == "pc" || (!requireKnown && source.ColorRange == "jpeg")},
+	} {
+		if field.supported || (!requireKnown && unknown(field.value)) {
+			continue
+		}
+		return fmt.Errorf("GPU Vulkan %s %q has no unambiguous supported color interpretation", field.name, field.value)
+	}
+	return nil
+}
+
+func intelVulkanPrimariesMapped(value string) bool {
+	switch value {
+	case "bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "film", "bt2020", "smpte428", "smpte431", "smpte432", "ebu3213", "jedec-p22", "vgamut":
+		return true
+	}
+	return false
+}
+
+func intelVulkanMatrixMapped(value string) bool {
+	switch value {
+	case "gbr", "bt709", "bt470bg", "smpte170m", "smpte240m", "ycgco", "bt2020nc", "bt2020c", "ictcp", "ycgco-re", "ycgco-ro":
+		return true
+	}
+	return false
+}
+
+func intelVulkanTransferMapped(value string) bool {
+	switch value {
+	case "bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "linear", "iec61966-2-4", "bt1361e", "iec61966-2-1", "bt2020-10", "bt2020-12", "smpte2084", "smpte428", "arib-std-b67", "vlog":
+		return true
+	}
+	return false
 }
 
 func intelHDRSource(source IntelSource) (IntelSource, error) {
-	if !IntelHDRSourceValid(source) {
-		return source, fmt.Errorf("GPU HDR requires HEVC Main10 4:2:0, explicit PQ/HLG, BT.2020 matrix/primaries and limited range")
+	if err := intelValidateHDRSource(source); err != nil {
+		return source, err
 	}
-	if !source.HasSquareOrUnspecifiedSampleAspectRatio() {
-		return source, fmt.Errorf("GPU HDR requires square sample aspect ratio")
+	if err := source.ValidateSampleAspectRatio(); err != nil {
+		return source, err
 	}
 	output := source
 	output.Width, output.Height = IntelDisplayDimensions(source)
+	output.SampleAspectRatio = IntelOrientedSampleAspectRatio(source)
 	output.Rotation = 0
 	output.DisplayMatrix = nil
 	output.PixelFormat = "nv12"
+	output.BitDepth = 8
 	output.ColorSpace, output.ColorPrimaries, output.ColorTransfer, output.ColorRange = "bt709", "bt709", "bt709", "tv"
 	if output.Width <= 0 || output.Height <= 0 {
 		return output, fmt.Errorf("GPU HDR dimensions are unavailable")
@@ -49,7 +110,7 @@ func intelHDRSource(source IntelSource) (IntelSource, error) {
 // NewIntelHDRPreviewPlan converts HDR to the preview's SDR output with explicit
 // GPU tone/gamut processing, retaining hardware frames through VAAPI encoding.
 func NewIntelHDRPreviewPlan(config IntelGenerationConfig, source IntelSource, input string, start float64, width int) (IntelGenerationPlan, error) {
-	p := IntelGenerationPlan{Config: config, Source: source}
+	p := IntelGenerationPlan{Config: config, Source: source, InputSource: source, RuntimeFingerprint: source.RuntimeFingerprint}
 	if config.Backend != "vaapi" || width <= 0 || width%2 != 0 {
 		return p, fmt.Errorf("GPU HDR preview requires VAAPI and a positive even output width")
 	}
@@ -70,7 +131,7 @@ func NewIntelHDRPreviewPlan(config IntelGenerationConfig, source IntelSource, in
 	if rotation != "" {
 		p.Filter = rotation + ","
 	}
-	p.Filter += fmt.Sprintf("libplacebo=w=%d:h=%d:format=%s:%s,%s,%s,%s,scale_vaapi=w=%d:h=%d:format=nv12:out_color_matrix=bt709:out_range=limited,%s", width, height, IntelVulkanOutputFormat(source), IntelHDRFilterOptions(), IntelVulkanVAAPIReturnFilter(), IntelHDRMetadataFilter(), IntelRGBInterpretationFilter(output), width, height, IntelOutputColorTags(output))
+	p.Filter += fmt.Sprintf("libplacebo=w=%d:h=%d:format=%s:reset_sar=1:fit_mode=fill:%s,%s,%s,%s,scale_vaapi=w=%d:h=%d:format=nv12:out_color_matrix=bt709:out_range=limited,%s", width, height, IntelVulkanOutputFormat(source), IntelHDRFilterOptions(), IntelVulkanVAAPIReturnFilter(), IntelHDRMetadataFilter(), IntelRGBInterpretationFilter(output), width, height, IntelOutputColorTags(output))
 	if sar := IntelPreviewSARFilter(output, width); sar != "" {
 		p.Filter += "," + sar
 	}
@@ -81,7 +142,7 @@ func NewIntelHDRPreviewPlan(config IntelGenerationConfig, source IntelSource, in
 // NewIntelHDRSpritePlan retains full display dimensions during tone mapping,
 // then uses the same staged GPU SDR reduction and JPEG conversion as sprites.
 func NewIntelHDRSpritePlan(config IntelGenerationConfig, source IntelSource, input string, start float64, width int) (IntelGenerationPlan, error) {
-	p := IntelGenerationPlan{Config: config, Source: source}
+	p := IntelGenerationPlan{Config: config, Source: source, InputSource: source, RuntimeFingerprint: source.RuntimeFingerprint}
 	if config.Backend != "vaapi" || width <= 0 || width%2 != 0 {
 		return p, fmt.Errorf("GPU HDR JPEG requires VAAPI and a positive even output width")
 	}
@@ -103,7 +164,7 @@ func NewIntelHDRSpritePlan(config IntelGenerationConfig, source IntelSource, inp
 	}
 	rgb := output
 	rgb.ColorRange = "pc"
-	p.Filter += fmt.Sprintf("libplacebo=w=%d:h=%d:format=%s:%s,%s,%s,%s,%s", output.Width, output.Height, IntelVulkanOutputFormat(source), IntelHDRFilterOptions(), IntelVulkanVAAPIReturnFilter(), IntelHDRMetadataFilter(), IntelRGBInterpretationFilter(output), IntelSpriteScaleFilter(config, rgb, width))
+	p.Filter += fmt.Sprintf("libplacebo=w=%d:h=%d:format=%s:reset_sar=1:fit_mode=fill:%s,%s,%s,%s,%s", output.Width, output.Height, IntelVulkanOutputFormat(source), IntelHDRFilterOptions(), IntelVulkanVAAPIReturnFilter(), IntelHDRMetadataFilter(), IntelRGBInterpretationFilter(output), IntelSpriteScaleFilter(config, rgb, width))
 	p.Probes = intelHDRProbes(p, input, start, true)
 	return p, nil
 }

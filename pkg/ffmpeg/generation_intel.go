@@ -1,7 +1,7 @@
 package ffmpeg
 
 // Intel generation is deliberately independent of playback and native generation.
-// It is opt-in and accepts only the conservative 8-bit SDR candidate formats.
+// It is opt-in; actual source decode/filter/encode probes establish support.
 // Hardware and visual acceptance are measured separately on each GPU.
 import (
 	"context"
@@ -24,12 +24,18 @@ type IntelGenerationConfig struct {
 type IntelSource struct {
 	Profile                                                                   string
 	Codec, PixelFormat, ColorTransfer, ColorPrimaries, ColorSpace, ColorRange string
-	Width, Height, Rotation, StreamIndex                                      int
+	Width, Height, Rotation, StreamIndex, BitDepth                            int
+	IsRGB                                                                     bool // Actual decoded software descriptor, before GPU color conversion.
 	// DisplayMatrix preserves reflections which the scalar rotation cannot express.
 	DisplayMatrix                                                                *[9]int32
 	FrameRate, AverageFrameRate, Duration, SampleAspectRatio, DisplayAspectRatio string
 	// StartTime is the demuxer timestamp origin used by relative input seeks.
 	StartTime string
+	// Header candidates are retained until FFmpeg's actual automatic stream
+	// selection identifies the hardware frame. They never determine support.
+	MetadataCandidates []IntelSource
+	MetadataError      error
+	RuntimeFingerprint string
 }
 
 type IntelGenerationDiagnostic struct {
@@ -48,6 +54,9 @@ type IntelGenerationPlan struct {
 	InputArgs Args
 	Filter    string
 	Probes    []IntelProbeStep
+	// Preserve physical input geometry when HDR/VR plans change Source.
+	InputSource        IntelSource
+	RuntimeFingerprint string
 }
 
 func (c IntelGenerationConfig) Enabled() bool { return c.Backend != "" && c.Backend != "software" }
@@ -82,11 +91,8 @@ func ValidateIntelDevice(device string) error {
 }
 
 func (s IntelSource) Validate() error {
-	if s.Codec != "h264" && s.Codec != "hevc" {
-		return fmt.Errorf("unsupported input codec %q", s.Codec)
-	}
-	if s.PixelFormat != "yuv420p" && s.PixelFormat != "nv12" {
-		return fmt.Errorf("input pixel format %q requires software generation (only 8-bit 4:2:0 validated)", s.PixelFormat)
+	if s.Codec == "" || s.PixelFormat == "" {
+		return fmt.Errorf("input codec and actual pixel format are required")
 	}
 	if s.Width <= 0 || s.Height <= 0 {
 		return fmt.Errorf("input dimensions unavailable")
@@ -94,10 +100,10 @@ func (s IntelSource) Validate() error {
 	if _, err := intelRotationDegrees(s); err != nil {
 		return err
 	}
-	if s.ColorTransfer == "smpte2084" || s.ColorTransfer == "arib-std-b67" || strings.HasPrefix(s.ColorPrimaries, "bt2020") || strings.HasPrefix(s.ColorSpace, "bt2020") {
-		return fmt.Errorf("HDR/wide-gamut input requires software generation")
+	if IntelSourceHDR(s) {
+		return fmt.Errorf("HDR input requires an explicit GPU tone mapping plan")
 	}
-	return nil
+	return s.ValidateSampleAspectRatio()
 }
 
 // IntelScaleFilter uses concrete dimensions to avoid QSV's differing negative
@@ -123,7 +129,7 @@ func IntelInputArgs(config IntelGenerationConfig, source IntelSource) Args {
 		args = append(args, "-noautorotate", "-display_rotation", "0")
 	}
 	if config.Backend == "qsv" {
-		args = append(args, "-init_hw_device", "qsv=vexq@vex", "-filter_hw_device", "vexq", "-hwaccel", "qsv", "-hwaccel_device", "vexq", "-hwaccel_output_format", "qsv", "-c:v", source.Codec+"_qsv")
+		args = append(args, "-init_hw_device", "qsv=vexq@vex", "-filter_hw_device", "vexq", "-hwaccel", "qsv", "-hwaccel_device", "vexq", "-hwaccel_output_format", "qsv")
 	} else {
 		args = append(args, "-filter_hw_device", "vex", "-hwaccel", "vaapi", "-hwaccel_device", "vex", "-hwaccel_output_format", "vaapi")
 	}
@@ -137,7 +143,7 @@ func IntelInputArgs(config IntelGenerationConfig, source IntelSource) Args {
 // and source encode probes. No encoders-list result is treated as capability.
 // Device checking is deferred to RunIntelGeneration to keep construction pure.
 func NewIntelGenerationPlan(config IntelGenerationConfig, source IntelSource, input string, start float64, width int, download bool) (IntelGenerationPlan, error) {
-	p := IntelGenerationPlan{Config: config, Source: source}
+	p := IntelGenerationPlan{Config: config, Source: source, InputSource: source, RuntimeFingerprint: source.RuntimeFingerprint}
 	if config.Backend != "vaapi" && config.Backend != "qsv" {
 		return p, fmt.Errorf("unsupported Intel generation backend %q", config.Backend)
 	}
