@@ -6,13 +6,40 @@ available only when explicitly selected. Device, source, filter and encoder
 failures return errors through the sprite task and GenerateJob; they preserve
 existing assets instead of starting a software retry.
 
-One hardware decoder reads independently sought ffconcat segments. The demuxer
-timestamp origin is included in each inpoint, preroll is excluded, and frame
+Timestamp sheets partition independently sought ffconcat segments across up to
+`min(total processes, GPU processes, tile count)` hardware decoder inputs. One
+FFmpeg process owns the inputs and final GPU composition. After probes finish,
+the render leaf atomically reserves the currently available total/GPU capacity,
+then constructs its seek partitions and command for that admitted count. At the
+FIFO head it waits only when no slot is available. A long-running one-slot preview therefore allows
+a twelve-slot sheet to start with eleven decoders rather than leave eleven slots
+idle while waiting for all twelve. The FIFO scheduler preserves shared configured
+ceilings; cancellation drains the child before releasing the actual reservation.
+There is no additional decoder cap. Each input preserves a
+contiguous portion of the canonical tile order. The demuxer timestamp origin is
+included in each inpoint, preroll is excluded, and frame
 selection uses timestamps without touching pixels. Each requested timestamp
 selects its first eligible frame within the following second; an absent frame
 fails rather than substituting another tile. Short clips use an actual GPU
 decoded-frame count and the canonical rounded frame indices, including repeated
-indices. Unknown timestamp origins and unsupported sources fail explicitly.
+indices, in one sequential decode rather than repeating a short clip across
+independent time seeks. Unknown timestamp origins and unsupported sources fail
+explicitly.
+
+The shipped PR29 implementation used one concat decoder for all timestamp tiles,
+bypassing configured tile concurrency. [VEX46](https://linear.app/rzp-labs/issue/VEX-46/restore-configured-parallelism-in-gpu-resident-sprite-generation)
+tracks that throughput regression and the missing production-entry coverage.
+Deterministic tests now call the public `IntelSpriteSheet` entry using an observed,
+blocked FFmpeg subprocess fixture. They check configured input count, exact seek
+partition order, shared weighted admission across sheets, strict GPU commands,
+failure/cancellation cleanup, preserved assets and permit reuse. These tests
+substitute physical-device/capability validation only; they do not claim to prove
+GPU execution. Held-preview and mixed CPU/GPU contention regressions also verify
+available-capacity admission, waiting cancellation and adaptive reservation reuse.
+A separate real FFmpeg pixel control checks the multi-input
+timestamp graph, including duplicated timestamps and nonzero source origins.
+The full 81-tile B580 comparison at limits 1 versus 12 is recorded below; the
+historical measurements cover separate cases.
 
 VAAPI HQ scaling reduces large sources in stages of approximately two before
 producing the concrete 160-pixel, even-height tile. A hardware RGB intermediate
@@ -44,6 +71,65 @@ CPU pixel transfer or encoding. See the
 [FFmpeg encoder](https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1.2/libavcodec/vaapi_encode_mjpeg.c).
 
 ## B580 checks
+
+### VEX46 configured decoder concurrency
+
+The bounded comparison used the shipped runtime image digest `59d3f14935ee`,
+FFmpeg 8.1.2, iHD 26.2.1 and B580 renderD128. The same read-only 8192×4096
+HEVC Main10 SDR source had a 3465.078283-second span, no stored VR projection,
+start zero and 81 canonical seeks. Shipped and candidate lab binaries used
+identical sampling, thread count one, strict decoding and JPEG quality 95.
+Disposable containers had no network, four CPU cores, 6 GiB RAM and 256 PIDs.
+Each case was bounded to 120 seconds; the aggregate, including two earlier
+pre-render recipe/idle refusals and cleanup, was 187.153 seconds of the approved
+300 seconds. The first refusal encountered an active production FFmpeg child;
+the second rejected an empty VR option before launching a media command. Neither
+rendered media. Corrected recipes received independent review before the run.
+
+| Renderer / configured total and GPU slots | Wall seconds | Media-process CPU seconds | Sampled group RSS bytes | Active VAAPI decoder contexts |
+| --- | ---: | ---: | ---: | ---: |
+| Shipped PR29 / 12 | 73.969 | 39.785 | 311734272 | 1 |
+| Candidate / 1 | 73.542 | 38.936 | 310136832 | 1 |
+| Candidate / 12 | 30.606 | 47.442 | 2580369408 | 12 |
+
+The candidate at 12 slots was 2.417 times faster than the shipped renderer under
+these identical bounded, instrumented conditions. Debug reporting and resource
+limits mean these wall times are not a prediction for unrestricted production.
+This hardware run preceded the review-driven adaptive admission correction.
+That correction preserves the same uncontended twelve-input graph, runtime and
+JPEG policy; deterministic production-entry tests cover its contended admission.
+The adaptive policy was not separately exercised on hardware. The configurable
+maximum of 64 is a scheduler setting, not a hardware memory-envelope claim;
+hardware resource evidence here stops at twelve inputs.
+CPU orchestration time and memory increased; this is not a CPU-load reduction.
+Candidate peak container memory was 2669125632 bytes and peak PID count was 37.
+Memory, OOM and PID event deltas were zero. Six CPU quota throttles totaled
+144757 microseconds, within the four-core limit. Every case reacquired its full
+budget and completed cleanup without forced benchmark process-group cleanup.
+
+The unchanged receive-frame observer positively detected 89 software frames and
+zero hardware frames in a separate three-cell CPU control. Every GPU generation
+had zero software frames; shipped/candidate-one observed 7026 hardware frames
+each and candidate-twelve observed 6432. The matched main FFmpeg debug report
+showed 1/1/12 independent VAAPI decoder contexts receiving frames, with 6259
+context switches in the twelve-input case. This establishes interleaved active
+hardware decoders, not simultaneous physical GPU-engine execution. Strict input
+flags, the resident filter graph and `mjpeg_vaapi` remain independently checked.
+
+All 81 decoded JPEG cells were exactly equal between shipped, candidate-one and
+candidate-twelve; their canonical VTT bytes were also equal. Decoded identity is
+an observed regression check, not a compressed-byte acceptance requirement.
+Offline inspection confirmed content, ordering, geometry, color and detail.
+The independent CPU controls at cells 0, 40 and 80 retain the previously observed
+ordinary 8K BMP dark/green bias described below: RGB MAE 0.995/15.656/15.468 and
+PSNR 35.239/22.356/22.496 dB. No numerical gate was invented or lowered. Hardware
+cancellation was not repeated for this increment; public-entry tests cover
+cancellation, preserved assets, child cleanup and weighted permit reuse.
+These observations cover this source and concurrency comparison, not sustained
+library throughput or every hardware/format combination. Private media paths,
+decoded images and task debug artifacts stay outside the public PR.
+
+### Earlier format and pixel controls
 
 Isolated checks used FFmpeg 8.1.2, iHD 26.2.1 and Intel B580 renderD128, read-only
 media and temporary outputs. No production settings or generated assets changed.

@@ -49,6 +49,8 @@ const (
 
 type waiter struct {
 	class   Class
+	slots   int
+	upTo    bool
 	ready   chan struct{}
 	granted bool
 }
@@ -77,19 +79,45 @@ func (b *Budget) Settings() Settings { return b.settings }
 // and must be deferred immediately, covering success, failure and cancellation.
 // A nil budget preserves the legacy unbounded admission behavior.
 func (b *Budget) Acquire(ctx context.Context, class Class) (func(), error) {
+	return b.AcquireN(ctx, class, 1)
+}
+
+// AcquireN atomically reserves slots for independent stages sharing a subprocess,
+// such as parallel hardware decoders in one resident sprite render. A stage never
+// holds a partial reservation while waiting for the rest of its slots.
+func (b *Budget) AcquireN(ctx context.Context, class Class, slots int) (func(), error) {
+	_, release, err := b.acquire(ctx, class, slots, false)
+	return release, err
+}
+
+// AcquireUpTo reserves between one and maxSlots in a single admission. At the
+// head of the FIFO queue it takes the currently available capacity, allowing an
+// adaptive stage to start alongside existing work rather than wait for every
+// requested slot. The returned count remains fixed until release.
+func (b *Budget) AcquireUpTo(ctx context.Context, class Class, maxSlots int) (int, func(), error) {
+	return b.acquire(ctx, class, maxSlots, true)
+}
+
+func (b *Budget) acquire(ctx context.Context, class Class, slots int, upTo bool) (int, func(), error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if b == nil {
-		return func() {}, nil
+		return 0, nil, err
 	}
 	if class != CPU && class != GPU {
-		return nil, errors.New("invalid generation budget class")
+		return 0, nil, errors.New("invalid generation budget class")
+	}
+	if slots < 1 {
+		return 0, nil, errors.New("generation budget reservation must request at least one slot")
+	}
+	if b == nil {
+		return slots, func() {}, nil
+	}
+	if slots > b.settings.MaxProcesses || (class == GPU && slots > b.settings.MaxGPUProcesses) {
+		return 0, nil, errors.New("generation budget reservation exceeds configured limits")
 	}
 	if ctx.Value(scopeKey{}) == b {
-		return nil, errors.New("nested generation budget acquisition; acquire only at leaf stages")
+		return 0, nil, errors.New("nested generation budget acquisition; acquire only at leaf stages")
 	}
-	w := &waiter{class: class, ready: make(chan struct{})}
+	w := &waiter{class: class, slots: slots, upTo: upTo, ready: make(chan struct{})}
 	b.mu.Lock()
 	b.queue = append(b.queue, w)
 	b.dispatch()
@@ -106,46 +134,55 @@ func (b *Budget) Acquire(ctx context.Context, class Class) (func(), error) {
 				}
 			}
 		} else {
-			b.finish(class)
+			b.finish(class, w.slots)
 		}
 		b.dispatch()
 		b.mu.Unlock()
-		return nil, ctx.Err()
+		return 0, nil, ctx.Err()
 	}
+	// Closing ready synchronizes the granted count written by dispatch.
+	granted := w.slots
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
-			b.finish(class)
+			b.finish(class, granted)
 			b.dispatch()
 		})
 	}
 	// Cancellation racing with admission must not launch an already cancelled job.
 	if err := ctx.Err(); err != nil {
 		release()
-		return nil, err
+		return 0, nil, err
 	}
-	return release, nil
+	return granted, release, nil
 }
 
-func (b *Budget) finish(class Class) {
-	b.active--
+func (b *Budget) finish(class Class, slots int) {
+	b.active -= slots
 	if class == GPU {
-		b.gpuActive--
+		b.gpuActive -= slots
 	}
 }
 
 func (b *Budget) dispatch() {
 	for len(b.queue) > 0 {
 		w := b.queue[0]
-		if b.active >= b.settings.MaxProcesses || (w.class == GPU && b.gpuActive >= b.settings.MaxGPUProcesses) {
+		available := b.settings.MaxProcesses - b.active
+		if w.class == GPU {
+			available = min(available, b.settings.MaxGPUProcesses-b.gpuActive)
+		}
+		if available < 1 || (!w.upTo && w.slots > available) {
 			return
 		}
+		if w.upTo {
+			w.slots = min(w.slots, available)
+		}
 		b.queue = b.queue[1:]
-		b.active++
+		b.active += w.slots
 		if w.class == GPU {
-			b.gpuActive++
+			b.gpuActive += w.slots
 		}
 		w.granted = true
 		close(w.ready)

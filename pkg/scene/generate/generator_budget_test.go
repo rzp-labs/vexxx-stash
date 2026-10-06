@@ -92,6 +92,76 @@ func TestGeneratorHardwareAdmissionUsesGPULimit(t *testing.T) {
 	}
 }
 
+func TestGeneratorWeightedHardwareAdmission(t *testing.T) {
+	budget, err := generationbudget.New(generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: 3, Threads: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := Generator{Budget: budget}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	args := []string{"-hwaccel", "vaapi", "-i", "in0.mp4", "-hwaccel", "vaapi", "-i", "in1.mp4", "-hwaccel", "vaapi", "-i", "in2.mp4", "out.jpg"}
+	bounded, weighted, err := g.acquireGenerationN(ctx, args, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer weighted()
+	inputs := 0
+	for i, arg := range bounded {
+		if arg == "-i" {
+			inputs++
+			if i < 2 || bounded[i-2] != "-threads" || bounded[i-1] != "2" {
+				t.Fatalf("input threads not bounded: %v", bounded)
+			}
+		}
+	}
+	if inputs != 3 || bounded[len(bounded)-3] != "-threads" || bounded[len(bounded)-2] != "2" {
+		t.Fatalf("weighted render threading changed: %v", bounded)
+	}
+	// The weighted render exhausts GPU slots, while one CPU slot remains free.
+	wait, stop := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer stop()
+	if _, release, err := g.acquireGeneration(wait, []string{"-hwaccel", "vaapi", "-i", "probe.mp4", "-f", "null", "-"}); !errors.Is(err, context.DeadlineExceeded) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("single GPU probe bypassed weighted reservation: %v", err)
+	}
+	_, cpu, err := g.acquireGeneration(ctx, []string{"-c:v", "libx264", "out.mp4"})
+	if err != nil {
+		t.Fatal("remaining CPU slot unavailable", err)
+	}
+	cpu()
+	weighted()
+	_, release, err := g.acquireGenerationN(ctx, args, 3)
+	if err != nil {
+		t.Fatal("weighted reservation leaked", err)
+	}
+	release()
+}
+
+func TestGeneratorWeightedFailureReleasesPermits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix command fixtures")
+	}
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 3, MaxGPUProcesses: 3})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, path := range []string{filepath.Join(t.TempDir(), "missing-ffmpeg"), "/usr/bin/false"} {
+		g := Generator{Budget: budget, Encoder: ffmpeg.NewEncoder(path)}
+		lock := fsutil.NewReadLockManager().ReadLock(ctx, "synthetic.mp4")
+		if err := g.generateWithContextN(ctx, lock, []string{"-hwaccel", "vaapi", "out.jpg"}, 3); err == nil {
+			t.Fatal("expected execution failure")
+		}
+		lock.Cancel()
+		release, err := budget.AcquireN(ctx, generationbudget.GPU, 3)
+		if err != nil {
+			t.Fatal("failed process leaked weighted reservation", err)
+		}
+		release()
+	}
+}
+
 func TestGeneratorFailureReleasesPermit(t *testing.T) {
 	budget, _ := generationbudget.New(generationbudget.Settings{})
 	for _, path := range []string{filepath.Join(t.TempDir(), "missing-ffmpeg"), "/usr/bin/false"} {
@@ -129,13 +199,13 @@ func TestGeneratorActiveCancellationReleasesPermit(t *testing.T) {
 	if err := os.WriteFile(fixture, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	budget, _ := generationbudget.New(generationbudget.Settings{})
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 3, MaxGPUProcesses: 3})
 	g := Generator{Budget: budget, Encoder: ffmpeg.NewEncoder(fixture)}
 	ctx, cancel := context.WithCancel(context.Background())
 	lock := fsutil.NewReadLockManager().ReadLock(ctx, "synthetic.mp4")
 	defer lock.Cancel()
 	done := make(chan error, 1)
-	go func() { done <- g.generate(lock, []string{"out.mp4"}) }()
+	go func() { done <- g.generateWithContextN(ctx, lock, []string{"-hwaccel", "vaapi", "out.jpg"}, 3) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(started); err == nil {
@@ -158,7 +228,7 @@ func TestGeneratorActiveCancellationReleasesPermit(t *testing.T) {
 	}
 	fallbackCtx, stop := context.WithTimeout(context.Background(), time.Second)
 	defer stop()
-	release, err := budget.Acquire(fallbackCtx, generationbudget.CPU)
+	release, err := budget.AcquireN(fallbackCtx, generationbudget.GPU, 3)
 	if err != nil {
 		t.Fatal("cancelled process leaked permit", err)
 	}

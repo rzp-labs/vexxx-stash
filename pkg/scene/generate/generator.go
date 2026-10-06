@@ -60,6 +60,8 @@ type Generator struct {
 	IntelMarker      *ffmpeg.IntelGenerationConfig
 	IntelSprites     *ffmpeg.IntelGenerationConfig
 	IntelDiagnostic  func(ffmpeg.IntelGenerationDiagnostic)
+	// Tests can substitute capability/device work; nil retains runtime validation.
+	intelSpriteWork func(context.Context, ffmpeg.IntelGenerationPlan, func(context.Context) error, func(context.Context) error, ffmpeg.IntelGenerationRunner) (ffmpeg.IntelGenerationDiagnostic, error)
 	// Budget optionally overrides the application's shared generation budget.
 	Budget       *generationbudget.Budget
 	FFMpegConfig FFMpegConfig
@@ -101,8 +103,12 @@ func (g Generator) WithIntelGenerationBudget() Generator {
 // acquireGeneration reserves only a subprocess stage, never a parent scene
 // task. Hardware attempts release their permits before a software fallback.
 func (g Generator) acquireGeneration(ctx context.Context, args []string) ([]string, func(), error) {
+	return g.acquireGenerationN(ctx, args, 1)
+}
+
+func (g Generator) acquireGenerationN(ctx context.Context, args []string, slots int) ([]string, func(), error) {
 	budget := g.generationBudget()
-	release, err := budget.Acquire(ctx, generationbudget.ClassifyFFMpeg(args))
+	release, err := budget.AcquireN(ctx, generationbudget.ClassifyFFMpeg(args), slots)
 	if err != nil {
 		return nil, nil, fmt.Errorf("waiting for generation budget: %w", err)
 	}
@@ -184,11 +190,24 @@ func (g Generator) generate(lockCtx *fsutil.LockContext, args []string) error {
 // The execution context can carry a probe timeout while command ownership stays
 // on the registered source lock used by scene deletion.
 func (g Generator) generateWithContext(ctx context.Context, lockCtx *fsutil.LockContext, args []string) error {
-	args, release, err := g.acquireGeneration(ctx, args)
+	return g.generateWithContextN(ctx, lockCtx, args, 1)
+}
+
+// Independent hardware inputs share command ownership and cancellation, while
+// each decoder consumes a slot in the shared generation budget.
+func (g Generator) generateWithContextN(ctx context.Context, lockCtx *fsutil.LockContext, args []string, slots int) error {
+	args, release, err := g.acquireGenerationN(ctx, args, slots)
 	if err != nil {
 		return err
 	}
 	defer release()
+	return g.generateAdmittedWithContext(ctx, lockCtx, args)
+}
+
+// The caller owns admission for this command and releases it only after the
+// registered child drains. Adaptive sprite admission uses this same execution
+// path after choosing its decoder count under the shared budget lock.
+func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsutil.LockContext, args []string) error {
 	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(ctx)
 	defer cancel()
 	cmd := g.Encoder.Command(execCtx, args)
