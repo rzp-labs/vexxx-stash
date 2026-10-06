@@ -172,7 +172,7 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 		if g.IntelDiagnostic != nil {
 			g.IntelDiagnostic(d)
 		}
-		return fmt.Errorf("GPU marker preview %s: %w", stage, err)
+		return ffmpeg.WithIntelGenerationDiagnostic(fmt.Errorf("GPU marker preview %s: %w", stage, err), d, ffmpeg.IntelSource{})
 	}
 	if g.IntelMarker.Backend == "qsv" {
 		return reject("quality", fmt.Errorf("QSV marker quality mapping has not passed representative visual acceptance; explicitly select VAAPI or software generation"))
@@ -356,7 +356,7 @@ func (g Generator) generateIntelMarkerScreenshot(lockCtx *fsutil.LockContext, in
 		if g.IntelDiagnostic != nil {
 			g.IntelDiagnostic(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelMarker.Backend, Actual: "none", Stage: stage, Reason: reason.Error()})
 		}
-		return fmt.Errorf("GPU marker screenshot %s: %w", stage, reason)
+		return ffmpeg.WithIntelGenerationDiagnostic(fmt.Errorf("GPU marker screenshot %s: %w", stage, reason), ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelMarker.Backend, Actual: "none", Stage: stage}, ffmpeg.IntelSource{})
 	}
 	if math.IsNaN(options.Seconds) || math.IsInf(options.Seconds, 0) || options.Seconds < 0 {
 		return reject("eligibility", fmt.Errorf("marker screenshot requires a finite nonnegative start"))

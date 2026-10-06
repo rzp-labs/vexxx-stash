@@ -241,6 +241,7 @@ func TestMarkerDirectoryFailureStopsBeforeEncoding(t *testing.T) {
 }
 
 func TestMarkerCancellationDrainsAndAllowsNextJob(t *testing.T) {
+	received := generationTelemetryReceiver(t)
 	task, started, block := markerTaskFixture(t, "software", "/dev/dri/renderD128")
 	if err := os.WriteFile(block, []byte("block"), 0600); err != nil {
 		t.Fatal(err)
@@ -264,6 +265,9 @@ func TestMarkerCancellationDrainsAndAllowsNextJob(t *testing.T) {
 	if result.Status != job.StatusCancelled || result.Error != nil {
 		t.Fatalf("explicit cancellation reported as failure: %+v", result)
 	}
+	if events := received(); len(events) != 0 {
+		t.Fatalf("cancellation emitted failure exceptions: %+v", events)
+	}
 	assertMarkerTempEmpty(t)
 	if err := os.Remove(block); err != nil {
 		t.Fatal(err)
@@ -272,6 +276,9 @@ func TestMarkerCancellationDrainsAndAllowsNextJob(t *testing.T) {
 	result = waitMarkerJob(t, m, id)
 	if result.Status != job.StatusFinished || result.Error != nil {
 		t.Fatalf("post-cancellation generation failed: %+v", result)
+	}
+	if events := received(); len(events) != 0 {
+		t.Fatalf("successful generation emitted failure exceptions: %+v", events)
 	}
 }
 

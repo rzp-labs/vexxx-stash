@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   sanitizeTelemetry,
   telemetryConfig,
@@ -20,6 +20,48 @@ const event = (name: string, properties: Record<string, unknown> = {}) => ({
 });
 
 describe("private media telemetry", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each(["$pageview", "$identify", "$exception"])(
+    "supplies build-owned app/release metadata for %s",
+    (name) => {
+      vi.stubEnv("VITE_APP_STASH_VERSION", "v0.1.0");
+      vi.stubEnv("VITE_APP_GITHASH", "890c5f1");
+      const sanitized = sanitizeTelemetry(
+        event(name, {
+          $user_id: "42",
+          $set: { user_role: "ADMIN" },
+          $app_namespace: "private namespace",
+          $app_version: "private version",
+          $app_build: "private build",
+          $exception_release: "private release",
+          $exception_release_version: "private revision",
+        })
+      );
+      expect(sanitized?.properties).toMatchObject({
+        $app_namespace: "vexxx-ui",
+        $app_version: "v0.1.0",
+        $app_build: "890c5f1",
+      });
+      expect(sanitized?.properties).not.toHaveProperty("$exception_release");
+      expect(sanitized?.properties).not.toHaveProperty(
+        "$exception_release_version"
+      );
+      expect(JSON.stringify(sanitized)).not.toContain("private");
+    }
+  );
+
+  it("identifies unversioned development builds without using caller metadata", () => {
+    vi.stubEnv("VITE_APP_STASH_VERSION", "");
+    vi.stubEnv("VITE_APP_GITHASH", "");
+    expect(sanitizeTelemetry(event("$exception"))?.properties).toMatchObject({
+      $app_namespace: "vexxx-ui",
+      $app_version: "development",
+      $app_build: "development",
+      app_revision: "development",
+    });
+  });
+
   it("does not require an external service for development", () => {
     vi.stubEnv("VITE_PUBLIC_POSTHOG_PROJECT_TOKEN", "");
     vi.stubEnv("VITE_PUBLIC_POSTHOG_HOST", "");

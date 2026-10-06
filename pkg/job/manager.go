@@ -28,6 +28,10 @@ type Manager struct {
 	updateThrottleLimit time.Duration
 
 	MaxConcurrentJobs int
+
+	// OnPanic observes a recovered worker panic before its stack unwinds. Set it
+	// before submitting jobs. Telemetry must not alter job failure handling.
+	OnPanic func(context.Context, any)
 }
 
 // NewManager initialises and returns a new Manager.
@@ -244,7 +248,7 @@ func (m *Manager) dispatch(ctx context.Context, j *Job) (done chan struct{}) {
 	m.mutex.Unlock()
 
 	// create a cancellable context for the job that is not canceled by the outer context
-	ctx, cancelFunc := context.WithCancel(context.WithoutCancel(ctx))
+	ctx, cancelFunc := context.WithCancel(withCorrelation(context.WithoutCancel(ctx)))
 	j.cancelFunc = cancelFunc
 
 	done = make(chan struct{})
@@ -265,6 +269,16 @@ func (m *Manager) executeJob(ctx context.Context, j *Job, done chan struct{}) {
 			// a panic occurred, log and mark the job as failed
 			logger.Errorf("panic in job %d - %s: %v", j.ID, j.Description, p)
 			logger.Error(string(debug.Stack()))
+			if m.OnPanic != nil {
+				func() {
+					defer func() {
+						if recover() != nil {
+							logger.Error("job panic observer failed")
+						}
+					}()
+					m.OnPanic(ctx, p)
+				}()
+			}
 
 			m.mutex.Lock()
 			defer m.mutex.Unlock()

@@ -41,6 +41,7 @@ func (t *GenerateInteractiveHeatmapSpeedTask) Start(ctx context.Context) error {
 
 	if err != nil {
 		logger.Errorf("error generating heatmap for %s: %s", t.Scene.Path, err.Error())
+		reportGenerationFailure(ctx, err)
 		return nil
 	}
 
@@ -62,6 +63,7 @@ func (t *GenerateInteractiveHeatmapSpeedTask) Start(ctx context.Context) error {
 		return nil
 	}); err != nil && ctx.Err() == nil {
 		logger.Error(err.Error())
+		reportGenerationFailure(ctx, err)
 	}
 	return nil
 }

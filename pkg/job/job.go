@@ -4,7 +4,22 @@ package job
 import (
 	"context"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+type correlationKey struct{}
+
+// Correlation returns the opaque identifier of the executing job. It carries no
+// library identifiers or descriptions and is shared by the job's child tasks.
+func Correlation(ctx context.Context) string {
+	value, _ := ctx.Value(correlationKey{}).(string)
+	return value
+}
+
+func withCorrelation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, correlationKey{}, uuid.NewString())
+}
 
 type JobExecFn func(ctx context.Context, progress *Progress) error
 

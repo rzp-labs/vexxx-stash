@@ -21,7 +21,7 @@ INPUTS = 'f' * 64
 
 
 def fixture():
-    plan = dict(checkout=LANDED, head=LANDED, base=BASE, tree=TREE,
+    plan = dict(release_version='0.1.0', checkout=LANDED, head=LANDED, base=BASE, tree=TREE,
                 backend=True, frontend=True, python=True, publish=False, build_image=True)
     pr = dict(number=42, merged=True, draft=False, merge_commit_sha=LANDED,
               base=dict(ref='master', sha=BASE, repo=dict(full_name=REPO)),
@@ -42,7 +42,7 @@ def fixture():
     proof = dict(schema=1, run=123, attempt=2, pr=42, repository=REPO, checkout=CANDIDATE,
                  parents=[BASE, HEAD], tree=TREE, input_digest=INPUTS, workflow_digest=reuse.digest(WORKFLOW),
                  workflow_sha=CANDIDATE, domains={key: True for key in reuse.DOMAINS},
-                 version='ci-' + CANDIDATE[:12], publish=False, build_image=True,
+                 version='0.1.0-dev+sha.' + CANDIDATE[:12], publish=False, build_image=True,
                  build_date='2026-10-05 18:12:58',
                  materials={ref: '1' * 64 for ref in reuse.bases(Path(reuse.DOCKERFILE).read_text())})
     commit = dict(sha=CANDIDATE, commit=dict(tree=dict(sha=TREE), committer=dict(date='2026-10-05T18:12:58Z')),
@@ -155,7 +155,9 @@ class PackagingReuseTests(unittest.TestCase):
                            ('parents', [HEAD, BASE]), ('tree', HEAD), ('input_digest', '0' * 64),
                            ('workflow_digest', '0' * 64), ('workflow_sha', HEAD),
                            ('domains', dict(backend=True, frontend=True, python=False)),
-                           ('version', 'release'), ('build_date', '2026-10-05 18:12:59'),
+                           ('version', 'release'), ('version', 'ci-' + CANDIDATE[:12]),
+                           ('version', '0.2.0-dev+sha.' + CANDIDATE[:12]),
+                           ('build_date', '2026-10-05 18:12:59'),
                            ('publish', True), ('build_image', False)]:
             data = fixture(); data['proof'][key] = value
             with self.subTest(key=key):
@@ -295,7 +297,7 @@ class PackagingReuseTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 plan = fixture()['plan']
-                plan.update(checkout=CANDIDATE, version='ci-' + CANDIDATE[:12], build_date='2026-10-05 18:12:58')
+                plan.update(checkout=CANDIDATE, version='0.1.0-dev+sha.' + CANDIDATE[:12], build_date='2026-10-05 18:12:58')
                 (root / 'plan').write_text(json.dumps(plan))
                 env = {**os.environ, 'VALIDATION_PLAN_PATH': str(root / 'plan'), 'GITHUB_SHA': CANDIDATE,
                        'PACKAGING_EVIDENCE_PATH': str(root / 'pr-packaging.json'),

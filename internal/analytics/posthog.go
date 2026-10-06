@@ -3,34 +3,27 @@ package analytics
 
 import (
 	"fmt"
-	"os"
 	"time"
-
-	"github.com/stashapp/stash/internal/build"
 
 	"github.com/posthog/posthog-go"
 )
 
 var client posthog.Client
 
-// Initialize creates the one PostHog client for this process. In production,
-// missing configuration leaves analytics disabled without affecting the app.
-// Development builds also remain usable without external analytics configuration.
+// Initialize creates the process-wide client using the browser's bundled public
+// destination, or a complete runtime override. Unconfigured local builds stay usable.
 func Initialize() error {
-	// Supplying both settings is the operator's explicit opt-in. Missing settings
-	// disable telemetry in development as well as production.
-	projectToken := os.Getenv("POSTHOG_PROJECT_TOKEN")
-	host := os.Getenv("POSTHOG_HOST")
+	projectToken, host := posthogDestination()
 	if projectToken == "" || host == "" {
+		client = nil
 		return nil
 	}
 
 	var err error
-	version, revision, _ := build.Version()
 	client, err = posthog.NewWithConfig(projectToken, posthog.Config{
 		Endpoint:               host,
 		ShutdownTimeout:        5 * time.Second,
-		DefaultEventProperties: posthog.NewProperties().Set("app_version", version).Set("app_revision", revision),
+		DefaultEventProperties: ReleaseProperties(),
 	})
 	if err != nil {
 		return fmt.Errorf("create PostHog client: %w", err)

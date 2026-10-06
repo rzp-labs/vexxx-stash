@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+from release_version import development_version, read_version, validate_version
 
 RELEASE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -45,22 +46,27 @@ def affected(paths):
     return any(groups[key] for key in ("backend", "frontend", "python")), groups["build_image"]
 
 
-def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_id="1", attempt="1"):
+def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_id="1", attempt="1", declared_version=None):
     if not SHA.fullmatch(sha) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("invalid source identity")
     local = "vexxx-ci:" + sha
+    declared_version = validate_version(declared_version if declared_version is not None else read_version())
     result = {"run_tests": False, "backend": False, "frontend": False, "python": False,
               "deferred": False, "build_image": False, "publish": False,
-              "local_ref": local, "image_ref": "", "sha_ref": "", "latest_ref": "", "version": "ci-" + sha[:12]}
+              "local_ref": local, "image_ref": "", "sha_ref": "", "latest_ref": "",
+              "release_version": declared_version, "version": development_version(declared_version, sha)}
     if event.get("deleted"):
         return result
     if event_name == "push" and ref_type == "tag":
         # The workflow glob is only a prefilter. This is the exact version gate.
         if not RELEASE.fullmatch(ref_name) or len(ref_name) > 128:
             raise ValueError("release must be exact vMAJOR.MINOR.PATCH without leading zeros or suffixes")
+        if ref_name != "v" + declared_version:
+            raise ValueError("release tag does not match VERSION at the checked-out commit")
         image = "ghcr.io/" + repository.lower()
         result.update(run_tests=True, backend=True, frontend=True, python=True, build_image=True, publish=True,
-                      image_ref=image + ":" + ref_name, sha_ref=image + ":sha-" + sha, version=ref_name)
+                      image_ref=image + ":" + ref_name, sha_ref=image + ":sha-" + sha,
+                      latest_ref=image + ":latest", version=declared_version)
     elif event_name == "workflow_dispatch":
         result.update(run_tests=True, backend=True, frontend=True, python=True, build_image=True)
         inputs = event.get("inputs") or {}
@@ -77,13 +83,16 @@ def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_i
             if ref_type != "branch" or ref_name != "master":
                 raise ValueError("publication requires the controlled master ref")
             label = inputs.get("test_label", "")
-            if not isinstance(label, str) or not 1 <= len(label) <= 32 or not LABEL.fullmatch(label):
-                raise ValueError("test_label must be 1..32 lowercase letters/digits with single internal hyphens")
+            if not isinstance(label, str) or label and (len(label) > 32 or not LABEL.fullmatch(label)):
+                raise ValueError("optional test_label must be <=32 lowercase letters/digits with single internal hyphens")
             if not re.fullmatch(r"[1-9][0-9]{0,19}", run_id) or not re.fullmatch(r"[1-9][0-9]{0,5}", attempt):
                 raise ValueError("invalid workflow run identity")
-            tag = f"{'candidate' if latest else 'test'}-{label}-{run_id}-{attempt}"
+            # Transport identity is separate from the application SemVer.
+            tag = "v" + declared_version if latest else f"test-{sha[:12]}-{run_id}-{attempt}"
             package = "ghcr.io/" + repository.lower() + ("" if latest else "-test")
-            result.update(publish=True, image_ref=package + ":" + tag, version=tag,
+            result.update(publish=True, image_ref=package + ":" + tag,
+                          version=declared_version if latest else result["version"],
+                          sha_ref=package + ":sha-" + sha if latest else "",
                           latest_ref=package + ":latest" if latest else "")
     elif event_name == "pull_request" or (event_name == "push" and ref_type == "branch" and ref_name == "master"):
         groups = obligations(paths)

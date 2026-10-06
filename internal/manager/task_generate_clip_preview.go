@@ -37,6 +37,7 @@ func (t *GenerateClipPreviewTask) Start(ctx context.Context) error {
 	err := encoder.GetPreview(ctx, filePath, prevPath, models.DefaultGthumbWidth)
 	if err != nil {
 		logger.Errorf("getting preview for image %s: %w", filePath, err)
+		reportGenerationFailure(ctx, err)
 		return nil
 	}
 	return nil

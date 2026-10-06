@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/remeh/sizedwaitgroup"
+	"github.com/stashapp/stash/internal/analytics"
 	"github.com/stashapp/stash/internal/desktop"
 	"github.com/stashapp/stash/internal/dlna"
 	"github.com/stashapp/stash/internal/log"
@@ -160,6 +161,9 @@ func formatDuration(t time.Duration) string {
 
 func initJobManager(cfg *config.Config) *job.Manager {
 	ret := job.NewManager()
+	ret.OnPanic = func(ctx context.Context, value any) {
+		analytics.CaptureWorkerPanic(ctx, value, job.Correlation(ctx))
+	}
 
 	// desktop notifications
 	ctx := context.Background()

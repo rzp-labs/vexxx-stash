@@ -4,7 +4,10 @@ import legacy from "@vitejs/plugin-legacy";
 import tsconfigPaths from "vite-tsconfig-paths";
 import viteCompression from "vite-plugin-compression";
 import posthog from "@posthog/rollup-plugin";
-import { uploadsEnabled } from "./scripts/posthog-build-config.mjs";
+import {
+  sourceMapReleaseVersion,
+  uploadsEnabled,
+} from "./scripts/posthog-build-config.mjs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -56,8 +59,7 @@ export default defineConfig(({ command, mode }) => {
         sourcemaps: {
           enabled: true,
           releaseName: "vexxx-ui",
-          releaseVersion:
-            env.VITE_APP_GITHASH || env.GITHUB_SHA || "development",
+          releaseVersion: sourceMapReleaseVersion(env),
           deleteAfterUpload: true,
         },
       }),

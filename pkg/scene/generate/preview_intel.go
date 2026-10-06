@@ -57,7 +57,7 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 				return err
 			}
 			g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: stage, Reason: reason.Error()})
-			return fmt.Errorf("GPU scene preview %s: %w", stage, reason)
+			return ffmpeg.WithIntelGenerationDiagnostic(fmt.Errorf("GPU scene preview %s: %w", stage, reason), ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: stage}, ffmpeg.IntelSource{})
 		}
 		source, err := g.intelSourceMetadata(lockCtx, lockCtx, input, *g.IntelPreviews, true)
 		if err != nil {
