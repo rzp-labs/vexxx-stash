@@ -290,7 +290,6 @@ export const IntelGenerationSettings: React.FC = () => {
             renderField={(value, setValue) => (
               <NumberField
                 min={0}
-                max={64}
                 step={1}
                 value={value ?? 0}
                 onChange={(e) => setValue(Number(e.target.value))}

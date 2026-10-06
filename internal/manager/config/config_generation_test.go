@@ -38,7 +38,7 @@ func TestIntelBudgetDoesNotImplicitlyEnableCPUGeneration(t *testing.T) {
 					c.SetInt(GenerationMaxGPUProcesses, limits.MaxGPUProcesses)
 					c.SetInt(GenerationThreads, limits.Threads)
 					intel := c.GetIntelGenerationBudget()
-					want, _ := limits.Normalize()
+					want := limits.Resolve(generationbudget.DetectResources("/dev/dri/renderD128"))
 					if intel == nil || intel.Settings() != want || intel != c.GetIntelGenerationBudget() {
 						t.Fatal("Intel limits or frozen scheduler lost")
 					}
@@ -66,7 +66,7 @@ func TestGenerationSettingsValidation(t *testing.T) {
 		value any
 	}{
 		{MarkerGenerationBackend, "native"}, {SpriteGenerationBackend, "auto"}, {GenerationDevice, "relative"},
-		{GenerationThreads, -1}, {GenerationThreads, 65}, {GenerationThreads, "unlimited"}, {GenerationThreads, 1.5}, {GenerationMaxGPUProcesses, 2},
+		{GenerationThreads, -1}, {GenerationThreads, "unlimited"}, {GenerationThreads, 1.5},
 		{GenerationDevice, "/dev/dri/renderDwrong"}, {GenerationBudgetEnabled, "auto"},
 		{GenerationBudgetEnabled, 1}, {GenerationBudgetEnabled, "1"}, {GenerationBudgetEnabled, "t"}, {GenerationThreads, 1.0},
 	} {
@@ -89,8 +89,12 @@ func TestGenerationSettingsValidation(t *testing.T) {
 		c.SetInterface(GenerationBudgetEnabled, true)
 		c.SetInterface(GenerationThreads, v)
 		got := c.GetGenerationBudget()
-		if got == nil || got.Settings() != (generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1}) {
-			t.Fatal("conservative automatic settings not applied")
+		threads := 0
+		if v == 1 {
+			threads = 1
+		}
+		if got == nil || got.Settings() != (generationbudget.Settings{Threads: threads}).Resolve(generationbudget.DetectResources("/dev/dri/renderD128")) {
+			t.Fatal("runtime automatic settings not applied")
 		}
 		if got != c.GetGenerationBudget() {
 			t.Fatal("scheduler not shared")

@@ -211,7 +211,7 @@ func TestMixedProcfsReadFailuresAreNotEmptyObservations(t *testing.T) {
 }
 
 func TestMixedPreCancelledDoesNotProbeOrAcquire(t *testing.T) {
-	budget, _ := generationbudget.New(generationbudget.Settings{})
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	g := generate.Generator{Budget: budget} // Nil probe would panic if called.
@@ -227,7 +227,7 @@ func TestMixedPreCancelledDoesNotProbeOrAcquire(t *testing.T) {
 
 func TestMixedVTTValidatesRealGeneratorAndRejectsDrift(t *testing.T) {
 	dir := t.TempDir()
-	budget, _ := generationbudget.New(generationbudget.Settings{})
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
 	g := generate.Generator{Budget: budget, ScenePaths: labScenePaths{dir}, LockManager: fsutil.NewReadLockManager()}
 	images := make([]image.Image, 81)
 	for i := range images {

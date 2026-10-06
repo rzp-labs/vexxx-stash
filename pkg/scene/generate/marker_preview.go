@@ -193,10 +193,13 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 	}
 	diagnostic, err := ffmpeg.RunIntelGenerationWork(lockCtx, plan,
 		func(ctx context.Context) error {
-			if err := runner(ctx, markerIntelArgs(input, output, options, plan)); err != nil {
-				return err
+			hw := g.withGenerationWorkload(plan, "marker-preview")
+			err := hw.generateWithContext(ctx, lockCtx, markerIntelArgs(input, output, options, plan))
+			if err == nil {
+				err = hw.validateIntelMarkerOutput(ctx, output)
 			}
-			return g.validateIntelMarkerOutput(ctx, output)
+			hw.finishCapacityWork(ctx, err)
+			return err
 		}, nil, runner)
 	if g.IntelDiagnostic != nil {
 		g.IntelDiagnostic(diagnostic)
@@ -383,10 +386,13 @@ func (g Generator) generateIntelMarkerScreenshot(lockCtx *fsutil.LockContext, in
 	diagnostic, err := ffmpeg.RunIntelGenerationWork(lockCtx, plan, func(ctx context.Context) error {
 		args := transcoder.IntelSpriteScreenshot(input, options.Seconds, plan)
 		args[len(args)-1] = output
-		if err := runner(ctx, args); err != nil {
-			return err
+		hw := g.withGenerationWorkload(plan, "marker-screenshot")
+		err := hw.generateWithContext(ctx, lockCtx, args)
+		if err == nil {
+			err = hw.validateIntelMarkerOutput(ctx, output)
 		}
-		return g.validateIntelMarkerOutput(ctx, output)
+		hw.finishCapacityWork(ctx, err)
+		return err
 	}, nil, runner)
 	if g.IntelDiagnostic != nil {
 		g.IntelDiagnostic(diagnostic)

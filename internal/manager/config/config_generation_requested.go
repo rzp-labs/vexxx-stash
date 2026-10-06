@@ -12,7 +12,7 @@ import (
 )
 
 // GenerationConfiguration describes persisted requests, not device capability or
-// the actual backend used by an individual job. Zero limits mean conservative auto.
+// the actual backend used by an individual job. Zero limits request runtime Auto sizing.
 type GenerationConfiguration struct {
 	PreviewBackend  string
 	MarkerBackend   string

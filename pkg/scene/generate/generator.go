@@ -53,13 +53,15 @@ type FFMpegConfig interface {
 }
 
 type Generator struct {
-	Encoder          *ffmpeg.FFMpeg
-	Probe            *ffmpeg.FFProbe
-	IntelPreviews    *ffmpeg.IntelGenerationConfig
-	previewIntelPlan *ffmpeg.IntelGenerationPlan
-	IntelMarker      *ffmpeg.IntelGenerationConfig
-	IntelSprites     *ffmpeg.IntelGenerationConfig
-	IntelDiagnostic  func(ffmpeg.IntelGenerationDiagnostic)
+	Encoder             *ffmpeg.FFMpeg
+	Probe               *ffmpeg.FFProbe
+	IntelPreviews       *ffmpeg.IntelGenerationConfig
+	previewIntelPlan    *ffmpeg.IntelGenerationPlan
+	capacityWorkload    *generationbudget.Workload
+	capacityObservation *capacityObservation
+	IntelMarker         *ffmpeg.IntelGenerationConfig
+	IntelSprites        *ffmpeg.IntelGenerationConfig
+	IntelDiagnostic     func(ffmpeg.IntelGenerationDiagnostic)
 	// Tests can substitute capability/device work; nil retains runtime validation.
 	intelSpriteWork func(context.Context, ffmpeg.IntelGenerationPlan, func(context.Context) error, func(context.Context) error, ffmpeg.IntelGenerationRunner) (ffmpeg.IntelGenerationDiagnostic, error)
 	// Budget optionally overrides the application's shared generation budget.
@@ -196,6 +198,9 @@ func (g Generator) generateWithContext(ctx context.Context, lockCtx *fsutil.Lock
 // Independent hardware inputs share command ownership and cancellation, while
 // each decoder consumes a slot in the shared generation budget.
 func (g Generator) generateWithContextN(ctx context.Context, lockCtx *fsutil.LockContext, args []string, slots int) error {
+	if g.capacityWorkload != nil && g.generationBudget() != nil && generationbudget.ClassifyFFMpeg(args) == generationbudget.GPU {
+		return g.generateCapacityWork(ctx, lockCtx, args, slots)
+	}
 	args, release, err := g.acquireGenerationN(ctx, args, slots)
 	if err != nil {
 		return err

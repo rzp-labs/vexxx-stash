@@ -497,13 +497,13 @@
         "generationMaxProcesses": "Total generation processes",
         "generationMaxGPUProcesses": "GPU generation processes",
         "generationThreads": "FFmpeg generation threads",
-        "limits_description": "0 selects conservative auto (1). Valid range is 0–64; GPU processes cannot exceed total processes after auto is resolved.",
+        "limits_description": "0 selects Auto. CPU limits use available execution capacity and memory headroom. GPU limits use runtime capability checks, workload costs and rendering observations, and decrease under resource pressure. Effective values can change while running. Positive values request explicit limits. Explicit GPU processes cannot exceed an explicit total limit.",
         "save": "Save generation settings",
         "rollback": "Select software rollback",
         "invalid_backend": "Choose software or vaapi for scene previews; software, vaapi or qsv for markers and sprites.",
         "invalid_device": "Choose an absolute render device such as /dev/dri/renderD128.",
-        "invalid_limits": "Generation limits must be whole numbers between 0 (auto) and 64.",
-        "invalid_gpu_limit": "GPU processes cannot exceed total processes (auto is 1)."
+        "invalid_limits": "Generation limits must be whole numbers from 0 (Auto) to 2,147,483,647.",
+        "invalid_gpu_limit": "Explicit GPU processes cannot exceed an explicit total process limit."
       },
       "native_generation": "Native Generation",
       "native_generation_enabled": "Generate without ffmpeg",

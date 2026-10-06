@@ -98,9 +98,9 @@ limits mean these wall times are not a prediction for unrestricted production.
 This hardware run preceded the review-driven adaptive admission correction.
 That correction preserves the same uncontended twelve-input graph, runtime and
 JPEG policy; deterministic production-entry tests cover its contended admission.
-The adaptive policy was not separately exercised on hardware. The configurable
-maximum of 64 is a scheduler setting, not a hardware memory-envelope claim;
-hardware resource evidence here stops at twelve inputs.
+The adaptive policy was not separately exercised on hardware. The historical configurable maximum of 64 was a scheduler setting, not a
+hardware memory-envelope claim; [Auto capacity](auto-capacity.md) removes that
+setting ceiling. Hardware resource evidence here stops at twelve inputs.
 CPU orchestration time and memory increased; this is not a CPU-load reduction.
 Candidate peak container memory was 2669125632 bytes and peak PID count was 37.
 Memory, OOM and PID event deltas were zero. Six CPU quota throttles totaled

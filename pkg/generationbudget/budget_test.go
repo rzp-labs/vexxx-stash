@@ -36,10 +36,10 @@ func waitForQueue(t *testing.T, b *Budget, count int) {
 
 func TestSettings(t *testing.T) {
 	s, err := (Settings{}).Normalize()
-	if err != nil || s != (Settings{1, 1, 1}) {
+	if err != nil || s != (Settings{}) {
 		t.Fatalf("auto: %+v, %v", s, err)
 	}
-	for _, s := range []Settings{{MaxProcesses: -1}, {MaxGPUProcesses: -1}, {Threads: -1}, {MaxProcesses: 65}, {MaxGPUProcesses: 65}, {Threads: 65}, {MaxProcesses: 1, MaxGPUProcesses: 2}} {
+	for _, s := range []Settings{{MaxProcesses: -1}, {MaxGPUProcesses: -1}, {Threads: -1}, {MaxProcesses: 1, MaxGPUProcesses: 2}} {
 		if _, err := New(s); err == nil {
 			t.Fatalf("accepted invalid settings %+v", s)
 		}
@@ -613,4 +613,17 @@ func TestFFMpegThreadBoundsAndClassification(t *testing.T) {
 	if !reflect.DeepEqual(disabled.FFMpegArgs(args), args) {
 		t.Fatal("legacy arguments changed")
 	}
+}
+
+func TestExplicitLimitsAbove64ArePreserved(t *testing.T) {
+	request := Settings{256, 128, 96}
+	b, err := New(request)
+	if err != nil || b.Settings() != request {
+		t.Fatalf("arbitrary ceiling retained: %+v %v", b, err)
+	}
+	lanes, release, err := b.AcquireUpTo(context.Background(), GPU, 128)
+	if err != nil || lanes != 128 {
+		t.Fatalf("configured capacity not admitted: %d %v", lanes, err)
+	}
+	release()
 }

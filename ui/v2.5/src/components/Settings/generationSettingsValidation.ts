@@ -17,18 +17,22 @@ export function validateGenerationSettings(input: ConfigGeneralInput) {
   if (!/^\/dev\/dri\/renderD[0-9]+$/.test(input.generationDevice ?? "")) {
     return "config.general.generation.invalid_device";
   }
+  // GraphQL Int is signed32-bit; this is a transport bound, not a generation ceiling.
   const limits = [
     input.generationMaxProcesses,
     input.generationMaxGPUProcesses,
     input.generationThreads,
   ];
   if (
-    limits.some((v) => v == null || !Number.isInteger(v) || v < 0 || v > 64)
+    limits.some(
+      (v) => v == null || !Number.isInteger(v) || v < 0 || v > 2 ** 31 - 1
+    )
   ) {
     return "config.general.generation.invalid_limits";
   }
   if (
-    (input.generationMaxGPUProcesses || 1) > (input.generationMaxProcesses || 1)
+    input.generationMaxProcesses! > 0 &&
+    input.generationMaxGPUProcesses! > input.generationMaxProcesses!
   ) {
     return "config.general.generation.invalid_gpu_limit";
   }
@@ -43,7 +47,10 @@ export function normalizeGenerationSettings(
   const backend = (value: string | null | undefined) =>
     ["software", "qsv", "vaapi"].includes(value ?? "") ? value! : "software";
   const limit = (value: number | null | undefined) =>
-    value != null && Number.isInteger(value) && value >= 0 && value <= 64
+    value != null &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 2 ** 31 - 1
       ? value
       : 0;
   const maxProcesses = limit(input.generationMaxProcesses);
