@@ -278,6 +278,190 @@ func TestResidentSpriteEntriesShareAllDecoderPermits(t *testing.T) {
 	}
 }
 
+func TestResidentSpriteEntryUsesAvailableDecoderCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		total, gpu, cpu, lanes int
+	}{
+		{"GPU contention", 12, 12, 0, 11},
+		{"mixed total and GPU contention", 6, 4, 3, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, dir := residentSpriteTestGenerator(t, generationbudget.Settings{MaxProcesses: tc.total, MaxGPUProcesses: tc.gpu})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			// These unrelated leaf tasks remain live until after the sheet has
+			// finished. Available slots must be usable without waiting for them.
+			holdGPU, err := g.Budget.Acquire(ctx, generationbudget.GPU)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer holdGPU()
+			holdCPU := func() {}
+			if tc.cpu > 0 {
+				holdCPU, err = g.Budget.AcquireN(ctx, generationbudget.CPU, tc.cpu)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer holdCPU()
+			}
+			times := make([]float64, 81)
+			for i := range times {
+				times[i] = float64(i/2) + 0.125
+			}
+			output := residentSpriteOutput(t, dir, "sheet")
+			done := make(chan error, 1)
+			go func() { _, err := g.IntelSpriteSheet(ctx, "synthetic.mp4", times, 9, 9, output); done <- err }()
+			record := residentSpriteStart(t, ctx, dir, "sheet")
+			if len(record.Seeks) != tc.lanes {
+				t.Fatalf("sheet started %d decoder inputs with %d available; unrelated tasks remain live", len(record.Seeks), tc.lanes)
+			}
+			// The sheet must account for every actual decoder. A subsequent GPU
+			// task waits while the sheet and unrelated leaf tasks fill the budget.
+			queued := make(chan func(), 1)
+			queuedErr := make(chan error, 1)
+			go func() {
+				release, err := g.Budget.Acquire(ctx, generationbudget.GPU)
+				if err != nil {
+					queuedErr <- err
+					return
+				}
+				queued <- release
+			}()
+			select {
+			case release := <-queued:
+				release()
+				t.Fatal("resident sheet failed to reserve its actual decoder slots")
+			case err := <-queuedErr:
+				t.Fatal(err)
+			case <-time.After(25 * time.Millisecond):
+			}
+			residentSpriteRelease(t, dir, "sheet")
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("sheet did not finish while unrelated tasks remained live", ctx.Err())
+			}
+			select {
+			case release := <-queued:
+				release()
+			case err := <-queuedErr:
+				t.Fatal(err)
+			case <-ctx.Done():
+				t.Fatal("sheet completion did not release its actual decoder slots", ctx.Err())
+			}
+			holdCPU()
+			holdGPU()
+			fresh, stop := context.WithTimeout(context.Background(), time.Second)
+			defer stop()
+			release, err := g.Budget.AcquireN(fresh, generationbudget.GPU, tc.gpu)
+			if err != nil {
+				t.Fatal("partial-capacity sheet leaked decoder permits", err)
+			}
+			release()
+		})
+	}
+}
+
+func TestResidentSpriteEntryCancellationUnderContention(t *testing.T) {
+	for _, mode := range []string{"waiting", "rendering"} {
+		t.Run(mode, func(t *testing.T) {
+			g, dir := residentSpriteTestGenerator(t, generationbudget.Settings{MaxProcesses: 12, MaxGPUProcesses: 12})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			// Pause after the public entry has completed metadata and planning,
+			// at the same callback boundary as the hardware capability probes.
+			ready := make(chan struct{})
+			launch := make(chan struct{})
+			entered := make(chan struct{})
+			work := g.intelSpriteWork
+			g.intelSpriteWork = func(ctx context.Context, plan ffmpeg.IntelGenerationPlan, hardware, software func(context.Context) error, run ffmpeg.IntelGenerationRunner) (ffmpeg.IntelGenerationDiagnostic, error) {
+				close(ready)
+				select {
+				case <-launch:
+				case <-ctx.Done():
+					return ffmpeg.IntelGenerationDiagnostic{}, ctx.Err()
+				}
+				close(entered)
+				return work(ctx, plan, hardware, software, run)
+			}
+			output := residentSpriteOutput(t, dir, "sheet")
+			if err := os.WriteFile(output, []byte("existing asset"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			times := make([]float64, 81)
+			for i := range times {
+				times[i] = float64(i)
+			}
+			done := make(chan error, 1)
+			go func() { _, err := g.IntelSpriteSheet(ctx, "synthetic.mp4", times, 9, 9, output); done <- err }()
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				t.Fatal("sheet did not reach hardware render boundary", ctx.Err())
+			}
+			held := 1
+			if mode == "waiting" {
+				held = 12
+			}
+			holdGPU, err := g.Budget.AcquireN(ctx, generationbudget.GPU, held)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer holdGPU()
+			close(launch)
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if mode == "rendering" {
+				record := residentSpriteStart(t, ctx, dir, "sheet")
+				if len(record.Seeks) != 11 {
+					t.Fatalf("contended sheet used %d decoder lanes instead of 11", len(record.Seeks))
+				}
+			} else {
+				select {
+				case err := <-done:
+					t.Fatal("sheet did not wait for an available decoder permit", err)
+				case <-time.After(25 * time.Millisecond):
+				}
+				if _, err := os.Stat(filepath.Join(dir, "start-sheet.json")); !os.IsNotExist(err) {
+					t.Fatal("sheet started without an available decoder permit", err)
+				}
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal("contended sheet did not cancel explicitly", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("contended sheet did not stop after cancellation")
+			}
+			data, _ := os.ReadFile(output)
+			if string(data) != "existing asset" {
+				t.Fatal("cancelled resident render replaced existing asset")
+			}
+			leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(output), ".*"))
+			if len(leftovers) != 0 {
+				t.Fatal("cancelled contended render leaked temporary files", leftovers)
+			}
+			holdGPU()
+			fresh, stop := context.WithTimeout(context.Background(), time.Second)
+			defer stop()
+			release, err := g.Budget.AcquireN(fresh, generationbudget.GPU, 12)
+			if err != nil {
+				t.Fatal("cancelled contended render leaked decoder permits", err)
+			}
+			release()
+		})
+	}
+}
+
 func TestResidentSpriteEntryFailureCancellationAndPermitReuse(t *testing.T) {
 	for _, mode := range []string{"failure", "cancel"} {
 		t.Run(mode, func(t *testing.T) {

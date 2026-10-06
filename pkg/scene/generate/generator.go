@@ -201,6 +201,13 @@ func (g Generator) generateWithContextN(ctx context.Context, lockCtx *fsutil.Loc
 		return err
 	}
 	defer release()
+	return g.generateAdmittedWithContext(ctx, lockCtx, args)
+}
+
+// The caller owns admission for this command and releases it only after the
+// registered child drains. Adaptive sprite admission uses this same execution
+// path after choosing its decoder count under the shared budget lock.
+func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsutil.LockContext, args []string) error {
 	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(ctx)
 	defer cancel()
 	cmd := g.Encoder.Command(execCtx, args)

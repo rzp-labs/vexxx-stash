@@ -145,28 +145,43 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	if err = tmp.Close(); err != nil {
 		return fail("output", err)
 	}
-	var args ffmpeg.Args
-	lanes := 1
+	maxLanes := 1
 	if frames == nil {
-		lanes = g.spriteWorkers(generationbudget.GPU, count)
-		seekLists, counts, cleanup, seekErr := intelSpriteSeekInputs(input, source, times, lanes, filepath.Dir(output))
-		if seekErr != nil {
-			return fail("plan", seekErr)
+		maxLanes = g.spriteWorkers(generationbudget.GPU, count)
+	}
+	// Probes finish before this leaf callback. Choose and reserve available
+	// decoder capacity atomically, then construct the command for that count.
+	// A contended sheet can overlap existing work without holding partial slots
+	// or waiting for the entire configured ceiling to become free.
+	render := func(ctx context.Context) error {
+		budget := g.generationBudget()
+		lanes, release, err := budget.AcquireUpTo(ctx, generationbudget.GPU, maxLanes)
+		if err != nil {
+			return fmt.Errorf("waiting for GPU sprite budget: %w", err)
 		}
-		defer cleanup()
-		args, err = transcoder.IntelSpriteSheetInputs(seekLists, plan, counts, columns, rows, tmp.Name())
-	} else {
-		args, err = transcoder.IntelSpriteSheetFrames(input, plan, frames, columns, rows, tmp.Name())
+		defer release()
+		var args ffmpeg.Args
+		if frames == nil {
+			seekLists, counts, cleanup, seekErr := intelSpriteSeekInputs(input, source, times, lanes, filepath.Dir(output))
+			if seekErr != nil {
+				return seekErr
+			}
+			defer cleanup()
+			args, err = transcoder.IntelSpriteSheetInputs(seekLists, plan, counts, columns, rows, tmp.Name())
+		} else {
+			args, err = transcoder.IntelSpriteSheetFrames(input, plan, frames, columns, rows, tmp.Name())
+		}
+		if err != nil {
+			return err
+		}
+		logger.Infof("[generator] GPU sprite decoder lanes=%d ceiling=%d tiles=%d", lanes, maxLanes, count)
+		return g.generateAdmittedWithContext(ctx, lockCtx, budget.FFMpegArgs(args))
 	}
-	if err != nil {
-		return fail("plan", err)
-	}
-	logger.Infof("[generator] GPU sprite decoder lanes=%d tiles=%d", lanes, count)
 	runWork := g.intelSpriteWork
 	if runWork == nil {
 		runWork = ffmpeg.RunIntelGenerationWork
 	}
-	d, err = runWork(workCtx, plan, func(ctx context.Context) error { return g.generateWithContextN(ctx, lockCtx, args, lanes) }, nil, func(ctx context.Context, args ffmpeg.Args) error { return g.generateWithContext(ctx, lockCtx, args) })
+	d, err = runWork(workCtx, plan, render, nil, func(ctx context.Context, args ffmpeg.Args) error { return g.generateWithContext(ctx, lockCtx, args) })
 	if err != nil {
 		if frames == nil {
 			return d, fmt.Errorf("GPU sprite failed without software fallback (a requested frame must occur within its one-second seek interval): %w", err)

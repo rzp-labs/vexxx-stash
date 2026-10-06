@@ -298,6 +298,226 @@ func TestWeightedInvalidAndNestedReservations(t *testing.T) {
 	}
 }
 
+func TestAdaptiveUsesAvailableCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		settings Settings
+		held     Class
+		heldN    int
+		class    Class
+		max      int
+		want     int
+	}{
+		{"preview leaves eleven GPU slots", Settings{12, 12, 1}, GPU, 1, GPU, 12, 11},
+		{"CPU work limits total", Settings{12, 12, 1}, CPU, 5, GPU, 12, 7},
+		{"GPU ceiling", Settings{12, 4, 1}, GPU, 1, GPU, 4, 3},
+		{"total ceiling below GPU ceiling", Settings{12, 4, 1}, CPU, 10, GPU, 4, 2},
+		{"requested maximum", Settings{12, 12, 1}, GPU, 1, GPU, 3, 3},
+		{"CPU ignores GPU ceiling", Settings{12, 4, 1}, GPU, 4, CPU, 12, 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newTestBudget(t, tc.settings)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			held, err := b.AcquireN(ctx, tc.held, tc.heldN)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer held()
+			granted, release, err := b.AcquireUpTo(ctx, tc.class, tc.max)
+			if err != nil {
+				t.Fatal("available capacity was left idle", err)
+			}
+			defer release()
+			if granted != tc.want {
+				t.Fatalf("granted %d, want %d", granted, tc.want)
+			}
+			release()
+			release()
+			held()
+			granted, release, err = b.AcquireUpTo(ctx, tc.class, tc.max)
+			if err != nil || granted != tc.max {
+				t.Fatalf("full reservation not reusable: %d, %v", granted, err)
+			}
+			release()
+		})
+	}
+}
+
+func TestAdaptiveFullFreeGrant(t *testing.T) {
+	b := newTestBudget(t, Settings{12, 12, 1})
+	granted, release, err := b.AcquireUpTo(context.Background(), GPU, 12)
+	if err != nil || granted != 12 {
+		t.Fatalf("free budget granted %d, %v", granted, err)
+	}
+	defer release()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.active != 12 || b.gpuActive != 12 {
+		t.Fatalf("full grant not accounted: %d/%d", b.active, b.gpuActive)
+	}
+}
+
+func TestAdaptiveCancelledHeadPreservesFIFO(t *testing.T) {
+	b := newTestBudget(t, Settings{4, 3, 1})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	held, err := b.AcquireN(ctx, GPU, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	blocked, stop := context.WithCancel(ctx)
+	defer stop()
+	done := make(chan error, 1)
+	go func() {
+		_, release, err := b.AcquireUpTo(blocked, GPU, 3)
+		if release != nil {
+			release()
+		}
+		done <- err
+	}()
+	waitForQueue(t, b, 1)
+	cpuReady := make(chan func(), 1)
+	go func() {
+		release, err := b.Acquire(ctx, CPU)
+		if err == nil {
+			cpuReady <- release
+		}
+	}()
+	waitForQueue(t, b, 2) // A later CPU request cannot bypass the adaptive head.
+	stop()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	select {
+	case release := <-cpuReady:
+		release()
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	held()
+	granted, release, err := b.AcquireUpTo(ctx, GPU, 3)
+	if err != nil || granted != 3 {
+		t.Fatalf("cancelled head leaked slots: %d, %v", granted, err)
+	}
+	release()
+}
+
+func TestAdaptiveHeadAdmittedBeforeLaterRequests(t *testing.T) {
+	b := newTestBudget(t, Settings{12, 12, 1})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	held, err := b.AcquireN(ctx, GPU, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	type result struct {
+		granted int
+		release func()
+		err     error
+	}
+	first := make(chan result, 1)
+	go func() {
+		granted, release, err := b.AcquireUpTo(ctx, GPU, 12)
+		first <- result{granted, release, err}
+	}()
+	waitForQueue(t, b, 1)
+	later := make(chan result, 1)
+	go func() {
+		granted, release, err := b.AcquireUpTo(ctx, CPU, 12)
+		later <- result{granted, release, err}
+	}()
+	waitForQueue(t, b, 2)
+	held()
+	got := <-first
+	if got.err != nil || got.granted != 12 {
+		t.Fatalf("head was bypassed: %+v", got)
+	}
+	defer got.release()
+	waitForQueue(t, b, 1)
+	got.release()
+	got = <-later
+	if got.err != nil || got.granted != 12 {
+		t.Fatalf("later waiter starved: %+v", got)
+	}
+	got.release()
+}
+
+func TestAdaptiveInvalidNestedAndNilReservations(t *testing.T) {
+	b := newTestBudget(t, Settings{4, 3, 1})
+	for _, tc := range []struct {
+		class Class
+		slots int
+	}{{CPU, 0}, {GPU, -1}, {CPU, 5}, {GPU, 4}, {Class(99), 1}} {
+		if n, release, err := b.AcquireUpTo(context.Background(), tc.class, tc.slots); err == nil || release != nil || n != 0 {
+			t.Fatalf("accepted invalid reservation %+v", tc)
+		}
+	}
+	if err := b.Run(context.Background(), GPU, func(ctx context.Context) error {
+		if n, release, err := b.AcquireUpTo(ctx, GPU, 3); err == nil || release != nil || n != 0 {
+			t.Fatal("accepted nested adaptive reservation")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var disabled *Budget
+	n, release, err := disabled.AcquireUpTo(context.Background(), GPU, 12)
+	if err != nil || n != 12 {
+		t.Fatalf("nil budget granted %d, %v", n, err)
+	}
+	release()
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	if n, release, err := disabled.AcquireUpTo(canceled, GPU, 12); !errors.Is(err, context.Canceled) || release != nil || n != 0 {
+		t.Fatal("nil budget admitted cancelled reservation", err)
+	}
+}
+
+func TestAdaptiveCancellationRacesReleaseActualGrant(t *testing.T) {
+	b := newTestBudget(t, Settings{8, 5, 1})
+	var wg sync.WaitGroup
+	for i := 0; i < 300; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ctx, cancel := context.WithCancel(context.Background())
+			if i%2 == 0 {
+				go cancel()
+			} else {
+				defer cancel()
+			}
+			class, maxSlots := CPU, 8
+			if i%3 != 0 {
+				class, maxSlots = GPU, 5
+			}
+			granted, release, err := b.AcquireUpTo(ctx, class, maxSlots)
+			if err != nil {
+				return
+			}
+			if granted < 1 || granted > maxSlots {
+				t.Errorf("invalid granted count %d", granted)
+			}
+			b.mu.Lock()
+			if b.active > 8 || b.gpuActive > 5 || b.active < 0 || b.gpuActive < 0 {
+				t.Error("budget accounting exceeded limits")
+			}
+			b.mu.Unlock()
+			runtime.Gosched()
+			release()
+			release()
+		}(i)
+	}
+	wg.Wait()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.active != 0 || b.gpuActive != 0 || len(b.queue) != 0 {
+		t.Fatalf("actual granted slots leaked: %+v", b)
+	}
+}
+
 func TestFailureFallbackAndNested(t *testing.T) {
 	b := newTestBudget(t, Settings{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

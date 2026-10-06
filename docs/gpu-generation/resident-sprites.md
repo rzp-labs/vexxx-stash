@@ -6,13 +6,16 @@ available only when explicitly selected. Device, source, filter and encoder
 failures return errors through the sprite task and GenerateJob; they preserve
 existing assets instead of starting a software retry.
 
-Timestamp sheets partition independently sought ffconcat segments across
+Timestamp sheets partition independently sought ffconcat segments across up to
 `min(total processes, GPU processes, tile count)` hardware decoder inputs. One
-FFmpeg process owns the inputs and final GPU composition. Its render leaf reserves
-that many total/GPU slots atomically in the shared scheduler; probes each reserve
-one slot and finish before the render reservation. Multiple sheets cannot multiply
-the configured limits, and cancellation drains the child before releasing all
-reserved slots. There is no additional decoder cap. Each input preserves a
+FFmpeg process owns the inputs and final GPU composition. After probes finish,
+the render leaf atomically reserves the currently available total/GPU capacity,
+then constructs its seek partitions and command for that admitted count. At the
+FIFO head it waits only when no slot is available. A long-running one-slot preview therefore allows
+a twelve-slot sheet to start with eleven decoders rather than leave eleven slots
+idle while waiting for all twelve. The FIFO scheduler preserves shared configured
+ceilings; cancellation drains the child before releasing the actual reservation.
+There is no additional decoder cap. Each input preserves a
 contiguous portion of the canonical tile order. The demuxer timestamp origin is
 included in each inpoint, preroll is excluded, and frame
 selection uses timestamps without touching pixels. Each requested timestamp
@@ -31,7 +34,9 @@ blocked FFmpeg subprocess fixture. They check configured input count, exact seek
 partition order, shared weighted admission across sheets, strict GPU commands,
 failure/cancellation cleanup, preserved assets and permit reuse. These tests
 substitute physical-device/capability validation only; they do not claim to prove
-GPU execution. A separate real FFmpeg pixel control checks the multi-input
+GPU execution. Held-preview and mixed CPU/GPU contention regressions also verify
+available-capacity admission, waiting cancellation and adaptive reservation reuse.
+A separate real FFmpeg pixel control checks the multi-input
 timestamp graph, including duplicated timestamps and nonzero source origins.
 The full 81-tile B580 comparison at limits 1 versus 12 is recorded below; the
 historical measurements cover separate cases.
@@ -90,6 +95,12 @@ rendered media. Corrected recipes received independent review before the run.
 The candidate at 12 slots was 2.417 times faster than the shipped renderer under
 these identical bounded, instrumented conditions. Debug reporting and resource
 limits mean these wall times are not a prediction for unrestricted production.
+This hardware run preceded the review-driven adaptive admission correction.
+That correction preserves the same uncontended twelve-input graph, runtime and
+JPEG policy; deterministic production-entry tests cover its contended admission.
+The adaptive policy was not separately exercised on hardware. The configurable
+maximum of 64 is a scheduler setting, not a hardware memory-envelope claim;
+hardware resource evidence here stops at twelve inputs.
 CPU orchestration time and memory increased; this is not a CPU-load reduction.
 Candidate peak container memory was 2669125632 bytes and peak PID count was 37.
 Memory, OOM and PID event deltas were zero. Six CPU quota throttles totaled
