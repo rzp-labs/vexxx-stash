@@ -219,7 +219,7 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 	lockCtx.AttachCommandWithCompletion(cmd, done)
 
 	if err := cmd.Start(); err != nil {
-		return g.commandError(args, admitted, fmt.Errorf("error starting command: %w", err))
+		return g.commandError(args, admitted, false, fmt.Errorf("error starting command: %w", err))
 	}
 
 	if err := cmd.Wait(); err != nil {
@@ -228,7 +228,7 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 			exitErr.Stderr = stderr.Bytes()
 			err = exitErr
 		}
-		return g.commandError(args, admitted, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
+		return g.commandError(args, admitted, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
 	}
 
 	return nil
@@ -261,7 +261,7 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 	lockCtx.AttachCommandWithCompletion(cmd, done)
 
 	if err := cmd.Start(); err != nil {
-		return nil, g.commandError(args, 1, fmt.Errorf("error starting command: %w", err))
+		return nil, g.commandError(args, 1, false, fmt.Errorf("error starting command: %w", err))
 	}
 
 	if err := cmd.Wait(); err != nil {
@@ -270,11 +270,11 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 			exitErr.Stderr = stderr.Bytes()
 			err = exitErr
 		}
-		return nil, g.commandError(args, 1, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
+		return nil, g.commandError(args, 1, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
 	}
 
 	if stdout.Len() == 0 {
-		return nil, g.commandError(args, 1, fmt.Errorf("ffmpeg command produced no output: <%s>", strings.Join(args, " ")))
+		return nil, g.commandError(args, 1, true, fmt.Errorf("ffmpeg command produced no output: <%s>", strings.Join(args, " ")))
 	}
 
 	return stdout.Bytes(), nil
@@ -282,7 +282,7 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 
 // Admission metadata follows the returned error through existing task wrappers;
 // it never changes command construction, permit ownership or retry behavior.
-func (g Generator) commandError(args []string, admitted int, err error) error {
+func (g Generator) commandError(args []string, admitted int, started bool, err error) error {
 	limits := generationbudget.Settings{}
 	if budget := g.generationBudget(); budget != nil {
 		limits = budget.Settings()
@@ -296,5 +296,5 @@ func (g Generator) commandError(args []string, admitted int, err error) error {
 	if len(args) > 0 {
 		private = append(private, args[len(args)-1])
 	}
-	return &ffmpeg.GenerationCommandError{Err: err, Admitted: admitted, Limits: limits, PrivateValues: private}
+	return &ffmpeg.GenerationCommandError{Err: err, Admitted: admitted, Started: started, Limits: limits, PrivateValues: private}
 }

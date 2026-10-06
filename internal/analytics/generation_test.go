@@ -98,3 +98,59 @@ func TestGenerationTimeoutDiagnosticRemainsFailure(t *testing.T) {
 		t.Fatal("probe timeout lost", event)
 	}
 }
+
+func TestAuxiliaryPathsWithSpacesAreRedactedAsWholeRecords(t *testing.T) {
+	for _, path := range []string{
+		`/mnt/user/Jane Doe/subtitle data.ass`,
+		`C:\Users\Jane Doe\subtitle data.ass`,
+		`\\nas\Private Share\Jane Doe\subtitle data.ass`,
+		`/mnt/user/Jane Doe/Private Folder (draft)/subtitle data.ass`,
+	} {
+		for _, suffix := range []string{"", ": Permission denied", ": No such file or directory"} {
+			message := "[Parsed_subtitles_0 @ 0xabc] Unable to open " + path + suffix + "\n[hevc @ 0xabc] Failed to end picture: 23 (internal decoding error).\nInput/output error; NV12/P010 conversion failed on /dev/dri/renderD128"
+			event := GenerationException(errors.New(message), GenerationFailureContext{})
+			encoded, _ := json.Marshal(event.APIfy())
+			for _, private := range []string{"Jane", "Doe", "subtitle", "data.ass", "Private Share", "Private Folder", "draft"} {
+				// The FFmpeg filter name is technical; check the message after its prefix.
+				if strings.Contains(strings.SplitN(event.ExceptionList[0].Value, "Unable to open ", 2)[1], private) {
+					t.Errorf("path fragment %q leaked: %s", private, encoded)
+				}
+			}
+			for _, technical := range []string{"[Parsed_subtitles_0 @ 0xabc] Unable to open [path redacted]" + suffix, "Failed to end picture: 23", "Input/output error; NV12/P010 conversion failed on /dev/dri/renderD128"} {
+				if !strings.Contains(event.ExceptionList[0].Value, technical) {
+					t.Errorf("technical cause lost %q: %s", technical, encoded)
+				}
+			}
+		}
+	}
+	// A path may itself end in words that resemble an error. Redaction still
+	// removes all of its private components and exports only a fixed OS phrase.
+	if safe := sanitizeTechnicalMessage("open /mnt/Jane Doe/record: Permission denied", nil); safe != "open [path redacted]: Permission denied" {
+		t.Fatal(safe)
+	}
+}
+
+func TestSoftwareActualBackendRequiresSuccessfulProcessStart(t *testing.T) {
+	for _, tc := range []struct {
+		name, selected, actual string
+		started                bool
+		intel                  bool
+	}{
+		{"start failure", "software", "none", false, false},
+		{"executed software", "software", "software", true, false},
+		{"selected GPU", "vaapi", "none", true, false},
+		{"unspecified backend", "", "none", true, false},
+		{"Intel diagnostic authoritative", "software", "none", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error = &ffmpeg.GenerationCommandError{Err: errors.New("synthetic command failed"), Admitted: 1, Started: tc.started}
+			if tc.intel {
+				err = ffmpeg.WithIntelGenerationDiagnostic(err, ffmpeg.IntelGenerationDiagnostic{Selected: "software", Actual: "none"}, ffmpeg.IntelSource{})
+			}
+			event := GenerationException(err, GenerationFailureContext{SelectedBackend: tc.selected})
+			if actual := event.Properties["generation_actual_backend"]; actual != tc.actual {
+				t.Fatalf("actual backend %v, want %s", actual, tc.actual)
+			}
+		})
+	}
+}

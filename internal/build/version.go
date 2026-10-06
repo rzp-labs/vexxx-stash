@@ -11,6 +11,9 @@ var githash string
 var officialBuild string
 var releaseRepo string
 
+var legacyDevelopmentVersion = regexp.MustCompile(`-\d+-g\w+$`)
+var semanticDevelopmentVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-dev\+sha\.[0-9a-f]{12}$`)
+
 func Version() (string, string, string) {
 	return version, githash, buildstamp
 }
@@ -53,11 +56,7 @@ func IsDevelop() bool {
 		return false
 	}
 
-	// if the version is suffixed with -x-xxxx, then we are running a development build
-	develop := false
-	re := regexp.MustCompile(`-\d+-g\w+$`)
-	if re.MatchString(version) {
-		develop = true
-	}
-	return develop
+	// Development versions already include their commit, either in the fork's
+	// SemVer build metadata or in the legacy git-describe suffix.
+	return semanticDevelopmentVersion.MatchString(version) || legacyDevelopmentVersion.MatchString(version)
 }

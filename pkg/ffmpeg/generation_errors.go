@@ -8,8 +8,10 @@ import (
 // GenerationCommandError retains command admission facts alongside the original
 // local error. Arguments and private paths are never event properties.
 type GenerationCommandError struct {
-	Err           error
-	Admitted      int
+	Err      error
+	Admitted int
+	// Started records successful cmd.Start, independently of slot admission.
+	Started       bool
 	Limits        generationbudget.Settings
 	PrivateValues []string
 }

@@ -135,6 +135,9 @@ func GenerationException(err error, info GenerationFailureContext) posthog.Excep
 			Set("generation_command_gpu_limit", command.Limits.MaxGPUProcesses).
 			Set("generation_command_threads", command.Limits.Threads)
 		private = append(private, command.PrivateValues...)
+		if intel == nil && selected == "software" && command.Started {
+			actual = "software"
+		}
 	}
 	// Prefer stderr over the local wrapper, whose command can dwarf diagnostics
 	// and includes private paths. Start/filesystem failures retain their OS cause.
@@ -256,7 +259,8 @@ func diagnosticStderr(stderr []byte) string {
 var credentials = regexp.MustCompile(`(?i)\b(?:authorization\s*:\s*(?:bearer|basic)\s+[^\s,;]+|(?:password|passwd|pwd|token|api[_-]?key|access[_-]?token|secret|cookie)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+))`)
 var urls = regexp.MustCompile(`(?i)\b(?:https?|rtsp|rtmp|ftp|s3)://[^\s'"<>]+`)
 var quotedPath = regexp.MustCompile(`(?:"(?:[A-Za-z]:[\\/]|/|\\\\)[^"]*"|'(?:[A-Za-z]:[\\/]|/|\\\\)[^']*')`)
-var paths = regexp.MustCompile(`(^|[\s=:"'(])((?:[A-Za-z]:[\\/]|\\\\|/)[^\s'"<>\[\](),;]+)`)
+var pathStart = regexp.MustCompile(`(^|[\s=:"'(\[])((?:[A-Za-z]:[\\/]|\\\\|/))`)
+var pathErrorSuffix = regexp.MustCompile(`(?i): (?:permission denied|no such file or directory|input/output error|cannot allocate memory|invalid argument|operation not permitted|read-only file system|no space left on device|file exists|is a directory|not a directory)[.!]?$`)
 var mediaFilename = regexp.MustCompile(`(?i)(?:[A-Za-z0-9_. -]+\.(?:mp4|mkv|avi|mov|webm|jpg|jpeg|png|webp|vtt|m3u8|ts|ffconcat))\b`)
 var emailAddress = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
 
@@ -269,13 +273,7 @@ func sanitizeTechnicalMessage(message string, private []string) string {
 	message = credentials.ReplaceAllString(message, "[credential redacted]")
 	message = urls.ReplaceAllString(message, "[URL redacted]")
 	message = quotedPath.ReplaceAllString(message, "[path redacted]")
-	message = paths.ReplaceAllStringFunc(message, func(match string) string {
-		parts := paths.FindStringSubmatch(match)
-		if ffmpegDevice.MatchString(parts[2]) {
-			return match
-		}
-		return parts[1] + "[path redacted]"
-	})
+	message = redactUnquotedPaths(message)
 	message = mediaFilename.ReplaceAllString(message, "[media filename redacted]")
 	message = emailAddress.ReplaceAllString(message, "[identity redacted]")
 	message = strings.ToValidUTF8(message, "?")
@@ -297,3 +295,35 @@ func sanitizeTechnicalMessage(message string, private []string) string {
 }
 
 var ffmpegDevice = regexp.MustCompile(`^/dev/dri/renderD[0-9]+$`)
+
+// An unquoted auxiliary path can contain spaces and need not be a command input.
+// Its endpoint is ambiguous, so redact the remainder of that diagnostic line,
+// retaining only a recognized terminal OS error. Never join adjacent records.
+func redactUnquotedPaths(message string) string {
+	lines := strings.Split(message, "\n")
+	for i, line := range lines {
+		offset := 0
+		for offset < len(line) {
+			match := pathStart.FindStringSubmatchIndex(line[offset:])
+			if match == nil {
+				break
+			}
+			start := offset + match[4]
+			end := start + strings.IndexAny(line[start:], " \t\r\"'<>[](),;")
+			if end < start {
+				end = len(line)
+			}
+			if ffmpegDevice.MatchString(line[start:end]) {
+				offset = end
+				continue
+			}
+			suffix := ""
+			if errorSpan := pathErrorSuffix.FindStringIndex(line[start:]); errorSpan != nil {
+				suffix = line[start+errorSpan[0]:]
+			}
+			lines[i] = line[:start] + "[path redacted]" + suffix
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
