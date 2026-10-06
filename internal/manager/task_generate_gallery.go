@@ -106,6 +106,7 @@ func (t *GenerateGalleryTask) Start(ctx context.Context) error {
 	_, err := t.generator.GalleryImages(ctx, t.Scene.Path, timestamps, tempDir, imagePrefix, vrModeStr)
 	if err != nil {
 		logger.Errorf("Failed to generate gallery images for scene %d: %v", t.Scene.ID, err)
+		reportGenerationFailure(ctx, err)
 		os.RemoveAll(tempDir) // clean up on failure
 		return nil
 	}
@@ -113,6 +114,7 @@ func (t *GenerateGalleryTask) Start(ctx context.Context) error {
 	// Zip contents
 	if err := utils.Zip(tempDir, zipPath); err != nil {
 		logger.Errorf("Failed to zip gallery for scene %d: %v", t.Scene.ID, err)
+		reportGenerationFailure(ctx, err)
 		os.RemoveAll(tempDir)
 		return nil
 	}
@@ -125,6 +127,7 @@ func (t *GenerateGalleryTask) Start(ctx context.Context) error {
 	finfo, err := os.Stat(zipPath)
 	if err != nil {
 		logger.Errorf("Failed to stat zip file: %v", err)
+		reportGenerationFailure(ctx, err)
 		return nil
 	}
 
@@ -172,6 +175,7 @@ func (t *GenerateGalleryTask) Start(ctx context.Context) error {
 
 	if err != nil {
 		logger.Errorf("Failed to create gallery records for scene %d: %v", t.Scene.ID, err)
+		reportGenerationFailure(ctx, err)
 		return nil
 	}
 

@@ -5,8 +5,13 @@ import { sanitizeTelemetry, telemetryConfig } from "./telemetry";
 // Exercise the pinned real parser/config, but drop every event at the final
 // transport boundary. Any attempted network request fails locally in the test.
 describe("pinned PostHog error parser", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
   it("retains symbolication metadata from an actual SDK exception without sending", async () => {
+    vi.stubEnv("VITE_APP_STASH_VERSION", "v0.1.0");
+    vi.stubEnv("VITE_APP_GITHASH", "890c5f1");
     const fetch = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("network forbidden"));
@@ -36,6 +41,9 @@ describe("pinned PostHog error parser", () => {
       distinct_id: "42",
       $user_id: "42",
       $set: { user_role: "ADMIN" },
+      $app_namespace: "vexxx-ui",
+      $app_version: "v0.1.0",
+      $app_build: "890c5f1",
     });
     captured.length = 0;
     const chunk = "11111111-2222-4333-8444-555555555555";
@@ -50,6 +58,12 @@ describe("pinned PostHog error parser", () => {
     await vi.waitFor(() => expect(captured).toHaveLength(1));
     const safe = captured[0];
     expect(safe.event).toBe("$exception");
+    expect(safe.properties).toMatchObject({
+      $app_namespace: "vexxx-ui",
+      $app_version: "v0.1.0",
+      $app_build: "890c5f1",
+      app_revision: "890c5f1",
+    });
     expect(safe.properties.$exception_level).toBe("error");
     expect(safe.properties.$exception_list).toHaveLength(2);
     expect(safe.properties.$exception_list[0].mechanism).toMatchObject({

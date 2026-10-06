@@ -77,9 +77,11 @@ export function sanitizeTelemetry(
     $lib: "web",
     $lib_version: source.$lib_version,
     $process_person_profile: false,
-    $exception_release: "vexxx-ui",
-    $exception_release_version:
-      import.meta.env.VITE_APP_GITHASH || "development",
+    // These are PostHog's application/release fields. Always derive them from
+    // the embedded build, rather than accepting arbitrary incoming properties.
+    $app_namespace: "vexxx-ui",
+    $app_version: import.meta.env.VITE_APP_STASH_VERSION || "development",
+    $app_build: import.meta.env.VITE_APP_GITHASH || "development",
   };
   for (const key of ["distinct_id", "$user_id", "$anon_distinct_id"]) {
     if (typeof source[key] === "string" && identity.test(source[key]))

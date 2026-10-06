@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/remeh/sizedwaitgroup"
+	"github.com/stashapp/stash/internal/analytics"
 	"github.com/stashapp/stash/internal/manager/config"
 	"github.com/stashapp/stash/pkg/image"
 	"github.com/stashapp/stash/pkg/job"
@@ -104,6 +105,15 @@ func (j *GenerateJob) Execute(ctx context.Context, progress *job.Progress) error
 
 	config := config.GetInstance()
 	parallelTasks := config.GetParallelTasksWithAutoDetection()
+	requested, _ := config.GetRequestedGenerationConfiguration()
+	active := config.GetActiveGenerationConfiguration()
+	failureContext := analytics.GenerationFailureContext{
+		JobCorrelation: job.Correlation(ctx),
+		Configured:     requested.Limits(),
+		Effective:      active.Limits(),
+		ParallelTasks:  parallelTasks,
+		BudgetEnabled:  active.BudgetEnabled,
+	}
 
 	logger.Infof("Generate started with %d parallel tasks", parallelTasks)
 
@@ -287,7 +297,24 @@ func (j *GenerateJob) Execute(ctx context.Context, progress *job.Progress) error
 		go progress.ExecuteTask(localTask.GetDescription(), func() {
 			defer wg.Done()
 			defer progress.Increment()
-			if err := localTask.Start(ctx); err != nil {
+			report := func(err error) {
+				info := failureContext
+				info.Workload = generationTaskWorkload(localTask)
+				info.PrivateValues = generationTaskPrivateValues(localTask)
+				info.SelectedBackend = "software"
+				switch info.Workload {
+				case "sprite":
+					info.SelectedBackend = active.SpriteBackend
+				case "preview":
+					info.SelectedBackend = active.PreviewBackend
+				case "marker":
+					info.SelectedBackend = active.MarkerBackend
+				}
+				analytics.CaptureGenerationFailure(ctx, err, info)
+			}
+			taskCtx := withGenerationFailureReporter(ctx, report)
+			if err := localTask.Start(taskCtx); err != nil {
+				report(err)
 				taskErrorsMu.Lock()
 				taskErrors = append(taskErrors, fmt.Errorf("%s: %w", localTask.GetDescription(), err))
 				taskErrorsMu.Unlock()

@@ -56,6 +56,7 @@ func (t *GenerateImageThumbnailTask) Start(ctx context.Context) error {
 		if !errors.Is(err, image.ErrNotSupportedForThumbnail) {
 			logger.Errorf("[generator] getting thumbnail for image %s: %s", path, err.Error())
 			t.logStderr(err)
+			reportGenerationFailure(ctx, err)
 		}
 		return nil
 	}
@@ -63,6 +64,7 @@ func (t *GenerateImageThumbnailTask) Start(ctx context.Context) error {
 	err = fsutil.WriteFile(thumbPath, data)
 	if err != nil {
 		logger.Errorf("[generator] writing thumbnail for image %s: %s", path, err.Error())
+		reportGenerationFailure(ctx, err)
 		return nil
 	}
 	return nil

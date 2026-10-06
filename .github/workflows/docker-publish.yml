@@ -19,12 +19,12 @@ name: Validate and deliberately publish Docker images
         default: false
         required: true
       publish_latest:
-        description: Deliberately publish the tested master candidate to the application package and latest
+        description: Publish master's VERSION as an immutable release tag and latest
         type: boolean
         default: false
         required: true
       test_label:
-        description: Candidate/test label (1..32 lowercase letters/digits and internal hyphens)
+        description: Optional diagnostic label (does not name the version or image tag)
         type: string
         default: ""
         required: false
@@ -78,6 +78,7 @@ jobs:
         id: policy_tests
         run: |
           python3 -m unittest discover -s scripts -p test_image_publication_policy.py
+          python3 -m unittest discover -s scripts -p test_release_version.py
           python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
           python3 -m unittest discover -s scripts -p test_reuse_master_validation.py
           python3 -m unittest discover -s scripts -p test_reuse_pr_packaging.py
@@ -385,6 +386,10 @@ jobs:
 
   publish:
     needs: ci-required
+    # Serialize our publishers so two runs cannot overwrite the same release tag.
+    concurrency:
+      group: vexxx-publication-${{ github.repository }}
+      cancel-in-progress: false
     # Defense in depth: PR/master events never receive a publishing job token.
     if: >-
       needs.ci-required.result == 'success' && needs.ci-required.outputs.publish == 'true' &&
@@ -412,6 +417,46 @@ jobs:
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$LOCAL_IMAGE")" = "$EXPECTED_SHA"
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$LOCAL_IMAGE")" = "$EXPECTED_VERSION"
           test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "$LOCAL_IMAGE")" = 'linux/amd64'
+      - name: Reject overwriting a published release version
+        if: needs.ci-required.outputs.latest_ref != ''
+        env:
+          IMAGE_REF: ${{ needs.ci-required.outputs.image_ref }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, urllib.error, urllib.parse, urllib.request
+          ref = os.environ['IMAGE_REF']
+          match = re.fullmatch(r'ghcr\.io/([a-z0-9_.-]+/[a-z0-9_.-]+):(v[0-9]+\.[0-9]+\.[0-9]+)', ref)
+          if not match:
+              raise SystemExit('Invalid immutable release reference')
+          package, version = match.groups()
+          auth = base64.b64encode((os.environ['GHCR_USER'] + ':' + os.environ['GHCR_PASSWORD']).encode()).decode()
+          # These fixed GHCR endpoints must never forward credentials on redirects.
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect())
+          query = urllib.parse.urlencode({'service': 'ghcr.io', 'scope': 'repository:' + package + ':pull'})
+          request = urllib.request.Request('https://ghcr.io/token?' + query,
+                                          headers={'Authorization': 'Basic ' + auth})
+          try:
+              with opener.open(request, timeout=30) as response:
+                  token = json.load(response)['token']
+              request = urllib.request.Request('https://ghcr.io/v2/' + package + '/manifests/' + version,
+                  method='HEAD', headers={'Authorization': 'Bearer ' + token,
+                      'Accept': 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json'})
+              try:
+                  with opener.open(request, timeout=30):
+                      pass
+              except urllib.error.HTTPError as error:
+                  if error.code != 404:
+                      raise
+              else:
+                  raise SystemExit('Release version already exists; bump VERSION instead of overwriting it')
+          except (urllib.error.URLError, KeyError, ValueError):
+              raise SystemExit('Cannot establish that the release tag is absent; publication refused')
+          PY
       - name: Log in to GHCR for deliberate publication
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:

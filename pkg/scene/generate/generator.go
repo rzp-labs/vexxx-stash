@@ -201,13 +201,13 @@ func (g Generator) generateWithContextN(ctx context.Context, lockCtx *fsutil.Loc
 		return err
 	}
 	defer release()
-	return g.generateAdmittedWithContext(ctx, lockCtx, args)
+	return g.generateAdmittedWithContext(ctx, lockCtx, args, slots)
 }
 
 // The caller owns admission for this command and releases it only after the
 // registered child drains. Adaptive sprite admission uses this same execution
 // path after choosing its decoder count under the shared budget lock.
-func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsutil.LockContext, args []string) error {
+func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsutil.LockContext, args []string, admitted int) error {
 	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(ctx)
 	defer cancel()
 	cmd := g.Encoder.Command(execCtx, args)
@@ -219,7 +219,7 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 	lockCtx.AttachCommandWithCompletion(cmd, done)
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("error starting command: %w", err)
+		return g.commandError(args, admitted, fmt.Errorf("error starting command: %w", err))
 	}
 
 	if err := cmd.Wait(); err != nil {
@@ -228,7 +228,7 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 			exitErr.Stderr = stderr.Bytes()
 			err = exitErr
 		}
-		return fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err)
+		return g.commandError(args, admitted, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
 	}
 
 	return nil
@@ -261,7 +261,7 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 	lockCtx.AttachCommandWithCompletion(cmd, done)
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("error starting command: %w", err)
+		return nil, g.commandError(args, 1, fmt.Errorf("error starting command: %w", err))
 	}
 
 	if err := cmd.Wait(); err != nil {
@@ -270,12 +270,31 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 			exitErr.Stderr = stderr.Bytes()
 			err = exitErr
 		}
-		return nil, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err)
+		return nil, g.commandError(args, 1, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
 	}
 
 	if stdout.Len() == 0 {
-		return nil, fmt.Errorf("ffmpeg command produced no output: <%s>", strings.Join(args, " "))
+		return nil, g.commandError(args, 1, fmt.Errorf("ffmpeg command produced no output: <%s>", strings.Join(args, " ")))
 	}
 
 	return stdout.Bytes(), nil
+}
+
+// Admission metadata follows the returned error through existing task wrappers;
+// it never changes command construction, permit ownership or retry behavior.
+func (g Generator) commandError(args []string, admitted int, err error) error {
+	limits := generationbudget.Settings{}
+	if budget := g.generationBudget(); budget != nil {
+		limits = budget.Settings()
+	}
+	private := []string{}
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-i" {
+			private = append(private, args[i+1])
+		}
+	}
+	if len(args) > 0 {
+		private = append(private, args[len(args)-1])
+	}
+	return &ffmpeg.GenerationCommandError{Err: err, Admitted: admitted, Limits: limits, PrivateValues: private}
 }

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/posthog/posthog-go"
-	"github.com/stashapp/stash/internal/build"
 )
 
 var runtimePanicMessage = regexp.MustCompile(`^runtime error: (?:invalid memory address or nil pointer dereference|integer divide by zero|index out of range \[-?\d+\](?: with length \d+)?|slice bounds out of range \[[0-9: -]+\](?: with (?:length|capacity) \d+)?|makeslice: len out of range|makeslice: cap out of range|assignment to entry in nil map|hash of unhashable type [A-Za-z0-9_.*\[\]]+|comparing uncomparable type [A-Za-z0-9_.*\[\]]+)$`)
@@ -20,12 +19,16 @@ var runtimePanicMessage = regexp.MustCompile(`^runtime error: (?:invalid memory 
 // while never exporting arbitrary panic text, media paths or local build roots.
 func PanicException(value any) posthog.Exception {
 	title, message := "ApplicationPanic", "Unrecognized panic text [redacted]"
+	var pathErr *fs.PathError
+	if err, ok := value.(error); ok {
+		errors.As(err, &pathErr)
+	}
 	if err, ok := value.(runtime.Error); ok {
 		title = "RuntimePanic"
 		if text := err.Error(); runtimePanicMessage.MatchString(text) {
 			message = text
 		}
-	} else if err, ok := value.(*fs.PathError); ok && err != nil {
+	} else if err := pathErr; err != nil {
 		// Keep the failed operation and standard OS cause, never Path or an
 		// arbitrary wrapped error string from a filesystem/plugin implementation.
 		op := "filesystem operation"
@@ -50,8 +53,7 @@ func PanicException(value any) posthog.Exception {
 		message = fmt.Sprintf("%s: %s [path redacted]", op, cause)
 	}
 	exception := posthog.NewDefaultException(time.Now(), "server", title, message)
-	version, revision, _ := build.Version()
-	exception.Properties = posthog.NewProperties().Set("app_version", version).Set("app_revision", revision).Set("$process_person_profile", false).Set("$exception_level", "fatal")
+	exception.Properties = ReleaseProperties().Set("$process_person_profile", false).Set("$exception_level", "fatal")
 	handled, synthetic := false, false
 	exception.ExceptionList[0].Mechanism = &posthog.ExceptionMechanism{Handled: &handled, Synthetic: &synthetic}
 	for i := range exception.ExceptionList {

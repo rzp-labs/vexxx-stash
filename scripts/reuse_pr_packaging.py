@@ -22,6 +22,7 @@ import urllib.request
 import zipfile
 
 from image_publication_policy import checkout_identity
+from release_version import development_version
 from reuse_master_validation import WORKFLOW, DOMAINS
 
 DOCKERFILE = 'docker/build/x86_64/Dockerfile'
@@ -129,10 +130,10 @@ def identity_receipt(proof):
 
 def input_digest(tree, workflow, variables):
     # Commit identity is intentionally different, not promoted. Only validation
-    # ci-<commit>/commit-date/ref metadata is normalized; publication is excluded.
+    # Development SemVer/commit-date/ref metadata is normalized; publication is excluded.
     inputs = dict(tree=tree, workflow=digest(workflow), variables=variables,
                   platform='linux/amd64', publication=False,
-                  identity='validation commit / ci-commit / commit date / validation ref')
+                  identity='validation commit / development SemVer / commit date / validation ref')
     return digest(json.dumps(inputs, sort_keys=True, separators=(',', ':')).encode())
 
 
@@ -289,7 +290,7 @@ def find_source(api, download, check_material, verify_identity, plan, parents, r
                     and proof.get('workflow_digest') == digest(workflow_bytes)
                     and proof.get('workflow_sha') == candidate
                     and proof.get('domains') == {key: plan[key] for key in DOMAINS}
-                    and proof.get('version') == 'ci-' + candidate[:12]
+                    and proof.get('version') == development_version(plan['release_version'], candidate)
                     and proof.get('publish') is False and proof.get('build_image') is True
                     and commit.get('sha') == candidate
                     and commit['commit']['tree']['sha'] == plan['tree']

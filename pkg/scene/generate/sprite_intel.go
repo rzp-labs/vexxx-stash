@@ -79,6 +79,7 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 		d.Selected = g.IntelSprites.Backend
 	}
 	defer func() {
+		err = ffmpeg.WithIntelGenerationDiagnostic(err, d, ffmpeg.IntelSource{})
 		if g.IntelDiagnostic != nil {
 			g.IntelDiagnostic(d)
 		}
@@ -175,7 +176,7 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 			return err
 		}
 		logger.Infof("[generator] GPU sprite decoder lanes=%d ceiling=%d tiles=%d", lanes, maxLanes, count)
-		return g.generateAdmittedWithContext(ctx, lockCtx, budget.FFMpegArgs(args))
+		return g.generateAdmittedWithContext(ctx, lockCtx, budget.FFMpegArgs(args), lanes)
 	}
 	runWork := g.intelSpriteWork
 	if runWork == nil {

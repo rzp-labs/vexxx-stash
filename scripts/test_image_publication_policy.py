@@ -1,4 +1,5 @@
 import json
+import io
 import os
 from pathlib import Path
 import shutil
@@ -6,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,16 +32,35 @@ class ImagePublicationPolicyTests(unittest.TestCase):
 
     def test_only_exact_normal_release_versions_publish(self):
         for version in ("v0.0.0", "v0.31.0", "v12.345.678"):
-            result = self.plan(kind="tag", ref=version)
+            result = self.plan(kind="tag", ref=version, declared_version=version[1:])
             self.assertTrue(result["publish"])
             self.assertTrue(result["run_tests"] and result["build_image"])
             self.assertEqual(result["image_ref"], f"ghcr.io/{REPO}:{version}")
             self.assertEqual(result["sha_ref"], f"ghcr.io/{REPO}:sha-{SHA}")
-            self.assertEqual(result["version"], version)
+            self.assertEqual(result["version"], version[1:])
+            self.assertEqual(result["latest_ref"], f"ghcr.io/{REPO}:latest")
         for version in ("v1", "v1.2", "v01.2.3", "v1.02.3", "v1.2.03", "v1.2.3-rc.1",
                         "v1.2.3+build", "v1.2.3/foo", "v1.2.3\n", "v" + "9" * 129 + ".0.0"):
             with self.subTest(version=version), self.assertRaises(ValueError):
                 self.plan(kind="tag", ref=version)
+
+    def test_release_tag_must_match_its_own_version_file(self):
+        with self.assertRaisesRegex(ValueError, 'does not match VERSION'):
+            self.plan(kind='tag', ref='v1.2.3', declared_version='0.1.0')
+        for version in ('feature-name', 'v0.1.0', '01.2.3', ''):
+            with self.assertRaises(ValueError):
+                self.plan(declared_version=version)
+        dev = self.plan(paths=['VERSION'])
+        self.assertEqual(dev['version'], '0.1.0-dev+sha.' + SHA[:12])
+        self.assertFalse(dev['publish'])
+
+    def test_diagnostic_label_does_not_change_version_or_image_identity(self):
+        for publication in ('publish_latest', 'publish_test_image'):
+            plans = [self.plan(name='workflow_dispatch', event={'inputs': {
+                publication: True, 'test_label': label}}, run_id='123', attempt='2')
+                for label in ('', 'posthog', 'feature-name')]
+            self.assertEqual(plans[0], plans[1])
+            self.assertEqual(plans[1], plans[2])
 
     def test_manual_default_only_validates(self):
         for inputs in ({}, {"publish_test_image": False}, {"publish_test_image": "false"}):
@@ -52,10 +73,10 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         result = self.plan(name="workflow_dispatch", ref="master", event={
             "inputs": {"publish_test_image": "true", "test_label": "intel-candidate"}},
             run_id="12345", attempt="2")
-        self.assertEqual(result["image_ref"], f"ghcr.io/{REPO}-test:test-intel-candidate-12345-2")
-        self.assertEqual(result["version"], "test-intel-candidate-12345-2")
+        self.assertEqual(result["image_ref"], f"ghcr.io/{REPO}-test:test-{SHA[:12]}-12345-2")
+        self.assertEqual(result["version"], "0.1.0-dev+sha." + SHA[:12])
         self.assertEqual(result["sha_ref"], "")
-        for label in ("", "edge", "latest", "../release", "UPPER", "two--hyphens", "a" * 33, "bad\nlabel"):
+        for label in ("edge", "latest", "../release", "UPPER", "two--hyphens", "a" * 33, "bad\nlabel"):
             # Even reserved-looking labels stay in the test package/tag namespace.
             if label in ("edge", "latest"):
                 r = self.plan(name="workflow_dispatch", event={"inputs": {"publish_test_image": True, "test_label": label}})
@@ -78,20 +99,20 @@ class ImagePublicationPolicyTests(unittest.TestCase):
     def test_latest_publication_is_deliberate_master_only_and_uses_application_package(self):
         event = {'inputs': {'publish_latest': 'true', 'test_label': 'runtime19'}}
         result = self.plan(name='workflow_dispatch', event=event, run_id='123', attempt='2')
-        self.assertEqual(result['image_ref'], f'ghcr.io/{REPO}:candidate-runtime19-123-2')
+        self.assertEqual(result['image_ref'], f'ghcr.io/{REPO}:v0.1.0')
         self.assertEqual(result['latest_ref'], f'ghcr.io/{REPO}:latest')
-        self.assertEqual(result['version'], 'candidate-runtime19-123-2')
+        self.assertEqual(result['version'], '0.1.0')
         self.assertTrue(result['publish'] and result['build_image'])
-        self.assertEqual(result['sha_ref'], '')
+        self.assertEqual(result['sha_ref'], f'ghcr.io/{REPO}:sha-{SHA}')
         for kind, ref in (('branch', 'feature'), ('tag', 'v1.2.3')):
             with self.assertRaises(ValueError):
                 self.plan(name='workflow_dispatch', kind=kind, ref=ref, event=event)
         for inputs in ({'publish_latest': True, 'publish_test_image': True, 'test_label': 'candidate'},
-                       {'publish_latest': True}, {'publish_latest': 'yes'}, {'publish_latest': 1}):
+                       {'publish_latest': 'yes'}, {'publish_latest': 1}):
             with self.assertRaises(ValueError):
                 self.plan(name='workflow_dispatch', event={'inputs': inputs})
         for name, kind, ref in (('push', 'branch', 'master'), ('pull_request', 'branch', 'feature'),
-                                ('push', 'tag', 'v1.2.3')):
+                                ('push', 'branch', 'master')):
             self.assertEqual(self.plan(name=name, kind=kind, ref=ref, paths=['pkg/ffmpeg/source.go'])['latest_ref'], '')
         self.assertEqual(self.plan(name='workflow_dispatch', event={'inputs': {'publish_latest': False}})['latest_ref'], '')
 
@@ -205,13 +226,49 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                    "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary")}
             subprocess.run([sys.executable, str(Path(policy.__file__))], env=env, check=True, capture_output=True)
             self.assertIn("publish=true\n", output.read_text())
-            self.assertIn(f"image_ref=ghcr.io/{REPO}-test:test-candidate-123-1\n", output.read_text())
+            self.assertIn(f"image_ref=ghcr.io/{REPO}-test:test-{checkout[:12]}-123-1\n", output.read_text())
             self.assertNotIn("edge\n", output.read_text())
             event.write_text(json.dumps({"inputs": {"publish_test_image": "true", "test_label": "../unsafe"}}))
             output.unlink()
             result = subprocess.run([sys.executable, str(Path(policy.__file__))], env=env, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(output.exists())
+
+    @unittest.skipUnless(shutil.which("ruby") and shutil.which("bash"), "offline YAML/shell parsers unavailable")
+    def test_immutable_publication_registry_guard_fails_closed(self):
+        workflow = Path(__file__).resolve().parent.parent / '.github/workflows/docker-publish.yml'
+        parsed = subprocess.check_output([
+            'ruby', '-ryaml', '-rjson', '-e', 'puts JSON.generate(YAML.load_file(ARGV[0]))', str(workflow)])
+        publisher = json.loads(parsed)['jobs']['publish']
+        guard = next(step for step in publisher['steps']
+                     if step.get('name') == 'Reject overwriting a published release version')
+        self.assertEqual(publisher['concurrency']['cancel-in-progress'], False)
+        self.assertEqual(guard['if'], "needs.ci-required.outputs.latest_ref != ''")
+        self.assertLess(publisher['steps'].index(guard), next(i for i, step in enumerate(publisher['steps'])
+                                                            if 'login-action' in step.get('uses', '')))
+        code = guard['run'].split("python3 - <<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        env = {'IMAGE_REF': f'ghcr.io/{REPO}:v0.1.0', 'GHCR_USER': 'dummy', 'GHCR_PASSWORD': 'dummy'}
+        def missing(code):
+            return urllib.error.HTTPError('https://ghcr.io/manifest', code, 'test', {}, None)
+        for status in (404, 200, 302, 401, 403, 429, 500):
+            response = io.BytesIO(b'{"token":"dummy"}')
+            manifest = io.BytesIO() if status == 200 else missing(status)
+            with patch.dict(os.environ, env), patch('urllib.request.OpenerDirector.open', side_effect=[response, manifest]) as request:
+                if status == 404:
+                    exec(code, {})
+                else:
+                    with self.assertRaises(SystemExit):
+                        exec(code, {})
+            self.assertEqual(request.call_args_list[1].args[0].method, 'HEAD')
+            self.assertEqual(request.call_args_list[1].args[0].full_url,
+                             f'https://ghcr.io/v2/{REPO}/manifests/v0.1.0')
+        for token in (b'{}', b'not-json'):
+            with patch.dict(os.environ, env), patch('urllib.request.OpenerDirector.open', return_value=io.BytesIO(token)):
+                with self.assertRaises(SystemExit):
+                    exec(code, {})
+        with patch.dict(os.environ, env), patch('urllib.request.OpenerDirector.open', side_effect=missing(401)):
+            with self.assertRaises(SystemExit):
+                exec(code, {})
 
     @unittest.skipUnless(shutil.which("ruby") and shutil.which("bash"), "offline YAML/shell parsers unavailable")
     def test_workflow_publication_boundary_and_shell_syntax(self):

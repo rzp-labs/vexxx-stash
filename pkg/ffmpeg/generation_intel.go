@@ -207,7 +207,7 @@ func runIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardw
 		}
 		if software == nil {
 			d.Actual = "none"
-			return d, fmt.Errorf("GPU %s generation failed at %s (software rendering disabled): %w", plan.Config.Backend, stage, err)
+			return d, WithIntelGenerationDiagnostic(fmt.Errorf("GPU %s generation failed at %s (software rendering disabled): %w", plan.Config.Backend, stage, err), d, plan.Source)
 		}
 		d.Actual = "software"
 		fallbackErr := software(ctx)
@@ -216,7 +216,7 @@ func runIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardw
 			d.Stage = "output"
 			d.Reason = intelFailureReason(fallbackErr)
 		}
-		return d, fallbackErr
+		return d, WithIntelGenerationDiagnostic(fallbackErr, d, plan.Source)
 	}
 	if !plan.Config.Enabled() {
 		if software == nil {

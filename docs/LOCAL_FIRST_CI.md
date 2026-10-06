@@ -89,6 +89,7 @@ installation is needed for these fast offline checks:
 
 ```sh
 python3 -m unittest discover -s scripts -p test_image_publication_policy.py
+python3 -m unittest discover -s scripts -p test_release_version.py
 python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
 python3 -m unittest discover -s scripts -p test_reuse_master_validation.py
 python3 -m unittest discover -s scripts -p test_reuse_pr_packaging.py
@@ -137,27 +138,62 @@ alternative, not a requirement to convert this project. Linux packaging/startup
 can be checked locally. Actual GPU drivers/devices, mounts, permissions and
 container integration still need the intended target environment when claimed.
 
-Manual workflow dispatch explicitly selects a full candidate build/smoke even
-without publication. Both publication options require master, a valid candidate/test label and an
-explicit opt-in. `publish_test_image` uses the separate test package.
-`publish_latest` instead publishes the exact tested image to a unique
-`candidate-<label>-<run>-<attempt>` tag in `ghcr.io/rzp-labs/vexxx-stash`, then tags
-and pushes those same bytes as `:latest`. The candidate tag is also the baked
-application version; no release version is invented. The options are mutually
-exclusive and default off. Ordinary master landings and normal releases do not
-update latest. The publication summary records image references and repository
-digests. Normal release tags must be exact `vMAJOR.MINOR.PATCH` and their
-commit must be reachable from master. Release/manual versions are baked before
-the build; retagging a development image cannot change its application version.
+## Fork release versions
+
+`VERSION` is the fork's source of truth, starting at `0.1.0` because this fork
+has no published Git tags or GitHub releases. Inherited upstream tags do not
+identify fork releases. Use SemVer: patch for compatible fixes, minor for added
+functionality, major for incompatible changes once the public API is stable.
+Before 1.0, document compatibility changes in the release notes.
+
+Released application/UI metadata, the OCI version label, PostHog `$app_version`
+and UI source-map release version use `0.1.0`; Git and GHCR tags use `v0.1.0`.
+The commit SHA remains separate revision/build provenance. Local and ordinary CI
+builds use `0.1.0-dev+sha.<12hex>`; a feature name or transport tag is never the
+application version. `make` resolves this default with Python 3 and `VERSION`.
+CI explicitly supplies the planned version to the backend and UI. Native symbol
+uploads retain the exact release binary's build ID and existing symbol settings.
+
+For a release, bump `VERSION` in the reviewed candidate, land it on master, then
+tag that exact commit `v<the VERSION value>`. Tag planning rejects a different
+version or a commit outside master. The exact final image is built/smoke-tested
+once and published as `:vMAJOR.MINOR.PATCH`, `:sha-<full SHA>` and `:latest`.
+The user's existing Compose `latest` reference therefore keeps working. Our
+publishers serialize and refuse to replace an existing version tag, including
+reruns; a new release needs a new version. Registry/auth/network uncertainty
+refuses publication. This is workflow enforcement, not a registry ruleset change.
+
+Manual workflow dispatch explicitly selects a full build/smoke even without
+publication. Both publication options require master and explicit opt-in; they
+are mutually exclusive and default off. `publish_latest` uses the same release
+version/tag policy as a tagged release. `publish_test_image` uses the separate
+test package, an opaque `test-<SHA prefix>-<run>-<attempt>` transport tag and the
+development application version. The optional diagnostic `test_label` affects
+neither version nor tag. Ordinary PR/master validation never publishes images.
+No image dispatch is needed to validate changes to version planning.
+
+The publication summary records image references and repository digests.
+Release versions are baked before the build; retagging a development image
+cannot change its application version.
 Until a trusted local-to-CI artifact intake exists, deliberate CI publication
 keeps the existing same-run build/smoke/archive/checksum handoff. The isolated
 publisher checks the smoke-tested image ID, checksums and revision/version/platform, then publishes those bytes without
 checkout or rebuilding. No arbitrary build artifact intake or general cache framework is introduced.
 
-## PostHog branch integration
+## PostHog build and runtime configuration
 
-The separate `feat/posthog-instrumentation` branch is not part of this patch.
-At `6801148`, Vite's actual upload condition includes
+Published builds embed the same `VITE_PUBLIC_POSTHOG_PROJECT_TOKEN` and
+`VITE_PUBLIC_POSTHOG_HOST` into the UI and Go backend. Backend events and
+lifecycle logs use that bundled destination automatically; no runtime toggle
+or duplicate production configuration is required. These are public ingestion
+settings, never the personal API key used to upload symbols/source maps.
+A complete `POSTHOG_PROJECT_TOKEN` + `POSTHOG_HOST` runtime pair overrides the
+backend destination. An incomplete runtime pair uses the bundled pair as a
+whole, so project tokens and hosts are never mixed across configurations.
+Development/local builds without both public build settings leave telemetry
+unconfigured; they do not invent credentials or a project destination.
+
+Vite's source-map upload condition includes
 `env.POSTHOG_UPLOAD_REQUIRED !== "false"`: explicitly setting the string `false`
 prevents frontend uploads even when API key/project ID are present. Leaving it
 unset can enable uploads. The Docker backend uploads only when

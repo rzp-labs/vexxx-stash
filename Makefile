@@ -106,13 +106,14 @@ ifndef GITHASH
 	$(eval GITHASH := $(shell git rev-parse --short HEAD))
 endif
 ifndef STASH_VERSION
-	$(eval STASH_VERSION := $(shell git describe --tags --exclude latest_develop))
+	$(eval STASH_VERSION := $(shell python3 scripts/release_version.py))
+	$(if $(STASH_VERSION),,$(error Unable to resolve the fork VERSION and commit identity))
 endif
 ifndef OFFICIAL_BUILD
 	$(eval OFFICIAL_BUILD := false)
 endif
 ifndef STASH_RELEASE_REPO
-	$(eval STASH_RELEASE_REPO := Serechops/vexxx-stash)
+	$(eval STASH_RELEASE_REPO := rzp-labs/vexxx-stash)
 endif
 
 .PHONY: build-flags
@@ -123,6 +124,8 @@ build-flags: build-info
 	$(eval BUILD_LDFLAGS += -X 'github.com/stashapp/stash/internal/build.version=$(STASH_VERSION)')
 	$(eval BUILD_LDFLAGS += -X 'github.com/stashapp/stash/internal/build.officialBuild=$(OFFICIAL_BUILD)')
 	$(eval BUILD_LDFLAGS += -X 'github.com/stashapp/stash/internal/build.releaseRepo=$(STASH_RELEASE_REPO)')
+	$(eval BUILD_LDFLAGS += -X 'github.com/stashapp/stash/internal/analytics.bundledProjectToken=$(VITE_PUBLIC_POSTHOG_PROJECT_TOKEN)')
+	$(eval BUILD_LDFLAGS += -X 'github.com/stashapp/stash/internal/analytics.bundledHost=$(VITE_PUBLIC_POSTHOG_HOST)')
 	$(eval BUILD_FLAGS := -v -tags "$(GO_BUILD_TAGS)" $(GO_BUILD_FLAGS) -ldflags "$(BUILD_LDFLAGS)")
 
 .PHONY: stash
@@ -192,8 +195,8 @@ build-release-posthog-macos:
 	$(MAKE) flags-pie flags-posthog-macos STASH_OUTPUT="-o $(POSTHOG_BINARY)" stash
 	$(MAKE) posthog-symbols-upload
 
-# A bare binary does not load .env. Export the same runtime configuration read
-# by internal/analytics/posthog.go before launching the uploaded artifact.
+# Bundled public settings need no runtime configuration. This launcher also
+# exports a complete operator override from .env when one is supplied.
 .PHONY: run-release-posthog
 run-release-posthog:
 	set -a; . ./.env; set +a; ./$(POSTHOG_BINARY)

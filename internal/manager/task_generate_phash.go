@@ -84,6 +84,7 @@ func (t *GeneratePhashTask) Start(ctx context.Context) error {
 		if err != nil {
 			logger.Errorf("Error generating phash for %q: %v", t.File.Path, err)
 			logErrorOutput(err)
+			reportGenerationFailure(ctx, err)
 			return nil
 		}
 
@@ -100,6 +101,7 @@ func (t *GeneratePhashTask) Start(ctx context.Context) error {
 		return r.File.Update(ctx, t.File)
 	}); err != nil && ctx.Err() == nil {
 		logger.Errorf("Error setting phash: %v", err)
+		reportGenerationFailure(ctx, err)
 	}
 	return nil
 }

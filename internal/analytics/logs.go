@@ -3,7 +3,6 @@ package analytics
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -20,10 +19,7 @@ var (
 // records added by this integration. It deliberately does not attach to the
 // application's logrus loggers, so existing application logs stay local.
 func InitializeLogs() error {
-	// Supplying both settings is the operator's explicit opt-in. Missing settings
-	// disable telemetry in development as well as production.
-	projectToken := os.Getenv("POSTHOG_PROJECT_TOKEN")
-	host := os.Getenv("POSTHOG_HOST")
+	projectToken, host := posthogDestination()
 	if projectToken == "" || host == "" {
 		return nil
 	}
