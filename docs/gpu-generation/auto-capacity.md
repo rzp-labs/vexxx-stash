@@ -27,8 +27,14 @@ of observable host/device headroom and account for decoder/filter pools and
 extra libplacebo working surfaces. They are planning estimates, not codec
 allowlists, driver guarantees or proof that a number of lanes is safe. Missing
 memory counters mean unknown headroom; zero available memory is distinct.
+If an estimate exceeds half-headroom for even one lane, a capability-checked
+workload can exercise one lane after the budget drains, provided counters do not
+report exhaustion. That trial excludes overlapping budgeted work until release;
+it does not assert that the full render will succeed. Estimates still constrain
+additional lanes, and actual allocation errors retain their pressure handling.
 Admission counts every decoder lane and is cancellable, FIFO and shared across
-sheets and previews. Successful, validated rendering cautiously increases a
+sheets and previews. Each workload's trial counts only its own active lanes;
+the shared GPU ceiling counts all GPU lanes. Successful, validated rendering cautiously increases a
 workload's trial capacity. Observations are in memory only: restart or a changed
 runtime/workload identity starts fresh. An incomplete runtime fingerprint still
 permits a detected resource trial, but rendering evidence is not reused across

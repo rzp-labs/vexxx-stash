@@ -48,7 +48,7 @@ func newAdaptive(requested Settings, resources func() Resources) *Budget {
 	if cpuLimit == 0 {
 		cpuLimit = (Settings{}).Resolve(r).MaxProcesses
 	}
-	return &Budget{settings: effective, requested: requested, cpuLimit: cpuLimit, sharedGPULimit: effective.MaxGPUProcesses, resources: resources, learning: make(map[string]*capacity), memoryLimit: r.MemoryAvailable / 2, gpuMemoryLimit: r.GPUAvailable / 2}
+	return &Budget{settings: effective, requested: requested, cpuLimit: cpuLimit, sharedGPULimit: effective.MaxGPUProcesses, resources: resources, learning: make(map[string]*capacity), gpuByWorkload: make(map[string]int), memoryLimit: r.MemoryAvailable / 2, gpuMemoryLimit: r.GPUAvailable / 2}
 }
 
 func (b *Budget) AutoGPU() bool { return b != nil && b.requested.MaxGPUProcesses == 0 }
@@ -178,11 +178,16 @@ func (e *PressureError) Error() string { return e.Err.Error() }
 func (e *PressureError) Unwrap() error { return e.Err }
 func IsPressure(err error) bool        { var p *PressureError; return errors.As(err, &p) }
 
-func (b *Budget) memorySlots(w *waiter, slots int) int {
+func (b *Budget) memorySlots(w *waiter, slots int) (int, bool) {
 	if !b.AutoGPU() || w.workload.MemoryPerSlot <= 0 && w.workload.GPUPerSlot <= 0 {
-		return slots
+		return slots, false
 	}
 	r := b.resources()
+	// Costs are estimates, not measured minimum allocations. Once capability
+	// probes have passed, let an otherwise idle budget exercise one lane even
+	// when the estimate exceeds half-headroom. Its full estimated reservation
+	// still prevents overlapping work; an exhausted counter cannot be bypassed.
+	exclusiveTrial := slots > 0 && w.class == GPU && w.workload.Key != "" && b.active == 0 && r.MemoryAvailable != 0 && r.GPUAvailable != 0
 	// Budget half of observable headroom for generation surface estimates,
 	// leaving room for the driver, composition/output and unrelated host work.
 	if w.workload.MemoryPerSlot > 0 && r.MemoryAvailable >= 0 {
@@ -193,7 +198,10 @@ func (b *Budget) memorySlots(w *waiter, slots int) int {
 	}
 	// No exposed counter means unknown, not zero capacity. Driver pressure and
 	// successful workload observations remain authoritative in that case.
-	return slots
+	if slots < 1 && exclusiveTrial {
+		return 1, true
+	}
+	return slots, false
 }
 func (b *Budget) reserve(w *waiter) {
 	if !b.AutoGPU() {

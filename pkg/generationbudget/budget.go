@@ -46,14 +46,15 @@ const (
 )
 
 type waiter struct {
-	class    Class
-	slots    int
-	upTo     bool
-	workload Workload
-	gpuLimit int
-	ready    chan struct{}
-	granted  bool
-	err      error
+	class     Class
+	slots     int
+	upTo      bool
+	workload  Workload
+	gpuLimit  int
+	ready     chan struct{}
+	granted   bool
+	err       error
+	exclusive bool
 }
 
 // Budget atomically allocates total and GPU slots, avoiding lock-order deadlocks.
@@ -66,10 +67,12 @@ type Budget struct {
 	sharedGPULimit              int
 	resources                   func() Resources
 	learning                    map[string]*capacity
+	gpuByWorkload               map[string]int
 	reservedMemory, reservedGPU int64
 	memoryLimit, gpuMemoryLimit int64
 	mu                          sync.Mutex
 	active, gpuActive           int
+	exclusiveActive             bool
 	queue                       []*waiter
 }
 
@@ -135,7 +138,8 @@ func (b *Budget) acquireWorkload(ctx context.Context, class Class, slots int, up
 	if workload.Key != "" {
 		w.workload = workload
 		w.gpuLimit = b.selectCapacity(workload)
-		if b.memorySlots(w, 1) < 1 && b.active == 0 {
+		memorySlots, _ := b.memorySlots(w, 1)
+		if memorySlots < 1 && b.active == 0 {
 			b.mu.Unlock()
 			return 0, nil, &PressureError{Err: errors.New("insufficient observable memory headroom for generation surfaces")}
 		}
@@ -168,7 +172,7 @@ waiting:
 					}
 				}
 			} else {
-				b.finish(class, w.slots)
+				b.finish(w)
 				b.unreserve(w)
 			}
 			b.dispatch()
@@ -189,7 +193,7 @@ waiting:
 		once.Do(func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
-			b.finish(class, granted)
+			b.finish(w)
 			b.unreserve(w)
 			b.dispatch()
 		})
@@ -202,15 +206,27 @@ waiting:
 	return granted, release, nil
 }
 
-func (b *Budget) finish(class Class, slots int) {
-	b.active -= slots
-	if class == GPU {
-		b.gpuActive -= slots
+func (b *Budget) finish(w *waiter) {
+	b.active -= w.slots
+	if w.exclusive {
+		b.exclusiveActive = false
+	}
+	if w.class == GPU {
+		b.gpuActive -= w.slots
+		if key := w.workload.Key; key != "" {
+			b.gpuByWorkload[key] -= w.slots
+			if b.gpuByWorkload[key] == 0 {
+				delete(b.gpuByWorkload, key)
+			}
+		}
 	}
 }
 
 func (b *Budget) dispatch() {
 	for len(b.queue) > 0 {
+		if b.exclusiveActive {
+			return
+		}
 		w := b.queue[0]
 		available := b.settings.MaxProcesses - b.active
 		if w.class == CPU {
@@ -222,15 +238,16 @@ func (b *Budget) dispatch() {
 				w.gpuLimit = learned.limit
 			}
 			if w.gpuLimit > 0 {
-				available = min(available, w.gpuLimit-b.gpuActive)
+				available = min(available, w.gpuLimit-b.gpuByWorkload[w.workload.Key])
 			}
 		}
-		available = b.memorySlots(w, available)
+		available, w.exclusive = b.memorySlots(w, available)
 		if available < 1 || !w.upTo && w.slots > available {
 			// Once all admitted work has drained, no in-budget release can make
 			// this head fit. Fail it explicitly instead of indefinitely starving later
 			// CPU/probe work while polling the same impossible resource request.
-			if b.active == 0 && (b.memorySlots(w, 1) < 1 || b.AutoGPU() && w.class == GPU && !w.upTo && w.slots > b.sharedGPULimit) {
+			memorySlots, _ := b.memorySlots(w, 1)
+			if b.active == 0 && (memorySlots < 1 || b.AutoGPU() && w.class == GPU && !w.upTo && w.slots > b.sharedGPULimit) {
 				b.queue = b.queue[1:]
 				w.err = &PressureError{Err: errors.New("queued generation workload cannot fit current Auto resource capacity")}
 				close(w.ready)
@@ -243,8 +260,12 @@ func (b *Budget) dispatch() {
 		}
 		b.queue = b.queue[1:]
 		b.active += w.slots
+		b.exclusiveActive = w.exclusive
 		if w.class == GPU {
 			b.gpuActive += w.slots
+			if w.workload.Key != "" {
+				b.gpuByWorkload[w.workload.Key] += w.slots
+			}
 		}
 		b.reserve(w)
 		w.granted = true

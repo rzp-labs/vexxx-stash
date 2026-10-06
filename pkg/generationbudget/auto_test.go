@@ -3,6 +3,7 @@ package generationbudget
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -112,8 +113,104 @@ func TestAutoMemoryPressureWaitCancellationAndRelease(t *testing.T) {
 	}
 }
 
+func TestAutoAllowsExclusiveProbedTrialBelowEstimatedHeadroom(t *testing.T) {
+	r := Resources{CPUs: 4, MemoryAvailable: 11 << 29, GPUAvailable: -1}
+	b := newAdaptive(Settings{}, func() Resources { return r })
+	// The physical 8192x4096 ten-bit estimate is 3 GiB; available memory is
+	// 5.5 GiB. Passing capability probes does not prove this conservative cost.
+	w := Workload{Key: "runtime/8K/Main10", MemoryPerSlot: 8192 * 4096 * 96, GPUPerSlot: 8192 * 4096 * 96}
+	lanes, release, err := b.AcquireWorkload(context.Background(), w, 81)
+	if err != nil || lanes != 1 {
+		t.Fatalf("exclusive probed trial rejected: lanes=%d err=%v", lanes, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, _, err := b.AcquireWorkload(ctx, Workload{Key: "runtime/another", MemoryPerSlot: w.MemoryPerSlot}, 81); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("overestimated trial was not exclusive: %v", err)
+	}
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelProbe()
+	if releaseProbe, err := b.Acquire(probeCtx, GPU); !errors.Is(err, context.DeadlineExceeded) {
+		if releaseProbe != nil {
+			releaseProbe()
+		}
+		t.Fatalf("probe overlapped exclusive trial: %v", err)
+	}
+	release()
+	release()
+	if b.active != 0 || b.exclusiveActive || b.reservedMemory != 0 || b.reservedGPU != 0 {
+		t.Fatal("exclusive trial leaked reservations")
+	}
+	for _, exhausted := range []Resources{
+		{CPUs: 4, MemoryAvailable: 0, GPUAvailable: -1},
+		{CPUs: 4, MemoryAvailable: 11 << 29, GPUAvailable: 0},
+	} {
+		r = exhausted
+		if _, _, err := b.AcquireWorkload(context.Background(), w, 81); !IsPressure(err) {
+			t.Fatalf("actual exhausted counter bypassed: %+v err=%v", r, err)
+		}
+	}
+}
+
+func TestAutoWorkloadTrialExcludesOtherKeysActiveLanes(t *testing.T) {
+	b := newAdaptive(Settings{MaxProcesses: 64}, func() Resources { return Resources{CPUs: 64, MemoryAvailable: -1, GPUAvailable: -1} })
+	b.PrepareWorkload(Workload{Key: "larger-envelope"}) // Shared ceiling remains 8.
+	sheet, preview := Workload{Key: "sheet"}, Workload{Key: "preview"}
+	b.PrepareWorkload(sheet)
+	b.Observe(sheet, 8, time.Second, 81, &PressureError{Err: errors.New("allocation failure")})
+	b.PrepareWorkload(preview)
+	b.Observe(preview, 2, time.Second, 1, &PressureError{Err: errors.New("allocation failure")})
+	lanes, releaseSheet, err := b.AcquireWorkload(context.Background(), sheet, 4)
+	if err != nil || lanes != 4 {
+		t.Fatalf("sheet admission: %d %v", lanes, err)
+	}
+	defer releaseSheet()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	lanes, releasePreview, err := b.AcquireWorkload(ctx, preview, 1)
+	if err != nil || lanes != 1 {
+		t.Fatalf("unrelated sheet consumed preview trial despite shared headroom: %d %v", lanes, err)
+	}
+	defer releasePreview()
+	blocked, cancelBlocked := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelBlocked()
+	if _, _, err := b.AcquireWorkload(blocked, preview, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("same-key trial limit bypassed: %v", err)
+	}
+	releasePreview()
+	releaseSheet()
+	if b.active != 0 || b.gpuActive != 0 || len(b.gpuByWorkload) != 0 {
+		t.Fatal("per-workload release leaked active lanes")
+	}
+}
+
+func TestAutoCancellationDuringGrantReleasesWorkloadAndExclusiveState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelOnProbe := false
+	b := newAdaptive(Settings{}, func() Resources {
+		if cancelOnProbe {
+			cancel()
+		}
+		return Resources{CPUs: 4, MemoryAvailable: 11 << 29, GPUAvailable: -1}
+	})
+	cancelOnProbe = true // Cancellation races the grant after the initial ctx check.
+	w := Workload{Key: "runtime/8K", MemoryPerSlot: 3 << 30, GPUPerSlot: 3 << 30}
+	if _, release, err := b.AcquireWorkload(ctx, w, 81); !errors.Is(err, context.Canceled) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("cancelled grant accepted: %v", err)
+	}
+	if b.active != 0 || b.gpuActive != 0 || b.exclusiveActive || len(b.gpuByWorkload) != 0 || b.reservedMemory != 0 || b.reservedGPU != 0 {
+		t.Fatal("cancellation leaked grant/reservation state")
+	}
+}
+
 func TestQueuedUnfitAutoHeadFailsAfterDrainAndLaterCPUProgresses(t *testing.T) {
-	b := newAdaptive(Settings{MaxProcesses: 4}, func() Resources { return Resources{CPUs: 4, MemoryAvailable: 2 << 30, GPUAvailable: -1} })
+	var available atomic.Int64
+	available.Store(2 << 30)
+	b := newAdaptive(Settings{MaxProcesses: 4}, func() Resources { return Resources{CPUs: 4, MemoryAvailable: available.Load(), GPUAvailable: -1} })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	active, err := b.Acquire(ctx, CPU)
@@ -137,6 +234,7 @@ func TestQueuedUnfitAutoHeadFailsAfterDrainAndLaterCPUProgresses(t *testing.T) {
 		}
 	}()
 	waitForQueue(t, b, 2)
+	available.Store(0) // An exhausted counter, rather than an oversized estimate.
 	active()
 	select {
 	case err := <-failed:
