@@ -20,6 +20,7 @@ REPO = "rzp-labs/vexxx-stash"
 
 class ImagePublicationPolicyTests(unittest.TestCase):
     def plan(self, name="push", kind="branch", ref="master", paths=(), event=None, **kwargs):
+        kwargs.setdefault('declared_version', '0.1.0')
         return policy.plan(name, kind, ref, SHA, REPO, event or {}, paths, **kwargs)
 
     def test_master_and_pull_requests_never_publish(self):
