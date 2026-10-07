@@ -226,8 +226,11 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 	if err := cmd.Start(); err != nil {
 		return g.commandError(args, admitted, false, fmt.Errorf("error starting command: %w", err))
 	}
+	generationbudget.RecordProcess(ctx, cmd.Process.Pid)
 
-	if err := cmd.Wait(); err != nil {
+	waitErr := cmd.Wait()
+	generationbudget.RecordProcessResult(ctx, cmd.Process.Pid, cmd.ProcessState)
+	if err := waitErr; err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitErr.Stderr = stderr.Bytes()

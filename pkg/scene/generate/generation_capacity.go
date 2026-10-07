@@ -2,6 +2,9 @@ package generate
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -12,8 +15,20 @@ import (
 
 // Rendering uses the already-probed plan; metadata/capability checks are never
 // learned as throughput samples and never bypassed by a cached capacity value.
-func (g Generator) withGenerationWorkload(plan ffmpeg.IntelGenerationPlan, operation string) Generator {
+func generationFileWorkload(plan ffmpeg.IntelGenerationPlan, operation, input string) generationbudget.Workload {
 	w := plan.GenerationWorkload(operation)
+	identity := input
+	if info, err := os.Stat(input); err == nil {
+		identity += fmt.Sprintf("/%d/%d", info.Size(), info.ModTime().UnixNano())
+	}
+	// Equal geometry does not imply equal reference pools, seek cost or throughput.
+	// Never reuse a different file's measurements; do not expose its private path.
+	w.Key += fmt.Sprintf("/file-%x", sha256.Sum256([]byte(identity)))
+	return w
+}
+
+func (g Generator) withGenerationWorkload(plan ffmpeg.IntelGenerationPlan, operation, input string) Generator {
+	w := generationFileWorkload(plan, operation, input)
 	g.capacityWorkload = &w
 	g.capacityObservation = &capacityObservation{}
 	if b := g.generationBudget(); b != nil {
@@ -57,6 +72,10 @@ type capacityObservation struct {
 	elapsed              time.Duration
 	units, lanes, active int
 	err                  error
+	canonicalUnits       int
+	resourceSample       generationbudget.Sample
+	started              time.Time
+	coldPreview          bool
 }
 
 func (g Generator) finishCapacityWork(ctx context.Context, err error) {
@@ -65,12 +84,28 @@ func (g Generator) finishCapacityWork(ctx context.Context, err error) {
 	}
 	sample := g.capacityObservation
 	sample.mu.Lock()
-	defer sample.mu.Unlock()
 	if err != nil && sample.err == nil {
 		sample.err = err
 	}
 	if ctx.Err() != nil {
 		sample.err = ctx.Err()
 	}
-	g.generationBudget().Observe(*g.capacityWorkload, sample.lanes, sample.elapsed, sample.units, sample.err)
+	lanes, elapsed, units, observedErr := sample.lanes, sample.elapsed, sample.units, sample.err
+	canonicalUnits, measured, started, cold := sample.canonicalUnits, sample.resourceSample, sample.started, sample.coldPreview
+	sample.mu.Unlock()
+	b, w := g.generationBudget(), *g.capacityWorkload
+	if canonicalUnits > 0 && observedErr == nil {
+		measured.Elapsed = time.Since(started) // Include concat/final validation.
+		if cold {
+			b.RetainTestedCapacity(w, measured, lanes, canonicalUnits)
+		} else {
+			grew := b.RecordCanonicalSample(w, measured, lanes, canonicalUnits, canonicalUnits)
+			if measured.Isolated && !grew {
+				b.RefineCapacity(w, lanes)
+			}
+		}
+		b.FinishTuning(w)
+	} else {
+		b.Observe(w, lanes, elapsed, units, observedErr)
+	}
 }
