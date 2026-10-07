@@ -33,6 +33,7 @@ func (b *Budget) ScopeWorkload(w Workload) (Workload, func(bool)) {
 	w.Key += fmt.Sprintf("/generation-%d", b.sampleSequence.Add(1))
 	w.RuntimeUnidentified = false
 	b.mu.Lock()
+	revision := b.learningRevisions[base]
 	if identified {
 		if previous := b.learning[base]; previous != nil {
 			copy := *previous
@@ -43,12 +44,17 @@ func (b *Budget) ScopeWorkload(w Workload) (Workload, func(bool)) {
 	return w, func(validated bool) {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		if identified {
+		// A completed overlapping generation may have published or invalidated
+		// the base since this scope copied it. Stale cleanup only drops its own
+		// controller; revisions also distinguish absent -> published -> absent.
+		if identified && b.learningRevisions[base] == revision {
 			if learned := b.learning[w.Key]; validated && learned != nil && learned.measured {
 				copy := *learned
 				b.learning[base] = &copy
+				b.learningRevisions[base]++
 			} else if !validated {
 				delete(b.learning, base)
+				b.learningRevisions[base]++
 			}
 		}
 		delete(b.learning, w.Key)

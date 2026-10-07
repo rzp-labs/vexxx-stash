@@ -64,7 +64,7 @@ func newAdaptive(requested Settings, resources func() Resources) *Budget {
 	if cpuLimit == 0 {
 		cpuLimit = (Settings{}).Resolve(r).MaxProcesses
 	}
-	return &Budget{settings: effective, requested: requested, cpuLimit: cpuLimit, sharedGPULimit: effective.MaxGPUProcesses, resources: resources, processResources: DetectProcessResources, learning: make(map[string]*capacity), gpuByWorkload: make(map[string]int), memoryLimit: r.MemoryAvailable / 2, gpuMemoryLimit: r.GPUAvailable / 2}
+	return &Budget{settings: effective, requested: requested, cpuLimit: cpuLimit, sharedGPULimit: effective.MaxGPUProcesses, resources: resources, processResources: DetectProcessResources, learning: make(map[string]*capacity), learningRevisions: make(map[string]uint64), gpuByWorkload: make(map[string]int), memoryLimit: r.MemoryAvailable / 2, gpuMemoryLimit: r.GPUAvailable / 2}
 }
 
 func (b *Budget) AutoGPU() bool    { return b != nil && b.requested.MaxGPUProcesses == 0 }

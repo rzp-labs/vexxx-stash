@@ -70,6 +70,7 @@ type Budget struct {
 	resources                   func() Resources
 	processResources            func(int) ProcessResources
 	learning                    map[string]*capacity
+	learningRevisions           map[string]uint64
 	gpuByWorkload               map[string]int
 	reservedMemory, reservedGPU int64
 	memoryLimit, gpuMemoryLimit int64

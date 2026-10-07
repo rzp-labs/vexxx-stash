@@ -84,6 +84,9 @@ filter and operation/grid, and include private-hashed file identity and requeste
 sampling window. Equal 8K geometry or codec never shares another file's evidence.
 Concurrent generations have separate controllers. Identified file evidence stays
 in memory only after the complete output validates; failure invalidates it.
+Cleanup can publish or invalidate only the base revision its controller copied.
+An older overlapping generation cannot replace or erase newer evidence, or
+restore evidence after a newer invalidation.
 Unknown runtime identity permits adjustment within this generation without
 retained learning. Restart requires fresh evidence.
 

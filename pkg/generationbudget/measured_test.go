@@ -3,6 +3,7 @@ package generationbudget
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -441,5 +442,60 @@ func TestMeasuredSampleRequiresLiveOrObservedAllocationAndIgnoresCancellation(t 
 	_, err := b.Measure(context.Background(), w, func(context.Context) error { return context.Canceled })
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+func TestScopedCleanupPreservesNewerValidatedCapacity(t *testing.T) {
+	for _, seeded := range []bool{false, true} {
+		for _, staleValidated := range []bool{false, true} {
+			t.Run(fmt.Sprintf("seeded=%t/staleValidated=%t", seeded, staleValidated), func(t *testing.T) {
+				b := newAdaptive(Settings{}, func() Resources { return Resources{CPUs: 4, MemoryAvailable: 6 << 30, GPUAvailable: -1} })
+				base := Workload{Key: "same-file/preview", MemoryPerSlot: 3 << 30, GPUPerSlot: 3 << 30}
+				s := Sample{Elapsed: time.Second, MemoryPeak: 64 << 20, MemoryKnown: true, Isolated: true, Live: true, Processes: 1}
+				if seeded {
+					b.RetainTestedCapacity(base, s, 2, 15)
+				}
+				older, finishOlder := b.ScopeWorkload(base)
+				newer, finishNewer := b.ScopeWorkload(base)
+				b.RetainTestedCapacity(older, s, 1, 15)
+				b.RetainTestedCapacity(newer, s, 4, 15)
+				finishNewer(true)
+				finishOlder(staleValidated)
+				if !b.HasMeasuredCapacity(base) {
+					t.Fatal("older cleanup deleted newer validated capacity")
+				}
+				next, finishNext := b.ScopeWorkload(base)
+				lanes, release, err := b.AcquireWorkload(context.Background(), next, 15)
+				if err != nil {
+					t.Fatal(err)
+				}
+				release()
+				finishNext(true)
+				if lanes != 4 {
+					t.Fatalf("older cleanup replaced newer four-lane capacity: %d", lanes)
+				}
+				if len(b.learning) != 1 {
+					t.Fatal("scoped controller leaked after cleanup")
+				}
+			})
+		}
+	}
+}
+
+func TestScopedCleanupCannotRestoreEvidenceAfterNewerInvalidation(t *testing.T) {
+	b := newAdaptive(Settings{}, func() Resources { return Resources{CPUs: 4, MemoryAvailable: 6 << 30, GPUAvailable: -1} })
+	base := Workload{Key: "same-file/preview", MemoryPerSlot: 3 << 30, GPUPerSlot: 3 << 30}
+	s := Sample{Elapsed: time.Second, MemoryPeak: 64 << 20, MemoryKnown: true, Isolated: true, Live: true, Processes: 1}
+	older, finishOlder := b.ScopeWorkload(base)
+	newer, finishNewer := b.ScopeWorkload(base)
+	b.RetainTestedCapacity(older, s, 2, 15)
+	b.RetainTestedCapacity(newer, s, 4, 15)
+	finishNewer(true)
+	failed, finishFailed := b.ScopeWorkload(base)
+	b.StartTuning(failed)
+	finishFailed(false)
+	finishOlder(true)
+	if len(b.learning) != 0 || b.HasMeasuredCapacity(base) {
+		t.Fatal("stale cleanup resurrected evidence invalidated by a newer generation")
 	}
 }
