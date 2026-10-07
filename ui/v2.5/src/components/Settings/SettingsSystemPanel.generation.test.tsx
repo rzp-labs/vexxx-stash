@@ -193,7 +193,7 @@ describe("Intel generation settings rendered controls", () => {
       generationDevice: "relative",
       generationMaxProcesses: 4,
       generationMaxGPUProcesses: 2,
-      generationThreads: 65,
+      generationThreads: 2 ** 31,
       generationConfigurationError: "invalid saved configuration",
     };
     render(panel());
@@ -364,7 +364,7 @@ describe("Intel generation settings rendered controls", () => {
   it("preserves a readable GPU limit while requiring correction of an invalid total", async () => {
     mocks.persisted = {
       ...mocks.persisted,
-      generationMaxProcesses: 0,
+      generationMaxProcesses: 1,
       generationMaxGPUProcesses: 2,
       generationThreads: 3,
       generationConfigurationError:
@@ -443,7 +443,7 @@ describe("Intel generation settings rendered controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(
       screen.getByText(
-        "Generation limits must be whole numbers between 0 (auto) and 64."
+        "Generation limits must be whole numbers from 0 (Auto) to 2,147,483,647."
       )
     ).toBeInTheDocument();
     expect(
@@ -461,6 +461,16 @@ describe("Intel generation settings rendered controls", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     fireEvent.click(
+      within(document.getElementById("generationMaxProcesses")!).getByRole(
+        "button",
+        { name: "Edit" }
+      )
+    );
+    fireEvent.change(screen.getByRole("spinbutton"), {
+      target: { value: "1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    fireEvent.click(
       within(document.getElementById("generationMaxGPUProcesses")!).getByRole(
         "button",
         { name: "Edit" }
@@ -472,12 +482,13 @@ describe("Intel generation settings rendered controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(
       screen.getByText(
-        "GPU processes cannot exceed total processes (auto is 1)."
+        "Explicit GPU processes cannot exceed an explicit total process limit."
       )
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Save generation settings" })
     ).toBeDisabled();
+    expect(mocks.save).not.toHaveBeenCalled();
   });
   it("shows server-confirmed restart state and supports explicit software rollback", async () => {
     mocks.persisted = {

@@ -12,7 +12,7 @@ const software = {
 };
 
 describe("generation settings proposals", () => {
-  it("retains software defaults and conservative automatic limits", () => {
+  it("retains software defaults and runtime automatic limits", () => {
     expect(validateGenerationSettings(software)).toBeUndefined();
     expect(
       validateGenerationSettings({
@@ -22,7 +22,7 @@ describe("generation settings proposals", () => {
       })
     ).toBeUndefined();
   });
-  it.each([-1, 65, 1.5, NaN])(
+  it.each([-1, 2 ** 31, 1.5, NaN])(
     "rejects invalid limits %s",
     (generationThreads) => {
       expect(
@@ -30,9 +30,16 @@ describe("generation settings proposals", () => {
       ).toBe("config.general.generation.invalid_limits");
     }
   );
-  it("validates the coupled total/GPU proposal after resolving auto", () => {
+  it("validates explicit coupled limits and preserves Auto requests", () => {
     expect(
       validateGenerationSettings({ ...software, generationMaxGPUProcesses: 2 })
+    ).toBeUndefined();
+    expect(
+      validateGenerationSettings({
+        ...software,
+        generationMaxProcesses: 1,
+        generationMaxGPUProcesses: 2,
+      })
     ).toBe("config.general.generation.invalid_gpu_limit");
     expect(
       validateGenerationSettings({
@@ -68,4 +75,22 @@ it("keeps scene previews independent and rejects unvalidated QSV", () => {
   expect(
     validateGenerationSettings({ ...software, generationPreviewBackend: "qsv" })
   ).toBe("config.general.generation.invalid_backend");
+});
+
+it("accepts explicit values above64 and preserves automatic coupled requests", () => {
+  expect(
+    validateGenerationSettings({
+      ...software,
+      generationMaxProcesses: 256,
+      generationMaxGPUProcesses: 128,
+      generationThreads: 96,
+    })
+  ).toBeUndefined();
+  expect(
+    validateGenerationSettings({
+      ...software,
+      generationMaxProcesses: 1,
+      generationMaxGPUProcesses: 0,
+    })
+  ).toBeUndefined();
 });

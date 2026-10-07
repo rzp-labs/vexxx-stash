@@ -44,6 +44,9 @@ func metadataFixture(t *testing.T) (*Manager, string, string, string) {
 	}
 	cfg := config.InitializeEmpty()
 	cfg.SetInterface(config.GenerationBudgetEnabled, true)
+	cfg.SetInt(config.GenerationMaxProcesses, 1)
+	cfg.SetInt(config.GenerationMaxGPUProcesses, 1)
+	cfg.SetInt(config.GenerationThreads, 1)
 	p := paths.NewPaths(filepath.Join(dir, "generated"), filepath.Join(dir, "blobs"))
 	mgr := &Manager{Config: cfg, FFProbe: ffmpeg.NewFFProbe(probe), ReadLockManager: fsutil.NewReadLockManager(), Paths: &p}
 	return mgr, input, argsPath, block

@@ -26,7 +26,7 @@ func (c intelOnlyBudgetConfig) GetIntelGenerationBudget() *generationbudget.Budg
 }
 
 func TestIntelScopePreservesOrdinaryCPUAdmission(t *testing.T) {
-	budget, _ := generationbudget.New(generationbudget.Settings{})
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
 	g := Generator{FFMpegConfig: intelOnlyBudgetConfig{intel: budget}}
 	intel := g.WithIntelGenerationBudget()
 	if g.generationBudget() != nil || intel.generationBudget() != budget {
@@ -61,7 +61,7 @@ func TestIntelScopePreservesOrdinaryCPUAdmission(t *testing.T) {
 func TestIntelStagesAndUnsupportedMarkerAdmission(t *testing.T) {
 	for _, workload := range []string{"sprite", "marker-quality-rejection"} {
 		t.Run(workload, func(t *testing.T) {
-			budget, _ := generationbudget.New(generationbudget.Settings{})
+			budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
 			release, _ := budget.Acquire(context.Background(), generationbudget.GPU)
 			defer release()
 			g := Generator{FFMpegConfig: intelOnlyBudgetConfig{intel: budget}, LockManager: fsutil.NewReadLockManager()}
@@ -107,7 +107,7 @@ func TestIntelSpriteMetadataFailureDoesNotStartCPUFallback(t *testing.T) {
 	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	budget, _ := generationbudget.New(generationbudget.Settings{})
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
 	g := Generator{FFMpegConfig: intelOnlyBudgetConfig{intel: budget}, Encoder: ffmpeg.NewEncoder(binary), LockManager: fsutil.NewReadLockManager(), IntelSprites: &ffmpeg.IntelGenerationConfig{Backend: "vaapi"}}
 	output := filepath.Join(dir, "sprite.jpg")
 	if err := os.WriteFile(output, []byte("original"), 0600); err != nil {

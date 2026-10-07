@@ -10,10 +10,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
-// Settings are opt-in. Zero means conservative automatic sizing (one), not
-// unlimited work. Negative and excessively large values are rejected.
+// Settings are opt-in. Zero requests runtime Auto sizing, never unlimited work.
+// Persisted requests remain distinct from resolved, adaptive settings.
 type Settings struct {
 	MaxProcesses    int
 	MaxGPUProcesses int
@@ -27,14 +28,11 @@ func (s Settings) Normalize() (Settings, error) {
 	}{
 		{"max processes", &s.MaxProcesses}, {"max GPU processes", &s.MaxGPUProcesses}, {"threads", &s.Threads},
 	} {
-		if *entry.value < 0 || *entry.value > 64 {
-			return Settings{}, fmt.Errorf("generation budget %s must be between 0 (auto) and 64", entry.name)
-		}
-		if *entry.value == 0 {
-			*entry.value = 1
+		if *entry.value < 0 {
+			return Settings{}, fmt.Errorf("generation budget %s must be nonnegative (0 selects Auto)", entry.name)
 		}
 	}
-	if s.MaxGPUProcesses > s.MaxProcesses {
+	if s.MaxProcesses > 0 && s.MaxGPUProcesses > s.MaxProcesses {
 		return Settings{}, errors.New("generation budget GPU processes cannot exceed total processes")
 	}
 	return s, nil
@@ -48,32 +46,45 @@ const (
 )
 
 type waiter struct {
-	class   Class
-	slots   int
-	upTo    bool
-	ready   chan struct{}
-	granted bool
+	class     Class
+	slots     int
+	upTo      bool
+	workload  Workload
+	gpuLimit  int
+	ready     chan struct{}
+	granted   bool
+	err       error
+	exclusive bool
 }
 
 // Budget atomically allocates total and GPU slots, avoiding lock-order deadlocks.
 // FIFO admission prevents continuous CPU traffic from starving GPU work (and
 // vice versa). All GPU work consumes a total slot as it also uses CPU resources.
 type Budget struct {
-	settings          Settings
-	mu                sync.Mutex
-	active, gpuActive int
-	queue             []*waiter
+	settings                    Settings
+	requested                   Settings
+	cpuLimit                    int
+	sharedGPULimit              int
+	resources                   func() Resources
+	learning                    map[string]*capacity
+	gpuByWorkload               map[string]int
+	reservedMemory, reservedGPU int64
+	memoryLimit, gpuMemoryLimit int64
+	mu                          sync.Mutex
+	active, gpuActive           int
+	exclusiveActive             bool
+	queue                       []*waiter
 }
 
 func New(settings Settings) (*Budget, error) {
-	normalized, err := settings.Normalize()
-	if err != nil {
-		return nil, err
-	}
-	return &Budget{settings: normalized}, nil
+	return NewForDevice(settings, "")
 }
 
-func (b *Budget) Settings() Settings { return b.settings }
+func (b *Budget) Settings() Settings {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.settings
+}
 
 // Acquire waits cancellably for a leaf execution stage. Release is idempotent
 // and must be deferred immediately, covering success, failure and cancellation.
@@ -99,6 +110,9 @@ func (b *Budget) AcquireUpTo(ctx context.Context, class Class, maxSlots int) (in
 }
 
 func (b *Budget) acquire(ctx context.Context, class Class, slots int, upTo bool) (int, func(), error) {
+	return b.acquireWorkload(ctx, class, slots, upTo, Workload{})
+}
+func (b *Budget) acquireWorkload(ctx context.Context, class Class, slots int, upTo bool, workload Workload) (int, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return 0, nil, err
 	}
@@ -111,7 +125,9 @@ func (b *Budget) acquire(ctx context.Context, class Class, slots int, upTo bool)
 	if b == nil {
 		return slots, func() {}, nil
 	}
-	if slots > b.settings.MaxProcesses || (class == GPU && slots > b.settings.MaxGPUProcesses) {
+	limits := b.Settings()
+	adaptiveWork := class == GPU && workload.Key != "" && b.AutoGPU() && upTo
+	if !adaptiveWork && (slots > limits.MaxProcesses || class == GPU && slots > limits.MaxGPUProcesses) {
 		return 0, nil, errors.New("generation budget reservation exceeds configured limits")
 	}
 	if ctx.Value(scopeKey{}) == b {
@@ -119,35 +135,66 @@ func (b *Budget) acquire(ctx context.Context, class Class, slots int, upTo bool)
 	}
 	w := &waiter{class: class, slots: slots, upTo: upTo, ready: make(chan struct{})}
 	b.mu.Lock()
+	if workload.Key != "" {
+		w.workload = workload
+		w.gpuLimit = b.selectCapacity(workload)
+		memorySlots, _ := b.memorySlots(w, 1)
+		if memorySlots < 1 && b.active == 0 {
+			b.mu.Unlock()
+			return 0, nil, &PressureError{Err: errors.New("insufficient observable memory headroom for generation surfaces")}
+		}
+	}
 	b.queue = append(b.queue, w)
 	b.dispatch()
 	b.mu.Unlock()
-	select {
-	case <-w.ready:
-	case <-ctx.Done():
-		b.mu.Lock()
-		if !w.granted {
-			for i, pending := range b.queue {
-				if pending == w {
-					b.queue = append(b.queue[:i], b.queue[i+1:]...)
-					break
-				}
-			}
-		} else {
-			b.finish(class, w.slots)
-		}
-		b.dispatch()
-		b.mu.Unlock()
-		return 0, nil, ctx.Err()
+	var tick <-chan time.Time
+	if b.AutoGPU() && workload.Key != "" {
+		timer := time.NewTicker(time.Second)
+		defer timer.Stop()
+		tick = timer.C
 	}
-	// Closing ready synchronizes the granted count written by dispatch.
+waiting:
+	for {
+		select {
+		case <-tick:
+			b.mu.Lock()
+			b.dispatch()
+			b.mu.Unlock()
+		case <-w.ready:
+			break waiting
+		case <-ctx.Done():
+			b.mu.Lock()
+			if !w.granted {
+				for i, pending := range b.queue {
+					if pending == w {
+						b.queue = append(b.queue[:i], b.queue[i+1:]...)
+						break
+					}
+				}
+			} else {
+				b.finish(w)
+				b.unreserve(w)
+			}
+			b.dispatch()
+			b.mu.Unlock()
+			return 0, nil, ctx.Err()
+		}
+	}
+	// Closing ready synchronizes either a grant or an impossible queued request.
+	if err := ctx.Err(); err != nil && !w.granted {
+		return 0, nil, err
+	}
+	if w.err != nil {
+		return 0, nil, w.err
+	}
 	granted := w.slots
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
-			b.finish(class, granted)
+			b.finish(w)
+			b.unreserve(w)
 			b.dispatch()
 		})
 	}
@@ -159,21 +206,53 @@ func (b *Budget) acquire(ctx context.Context, class Class, slots int, upTo bool)
 	return granted, release, nil
 }
 
-func (b *Budget) finish(class Class, slots int) {
-	b.active -= slots
-	if class == GPU {
-		b.gpuActive -= slots
+func (b *Budget) finish(w *waiter) {
+	b.active -= w.slots
+	if w.exclusive {
+		b.exclusiveActive = false
+	}
+	if w.class == GPU {
+		b.gpuActive -= w.slots
+		if key := w.workload.Key; key != "" {
+			b.gpuByWorkload[key] -= w.slots
+			if b.gpuByWorkload[key] == 0 {
+				delete(b.gpuByWorkload, key)
+			}
+		}
 	}
 }
 
 func (b *Budget) dispatch() {
 	for len(b.queue) > 0 {
+		if b.exclusiveActive {
+			return
+		}
 		w := b.queue[0]
 		available := b.settings.MaxProcesses - b.active
-		if w.class == GPU {
-			available = min(available, b.settings.MaxGPUProcesses-b.gpuActive)
+		if w.class == CPU {
+			available = min(available, b.cpuLimit-(b.active-b.gpuActive))
 		}
-		if available < 1 || (!w.upTo && w.slots > available) {
+		if w.class == GPU {
+			available = min(available, b.sharedGPULimit-b.gpuActive)
+			if learned := b.learning[w.workload.Key]; learned != nil {
+				w.gpuLimit = learned.limit
+			}
+			if w.gpuLimit > 0 {
+				available = min(available, w.gpuLimit-b.gpuByWorkload[w.workload.Key])
+			}
+		}
+		available, w.exclusive = b.memorySlots(w, available)
+		if available < 1 || !w.upTo && w.slots > available {
+			// Once all admitted work has drained, no in-budget release can make
+			// this head fit. Fail it explicitly instead of indefinitely starving later
+			// CPU/probe work while polling the same impossible resource request.
+			memorySlots, _ := b.memorySlots(w, 1)
+			if b.active == 0 && (memorySlots < 1 || b.AutoGPU() && w.class == GPU && !w.upTo && w.slots > b.sharedGPULimit) {
+				b.queue = b.queue[1:]
+				w.err = &PressureError{Err: errors.New("queued generation workload cannot fit current Auto resource capacity")}
+				close(w.ready)
+				continue
+			}
 			return
 		}
 		if w.upTo {
@@ -181,9 +260,14 @@ func (b *Budget) dispatch() {
 		}
 		b.queue = b.queue[1:]
 		b.active += w.slots
+		b.exclusiveActive = w.exclusive
 		if w.class == GPU {
 			b.gpuActive += w.slots
+			if w.workload.Key != "" {
+				b.gpuByWorkload[w.workload.Key] += w.slots
+			}
 		}
+		b.reserve(w)
 		w.granted = true
 		close(w.ready)
 	}
@@ -314,7 +398,7 @@ func (b *Budget) FFMpegArgs(args []string) []string {
 	if b == nil || len(args) == 0 {
 		return args
 	}
-	threads := strconv.Itoa(b.settings.Threads)
+	threads := strconv.Itoa(b.Settings().Threads)
 	out := []string{"-filter_threads", threads, "-filter_complex_threads", threads}
 	for _, arg := range args {
 		// Thread options apply to the next input: repeat for each decoder.

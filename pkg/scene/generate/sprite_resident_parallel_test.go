@@ -53,6 +53,11 @@ func TestResidentSpriteFFmpegHelper(t *testing.T) {
 		}
 	}
 	data, _ := json.Marshal(record)
+	first, firstErr := os.OpenFile(filepath.Join(dir, "first-"+job+".json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if firstErr == nil {
+		_, _ = first.Write(data)
+		_ = first.Close()
+	}
 	start := filepath.Join(dir, "start-"+job+".json")
 	if err := os.WriteFile(start+".tmp", data, 0600); err != nil {
 		os.Exit(22)
@@ -65,6 +70,14 @@ func TestResidentSpriteFFmpegHelper(t *testing.T) {
 			break
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pressure-"+job)); err == nil && len(record.Seeks) > 1 {
+		fmt.Fprintln(os.Stderr, "Cannot allocate memory")
+		os.Exit(40)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "invalid-output-"+job)); err == nil {
+		_ = os.WriteFile(output, []byte("not a JPEG"), 0600)
+		os.Exit(0)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "fail-"+job)); err == nil {
 		fmt.Fprintln(os.Stderr, "injected GPU sheet failure")
@@ -505,6 +518,130 @@ func TestResidentSpriteEntryFailureCancellationAndPermitReuse(t *testing.T) {
 				t.Fatal("failed resident sheet leaked decoder permits", err)
 			}
 			release()
+		})
+	}
+}
+
+func TestResidentSpriteAutoRetriesOnlyExplicitResourcePressure(t *testing.T) {
+	for _, tt := range []struct {
+		name, flag  string
+		gpu         int
+		wantSuccess bool
+	}{
+		{"auto-pressure", "pressure", 0, true},
+		{"manual-pressure", "pressure", 4, false},
+		{"auto-driver-failure", "fail", 0, false},
+		{"auto-invalid-output", "invalid-output", 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			g, dir := residentSpriteTestGenerator(t, generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: tt.gpu, Threads: 1})
+			budget, err := generationbudget.NewWithResources(generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: tt.gpu, Threads: 1}, func() generationbudget.Resources {
+				return generationbudget.Resources{CPUs: 4, MemoryAvailable: 128 << 30, GPUAvailable: 64 << 30}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			g.Budget = budget
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			output := residentSpriteOutput(t, dir, "sheet")
+			if err := os.WriteFile(filepath.Join(dir, tt.flag+"-sheet"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			residentSpriteRelease(t, dir, "sheet")
+			_, err = g.IntelSpriteSheet(ctx, "synthetic.mp4", []float64{0.125, 1.5, 2.5, 3.5}, 9, 9, output)
+			if (err == nil) != tt.wantSuccess {
+				t.Fatalf("success=%t error=%v", tt.wantSuccess, err)
+			}
+			record := residentSpriteStart(t, ctx, dir, "sheet")
+			firstData, readErr := os.ReadFile(filepath.Join(dir, "first-sheet.json"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			var first residentSpriteCommand
+			if err := json.Unmarshal(firstData, &first); err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantSuccess {
+				if len(first.Seeks) != 2 || len(record.Seeks) != 1 {
+					t.Fatalf("retry did not reduce2 to1: %d -> %d", len(first.Seeks), len(record.Seeks))
+				}
+				if _, err := os.Stat(output); err != nil {
+					t.Fatal("validated retry not published", err)
+				}
+			} else {
+				if len(record.Seeks) != len(first.Seeks) {
+					t.Fatal("non-resource/manual failure was retried")
+				}
+				if _, err := os.Stat(output); !os.IsNotExist(err) {
+					t.Fatal("failed/invalid output was published", err)
+				}
+				if tt.gpu == 0 && g.Budget.Settings().MaxGPUProcesses != 2 {
+					t.Fatal("correctness failure taught capacity")
+				}
+			}
+			leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(output), ".*"))
+			if len(leftovers) != 0 {
+				t.Fatal("failed attempt leaked files", leftovers)
+			}
+			permit, err := g.Budget.Acquire(ctx, generationbudget.GPU)
+			if err != nil {
+				t.Fatal("render leaked permits", err)
+			}
+			permit()
+		})
+	}
+}
+
+func TestResidentSpriteEntrySelectsMixedAutoManualCapacity(t *testing.T) {
+	for _, request := range []generationbudget.Settings{
+		{}, {MaxProcesses: 4}, {MaxGPUProcesses: 4}, {MaxProcesses: 4, MaxGPUProcesses: 4},
+		{Threads: 3}, {MaxProcesses: 4, Threads: 3}, {MaxGPUProcesses: 4, Threads: 3}, {MaxProcesses: 4, MaxGPUProcesses: 4, Threads: 3},
+	} {
+		t.Run(fmt.Sprintf("total%d-gpu%d-threads%d", request.MaxProcesses, request.MaxGPUProcesses, request.Threads), func(t *testing.T) {
+			g, dir := residentSpriteTestGenerator(t, generationbudget.Settings{})
+			var err error
+			g.Budget, err = generationbudget.NewWithResources(request, func() generationbudget.Resources {
+				return generationbudget.Resources{CPUs: 1, MemoryAvailable: 128 << 30, GPUAvailable: 64 << 30}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if request.MaxProcesses == 0 && request.MaxGPUProcesses == 0 && g.Budget.Settings().MaxProcesses != 1 {
+				t.Fatal("fixture did not start at one CPU process")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			output := residentSpriteOutput(t, dir, "sheet")
+			residentSpriteRelease(t, dir, "sheet")
+			times := make([]float64, 81)
+			for i := range times {
+				times[i] = float64(i)
+			}
+			_, err = g.IntelSpriteSheet(ctx, "synthetic.mp4", times, 9, 9, output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := residentSpriteStart(t, ctx, dir, "sheet")
+			if len(record.Seeks) <= 1 {
+				t.Fatal("initial CPU total capped GPU trial")
+			}
+			if request.MaxProcesses > 0 && len(record.Seeks) > request.MaxProcesses {
+				t.Fatal("GPU exceeded manual total")
+			}
+			if len(record.Seeks) != g.Budget.Settings().MaxGPUProcesses {
+				t.Fatalf("render lanes%d differ from effective capacity%d", len(record.Seeks), g.Budget.Settings().MaxGPUProcesses)
+			}
+			if request.MaxGPUProcesses > 0 && len(record.Seeks) != request.MaxGPUProcesses {
+				t.Fatal("manual GPU request changed")
+			}
+			wantThreads := request.Threads
+			if wantThreads == 0 {
+				wantThreads = 1
+			}
+			if g.Budget.Settings().Threads != wantThreads {
+				t.Fatal("mixed Auto/manual threads changed")
+			}
 		})
 	}
 }

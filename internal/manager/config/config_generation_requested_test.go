@@ -2,10 +2,12 @@ package config
 
 import (
 	"bytes"
+	"github.com/stashapp/stash/pkg/generationbudget"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -14,9 +16,8 @@ func TestGenerationPatchRejectsWholeInvalidProposal(t *testing.T) {
 	for _, invalid := range []GenerationConfigurationPatch{
 		{MarkerBackend: ptr("native")}, {SpriteBackend: ptr("auto")},
 		{Device: ptr("relative")}, {Device: ptr("/dev/dri/renderDwrong")},
-		{MaxProcesses: ptr(-1)}, {Threads: ptr(65)},
+		{MaxProcesses: ptr(-1)}, {Threads: ptr(-1)},
 		{MaxProcesses: ptr(1), MaxGPUProcesses: ptr(2)},
-		{MaxProcesses: ptr(0), MaxGPUProcesses: ptr(2)},
 	} {
 		c := InitializeEmpty()
 		invalid.BudgetEnabled = ptr(true)
@@ -399,5 +400,46 @@ func TestGenerationInvalidSavedFieldPreservesReadableValues(t *testing.T) {
 				t.Fatalf("correction reset valid saved values: %+v %v", saved, err)
 			}
 		})
+	}
+}
+
+func TestAutoEffectiveLimitsDoNotRewriteSavedRequestOrRequireRestart(t *testing.T) {
+	c := InitializeEmpty()
+	c.SetString(SpriteGenerationBackend, "vaapi")
+	c.filePath = filepath.Join(t.TempDir(), "config.yml")
+	b := c.GetIntelGenerationBudget()
+	request, err := c.GetRequestedGenerationConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := generationbudget.Workload{Key: "validated-plan"}
+	before := b.PrepareWorkload(w)
+	for range 2 {
+		b.Observe(w, before, time.Second, 81, nil)
+	}
+	effective := c.GetActiveGenerationConfiguration()
+	if effective.MaxGPUProcesses != b.Settings().MaxGPUProcesses {
+		t.Fatal("active configuration hides learned limits")
+	}
+	after, err := c.GetRequestedGenerationConfiguration()
+	if err != nil || after != request || after.MaxProcesses != 0 || after.MaxGPUProcesses != 0 || after.Threads != 0 {
+		t.Fatalf("Auto request rewritten: %+v %v", after, err)
+	}
+	if c.GenerationRestartRequired() || c.GetGenerationBudget() != nil {
+		t.Fatal("learning changed restart status or CPU budget scope")
+	}
+	if err := c.Write(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := InitializeEmpty()
+	if err := restarted.load(c.filePath); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := restarted.GetRequestedGenerationConfiguration()
+	if err != nil || saved != request {
+		t.Fatalf("persisted resolved values: %+v %v", saved, err)
+	}
+	if err := restarted.ApplyGenerationConfigurationPatch(GenerationConfigurationPatch{MaxProcesses: ptr(0), MaxGPUProcesses: ptr(2)}); err != nil {
+		t.Fatal("Auto total rejected explicit GPU limit", err)
 	}
 }

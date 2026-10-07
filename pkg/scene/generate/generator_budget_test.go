@@ -21,7 +21,7 @@ func (c testBudgetConfig) GetTranscodeOutputArgs() []string              { retur
 func (c testBudgetConfig) GetGenerationBudget() *generationbudget.Budget { return c.budget }
 
 func TestGeneratorSharedBudgetAndOverride(t *testing.T) {
-	budget, _ := generationbudget.New(generationbudget.Settings{})
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
 	g := Generator{FFMpegConfig: testBudgetConfig{budget: budget}}
 	other := Generator{FFMpegConfig: testBudgetConfig{budget: budget}}
 	if g.generationBudget() != other.generationBudget() {
@@ -163,7 +163,7 @@ func TestGeneratorWeightedFailureReleasesPermits(t *testing.T) {
 }
 
 func TestGeneratorFailureReleasesPermit(t *testing.T) {
-	budget, _ := generationbudget.New(generationbudget.Settings{})
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
 	for _, path := range []string{filepath.Join(t.TempDir(), "missing-ffmpeg"), "/usr/bin/false"} {
 		if runtime.GOOS == "windows" {
 			t.Skip("Unix command fixtures")
@@ -243,7 +243,7 @@ func TestGeneratorProbeTimeoutStartsAfterBudgetAdmission(t *testing.T) {
 	if err := os.WriteFile(fixture, []byte("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffmpeg version 7.0'; fi\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	budget, _ := generationbudget.New(generationbudget.Settings{})
+	budget, _ := generationbudget.New(generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1, Threads: 1})
 	g := Generator{Budget: budget, Encoder: ffmpeg.NewEncoder(fixture)}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
