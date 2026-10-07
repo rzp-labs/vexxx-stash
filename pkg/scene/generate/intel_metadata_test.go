@@ -18,7 +18,7 @@ import (
 )
 
 func intelMetadataTestRecord() map[string]any {
-	return map[string]any{"width": 8192, "height": 4096, "pix_fmt": "p010le", "sample_aspect_ratio": "1/1",
+	return map[string]any{"stream_index": 0, "bit_depth": 10, "is_rgb": false, "width": 8192, "height": 4096, "pix_fmt": "p010le", "sample_aspect_ratio": "1/1",
 		"color_range": "tv", "color_space": "bt2020nc", "color_primaries": "bt2020", "color_transfer": "smpte2084", "frame_rate": "60000/1001"}
 }
 
@@ -31,7 +31,9 @@ func TestIntelGPUFrameMetadataRecoversActualHDRAndPreservesHeaderIdentity(t *tes
 	matrix := [9]int32{0, -65536, 0, 65536, 0, 0, 0, 0, 1073741824}
 	header := ffmpeg.IntelSource{Codec: "hevc", Profile: "Main 10", PixelFormat: "unknown", StreamIndex: 2,
 		DisplayMatrix: &matrix, Rotation: 90, Duration: "3465.078283", StartTime: "5.25", AverageFrameRate: "60000/1001"}
-	source, err := mergeIntelFrameMetadata(header, intelMetadataTestOutput(intelMetadataTestRecord()))
+	record := intelMetadataTestRecord()
+	record["stream_index"] = 2
+	source, err := mergeIntelFrameMetadata(header, intelMetadataTestOutput(record))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +49,7 @@ func TestIntelGPUFrameMetadataRecoversActualHDRAndPreservesHeaderIdentity(t *tes
 }
 
 func TestIntelGPUFrameMetadataNeverInventsMissingPixelProperties(t *testing.T) {
-	for _, field := range []string{"width", "height", "pix_fmt", "sample_aspect_ratio", "color_range", "color_space", "color_primaries", "color_transfer", "frame_rate"} {
+	for _, field := range []string{"stream_index", "bit_depth", "is_rgb", "width", "height", "pix_fmt", "sample_aspect_ratio", "color_range", "color_space", "color_primaries", "color_transfer", "frame_rate"} {
 		t.Run(field, func(t *testing.T) {
 			record := intelMetadataTestRecord()
 			delete(record, field)
@@ -60,7 +62,7 @@ func TestIntelGPUFrameMetadataNeverInventsMissingPixelProperties(t *testing.T) {
 		field string
 		value any
 	}{
-		{"width", 0}, {"height", -1}, {"pix_fmt", "vaapi"}, {"pix_fmt", "rgba"}, {"sample_aspect_ratio", "1/0"},
+		{"width", 0}, {"height", -1}, {"pix_fmt", "vaapi"}, {"bit_depth", 0}, {"stream_index", -1}, {"sample_aspect_ratio", "1/0"},
 		{"sample_aspect_ratio", "-1/1"}, {"color_range", "limited"}, {"color_space", ""}, {"color_transfer", "reserved"},
 		{"color_primaries", nil}, {"color_space", "bogus"}, {"color_primaries", "bogus"}, {"color_transfer", "bogus"}, {"frame_rate", "NaN"}, {"frame_rate", "-30/1"},
 	} {
@@ -106,8 +108,8 @@ func TestIntelGPUFrameMetadataKnownAbsenceAndRateFallback(t *testing.T) {
 	}
 	record := intelMetadataTestRecord()
 	record["frame_rate"] = "0/0"
-	if _, err := mergeIntelFrameMetadata(ffmpeg.IntelSource{}, intelMetadataTestOutput(record)); err == nil {
-		t.Fatal("invented a frame rate without any valid actual/header rate")
+	if source, err := mergeIntelFrameMetadata(ffmpeg.IntelSource{}, intelMetadataTestOutput(record)); err != nil || source.FrameRate != "" {
+		t.Fatal("time-based metadata must preserve unavailable frame rate", source, err)
 	}
 }
 
@@ -126,6 +128,27 @@ func TestIntelGPUFrameMetadataPreservesCanonicalContainerRate(t *testing.T) {
 	}
 }
 
+func TestIntelGPUFrameMetadataUsesActualSelectedCandidate(t *testing.T) {
+	unused := ffmpeg.IntelSource{Codec: "png", StreamIndex: 1, MetadataError: errors.New("unused invalid matrix")}
+	selected := ffmpeg.IntelSource{Codec: "av1", Profile: "Main", StreamIndex: 4, Duration: "18", StartTime: "2", FrameRate: "24/1"}
+	header := unused
+	header.MetadataCandidates = []ffmpeg.IntelSource{unused, selected}
+	record := intelMetadataTestRecord()
+	record["stream_index"], record["pix_fmt"], record["bit_depth"] = 4, "yuv422p12le", 12
+	source, err := mergeIntelFrameMetadata(header, intelMetadataTestOutput(record))
+	if err != nil || source.Codec != "av1" || source.StreamIndex != 4 || source.Duration != "18" || source.StartTime != "2" || source.BitDepth != 12 || source.PixelFormat != "yuv422p12le" || source.MetadataCandidates != nil {
+		t.Fatalf("selected source identity or actual precision lost: %+v %v", source, err)
+	}
+	record["stream_index"] = 1
+	if _, err := mergeIntelFrameMetadata(header, intelMetadataTestOutput(record)); err == nil || !strings.Contains(err.Error(), "unused invalid matrix") {
+		t.Fatal("selected invalid matrix was accepted", err)
+	}
+	record["stream_index"] = 9
+	if _, err := mergeIntelFrameMetadata(header, intelMetadataTestOutput(record)); err == nil {
+		t.Fatal("unidentified selected stream was accepted")
+	}
+}
+
 func metadataTestGenerator(t *testing.T, gpuScript string, settings generationbudget.Settings) Generator {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -134,7 +157,7 @@ func metadataTestGenerator(t *testing.T, gpuScript string, settings generationbu
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "ffprobe")
 	// Emulate missing SPS-dependent fields: only container identity is known.
-	header := `{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Main 10","index":2,"duration":"10","r_frame_rate":"60000/1001"}],"format":{"start_time":"0"}}`
+	header := `{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Main 10","index":0,"duration":"10","r_frame_rate":"60000/1001"}],"format":{"start_time":"0"}}`
 	if err := os.WriteFile(probe, []byte("#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffprobe version 8.1';exit 0;fi\ncase \" $* \" in *no_pixel_probe*) ;; *) exit 44;; esac\ncat <<'HEADER'\n"+header+"\nHEADER\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +174,7 @@ func metadataTestGenerator(t *testing.T, gpuScript string, settings generationbu
 
 func TestIntelMetadataStagesReleaseLeafPermitsAndUseOnlyWrappedHardwareFrame(t *testing.T) {
 	output := string(intelMetadataTestOutput(intelMetadataTestRecord()))
-	script := "case \" $* \" in *'-hwaccel vaapi'*'-hwaccel_strict 1'*'-hwaccel_metadata 1'*'-map 0:2 -frames:v 1 -an -c:v wrapped_avframe -f null -'*) ;; *) exit 45;; esac\nprintf '%s\\n' '" + output + "'\n"
+	script := "case \" $* \" in *'-hwaccel vaapi'*'-hwaccel_strict 1'*'-noautorotate -display_rotation:v 0 -hwaccel_metadata 1'*'-frames:v 1 -an -c:v wrapped_avframe -f null -'*) ;; *) exit 45;; esac\nprintf '%s\\n' '" + output + "'\n"
 	g := metadataTestGenerator(t, script, generationbudget.Settings{MaxProcesses: 1, MaxGPUProcesses: 1})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

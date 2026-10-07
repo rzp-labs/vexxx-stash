@@ -7,9 +7,9 @@ import (
 	"math/big"
 )
 
-// IntelPreviewSARFilter preserves display aspect after the canonical even-height
-// rounding. scale_vaapi adjusts its output link SAR but copies the input frame
-// SAR into encoded frames; setsar repairs only metadata on resident surfaces.
+// IntelPreviewSARFilter preserves source display aspect after rotation and the
+// canonical physical-dimension/even-height scaling. VPP can propagate stale
+// frame SAR; setsar repairs only metadata on resident hardware surfaces.
 func IntelPreviewSARFilter(source IntelSource, width int) string {
 	displayWidth, displayHeight := IntelDisplayDimensions(source)
 	if displayWidth <= 0 || displayHeight <= 0 || width <= 0 {
@@ -20,15 +20,30 @@ func IntelPreviewSARFilter(source IntelSource, width int) string {
 		height = 2
 	}
 	sar := big.NewRat(int64(displayWidth), int64(displayHeight))
+	inputSAR, err := intelSampleAspectRatio(source.SampleAspectRatio)
+	if err != nil {
+		return ""
+	}
+	if inputSAR != nil {
+		angle, err := intelRotationDegrees(source)
+		if err != nil {
+			return ""
+		}
+		orientedSAR := new(big.Rat).Set(inputSAR)
+		if angle == 90 || angle == 270 {
+			orientedSAR.Inv(orientedSAR)
+		}
+		sar.Mul(sar, orientedSAR)
+	}
 	sar.Mul(sar, big.NewRat(int64(height), int64(width)))
-	if sar.Cmp(big.NewRat(1, 1)) == 0 {
+	if sar.Cmp(big.NewRat(1, 1)) == 0 && (inputSAR == nil || inputSAR.Cmp(big.NewRat(1, 1)) == 0) {
 		return ""
 	}
 	return "setsar=sar=" + sar.RatString() + ":max=2147483647"
 }
 
-// IntelPreviewSource preserves automatic audio selection, independently of the
-// marker 8-bit guard and the sprite path's audio-free stream mapping.
+// IntelPreviewSource preserves automatic audio selection independently of the
+// sprite path's audio-free stream mapping.
 func (f *FFProbe) IntelPreviewSource(ctx context.Context, input string) (IntelSource, error) {
 	s, err := f.intelSource(ctx, input, true)
 	if err != nil {
@@ -40,31 +55,23 @@ func (f *FFProbe) IntelPreviewSource(ctx context.Context, input string) (IntelSo
 func (s IntelSource) ValidatePreview() error {
 	if IntelSourceHDR(s) {
 		if !IntelHDRSourceValid(s) {
-			return fmt.Errorf("GPU HDR preview requires explicit HEVC Main10 PQ/HLG BT.2020 limited-range interpretation")
+			return fmt.Errorf("GPU HDR preview requires explicit supported HDR color interpretation")
 		}
-		// This validation copy checks geometry/rotation without broadening the
-		// generic generation path. The original HDR tags feed the tone mapper.
-		s.PixelFormat = "yuv420p"
+		// This validation copy checks generic geometry and orientation while
+		// retaining the original HDR tags for the explicit tone mapping plan.
 		s.ColorTransfer, s.ColorPrimaries, s.ColorSpace = "", "", ""
-	} else if s.isMain10Sprite() {
-		// Only this documented SDR Main10 combination is converted to the scene
-		// preview's 8-bit output. HDR/wide gamut is not supported by this path.
-		s.PixelFormat = "yuv420p"
 	}
 	if err := s.Validate(); err != nil {
 		return err
 	}
-	if !s.HasSquareOrUnspecifiedSampleAspectRatio() {
-		return fmt.Errorf("sample aspect ratio %q (display aspect ratio %q) requires software scene previews", s.SampleAspectRatio, s.DisplayAspectRatio)
-	}
-	return nil
+	return s.ValidateSampleAspectRatio()
 }
 
 // NewIntelPreviewPlan keeps hardware frames resident through VAAPI scaling,
 // color/pixel conversion and H.264 encoding. Actual-source probes exercise the
 // same pipeline; unsupported hardware never authorizes a software retry.
 func NewIntelPreviewPlan(config IntelGenerationConfig, source IntelSource, input string, start float64, width int) (IntelGenerationPlan, error) {
-	p := IntelGenerationPlan{Config: config, Source: source}
+	p := IntelGenerationPlan{Config: config, Source: source, InputSource: source, RuntimeFingerprint: source.RuntimeFingerprint}
 	if config.Backend != "vaapi" {
 		return p, fmt.Errorf("scene previews support software or vaapi")
 	}

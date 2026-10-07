@@ -1,6 +1,10 @@
 package ffmpeg
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // IntelVulkanInputArgs keeps decode on the selected VAAPI device and derives
 // Vulkan from that same device. The packaged pool fix permits direct GPU
@@ -23,13 +27,57 @@ func IntelVulkanVAAPIReturnFilter() string {
 	return "hwmap=derive_device=vaapi:mode=read+direct,format=vaapi"
 }
 
-// IntelVulkanOutputFormat retains Main10 precision until the final VPP resize
-// and 8-bit output conversion. Both formats occupy one exportable DRM object.
+// IntelVulkanOutputFormat retains the decoded component precision until final
+// VPP conversion. The current single-object DRM bridge exports 8- or 10-bit RGB;
+// a higher-precision source must not silently negotiate one of those formats.
 func IntelVulkanOutputFormat(source IntelSource) string {
-	if source.PixelFormat == "yuv420p10le" {
+	depth := intelVulkanSourceBitDepth(source)
+	if depth > 8 && depth <= 10 {
 		return "x2rgb10le"
 	}
-	return "bgra"
+	if depth > 0 && depth <= 8 {
+		return "bgra"
+	}
+	return ""
+}
+
+func intelVulkanSourceBitDepth(source IntelSource) int {
+	if source.BitDepth != 0 {
+		return source.BitDepth
+	}
+	// Production metadata supplies the actual AVPixFmtDescriptor depth. Keep
+	// named fixture formats usable for older callers/tests without interpreting
+	// an unknown format as eight-bit.
+	switch source.PixelFormat {
+	case "yuv420p", "yuv422p", "yuv444p", "yuv440p", "yuv410p", "yuv411p", "yuvj420p", "yuvj422p", "yuvj444p", "nv12", "nv21", "rgb24", "bgr24", "rgba", "bgra", "argb", "abgr", "gbrp", "gray":
+		return 8
+	case "p010le", "p010be", "x2rgb10le", "x2rgb10be", "x2bgr10le", "x2bgr10be":
+		return 10
+	case "p012le", "p012be":
+		return 12
+	case "p016le", "p016be":
+		return 16
+	}
+	format := strings.TrimSuffix(strings.TrimSuffix(source.PixelFormat, "le"), "be")
+	for _, prefix := range []string{"yuv420p", "yuv422p", "yuv444p", "yuv440p", "gbrp", "gbrap", "gray"} {
+		if suffix, ok := strings.CutPrefix(format, prefix); ok {
+			if depth, err := strconv.Atoi(suffix); err == nil {
+				return depth
+			}
+		}
+	}
+	return 0
+}
+
+func intelValidateVulkanPrecision(source IntelSource) error {
+	if IntelVulkanOutputFormat(source) != "" {
+		return nil
+	}
+	depth := intelVulkanSourceBitDepth(source)
+	if depth <= 0 {
+		return fmt.Errorf("GPU Vulkan conversion requires the decoded component bit depth")
+	}
+	return fmt.Errorf("GPU Vulkan/VAAPI RGB export supports at most 10-bit components; decoded source has %d-bit components", depth)
 }
 
 // IntelRGBInterpretationFilter supplies iHD's complete CSC selector on full-range
@@ -44,7 +92,9 @@ func IntelRGBInterpretationFilter(source IntelSource) string {
 		primaries = "smpte170m"
 	case "smpte240m":
 		primaries, transfer = "smpte240m", "smpte240m"
-	default:
+	case "bt2020nc", "bt2020c":
+		primaries, transfer = "bt2020", "bt2020-10"
+	case "", "unknown", "unspecified":
 		matrix = "bt470bg"
 	}
 	return fmt.Sprintf("setparams=range=full:colorspace=%s:color_primaries=%s:color_trc=%s", matrix, primaries, transfer)

@@ -28,25 +28,37 @@ Container I/O, process orchestration, driver/shader setup, metadata probes,
 stream-copy concat and optional AAC audio encoding still require CPU work. Hardware video filtering and
 encoding do not make literal zero CPU usage possible.
 
-Eligible inputs have one video stream, unambiguous audio selection and square
-SAR: H.264/HEVC 8-bit 4:2:0 SDR, or HEVC Main10 `yuv420p10le` with explicit
-BT.709 primaries/matrix/transfer and limited (`tv`) range. Main10 SDR becomes the
-existing 8-bit preview through VAAPI VPP conversion. Right-angle display matrices,
+Input codecs, profiles and surface formats are checked by actual strict GPU
+decode/filter/encode probes on the selected runtime, without a codec allowlist.
+FFmpeg selects video and audio automatically using the canonical stream-selection
+rules; GPU first-frame metadata identifies the selected video's header candidate,
+actual dimensions, color interpretation and bit depth. Unsupported unused streams
+do not force software decoding. SDR precision becomes the existing 8-bit preview
+through VAAPI VPP conversion. Non-square SAR retains source display aspect after
+physical-dimension scaling and even-height rounding. Right-angle display matrices,
 including reflections, use `transpose_vaapi`; skew, perspective, nonunit scaling
 and arbitrary rotation fail explicitly. Even-height rounding retains the canonical
 display aspect ratio through exact SAR metadata.
 
-HEVC Main10 PQ/HLG with explicit BT.2020 matrix/primaries and limited range uses
+PQ/HLG with explicit color interpretation supported by libplacebo uses
 libplacebo BT.2390 tone mapping, perceptual gamut mapping and peak detection to
 BT.709 SDR. Stored LR180, TB360, MONO360 and FISHEYE190 projections use a GPU
 shader matching canonical first-eye, 120-degree diagonal-FOV, 1280×720 geometry
 and bilinear sampling. Rotation/reflection precedes projection. These operations
-derive Vulkan from the selected VAAPI device and retain ten-bit RGB precision
-for Main10 until final VAAPI NV12 conversion. Direct DMA-BUF import contains no
+derive Vulkan from the selected VAAPI device and retain actual 8- or 10-bit RGB
+precision until final VAAPI NV12 conversion. The current packed RGB import cannot
+preserve sources above ten bits; those shader paths fail explicitly. Direct DMA-BUF import contains no
 CPU pixel staging. Unknown SDR matrix interpretation follows the canonical
 BT.601 conversion, while source primaries/transfer tags remain unspecified.
 Other unsupported source tags or capabilities fail explicitly. Source timing is
 not resampled with an FPS filter. Existing low-frame-rate `vsync=2` handling remains.
+
+These eligibility changes do not establish visual acceptance for every codec,
+driver or color combination. The measured cases below remain specific to their
+recorded inputs. Original input geometry and a bounded runtime fingerprint are
+exposed on the plan for capacity learning after probes; neither is proof of a
+safe concurrent lane count. Missing runtime identity is reported as unavailable
+to the capacity caller.
 
 Animated scene and marker WebP have no supported GPU lossless animated encoder.
 A GPU request returns an explicit capability error without running `libwebp` or

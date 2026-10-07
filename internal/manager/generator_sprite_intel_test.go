@@ -40,7 +40,7 @@ func TestGPUSpriteManagerForwardsStoredProjection(t *testing.T) {
 				t.Fatal(err)
 			}
 			encoder := filepath.Join(dir, "ffmpeg")
-			frame := `VEXXX_GPU_METADATA={"width":1920,"height":1080,"pix_fmt":"nv12","sample_aspect_ratio":"1/1","color_range":"tv","color_space":"bt709","color_primaries":"bt709","color_transfer":"bt709","frame_rate":"25/1"}`
+			frame := `VEXXX_GPU_METADATA={"stream_index":0,"bit_depth":8,"is_rgb":false,"width":1920,"height":1080,"pix_fmt":"nv12","sample_aspect_ratio":"1/1","color_range":"tv","color_space":"bt709","color_primaries":"bt709","color_transfer":"bt709","frame_rate":"25/1"}`
 			if err := os.WriteFile(encoder, []byte("#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = '-hwaccel_metadata' ]; then printf '%s\\n' '"+frame+"';exit 0;fi;done\necho 'unexpected pixel generation' >&2\nexit 77\n"), 0700); err != nil {
 				t.Fatal(err)
 			}

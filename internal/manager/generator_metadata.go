@@ -3,9 +3,13 @@ package manager
 import (
 	"context"
 	"fmt"
+	"math"
+	"math/big"
+	"strconv"
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/generationbudget"
+	"github.com/stashapp/stash/pkg/scene/generate"
 )
 
 // generationMetadataStage acquires only for one metadata subprocess. Source
@@ -73,25 +77,97 @@ func (s *Manager) generationPreviewVideoFile(ctx context.Context, path string) (
 	if s.Config == nil || s.Config.GetIntelPreviewGeneration() == nil {
 		return s.generationVideoFile(ctx, path)
 	}
-	return s.generationHardwareVideoFile(ctx, path)
+	return s.generationHardwareVideoFile(ctx, path, *s.Config.GetIntelPreviewGeneration())
 }
 
 func (s *Manager) generationSpriteVideoFile(ctx context.Context, path string) (*ffmpeg.VideoFile, error) {
 	if s.Config == nil || s.Config.GetIntelSpriteGeneration() == nil {
 		return s.generationVideoFile(ctx, path)
 	}
-	return s.generationHardwareVideoFile(ctx, path)
+	return s.generationHardwareVideoFile(ctx, path, *s.Config.GetIntelSpriteGeneration())
 }
 
-func (s *Manager) generationHardwareVideoFile(ctx context.Context, path string) (*ffmpeg.VideoFile, error) {
+func (s *Manager) generationHardwareVideoFile(ctx context.Context, path string, intel ffmpeg.IntelGenerationConfig) (*ffmpeg.VideoFile, error) {
 	budget := s.Config.GetIntelGenerationBudget()
 	release, err := budget.Acquire(ctx, generationbudget.CPU)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
 	if s.FFProbe == nil {
+		release()
 		return nil, fmt.Errorf("ffprobe unavailable for GPU generation metadata")
 	}
-	return s.FFProbe.NewVideoFileMetadataContext(ctx, path, budget.Settings().Threads)
+	base, err := s.FFProbe.NewVideoFileMetadataContext(ctx, path, budget.Settings().Threads)
+	release()
+	if err != nil {
+		return nil, err
+	}
+	g := generate.Generator{Encoder: s.FFMpeg, Probe: s.FFProbe, LockManager: s.ReadLockManager, FFMpegConfig: s.Config}
+	source, err := g.IntelSourceMetadata(ctx, path, intel)
+	if err != nil {
+		return nil, err
+	}
+	if err := applySelectedGPUVideoSource(base, source); err != nil {
+		return nil, err
+	}
+	return base, nil
+}
+
+func applySelectedGPUVideoSource(file *ffmpeg.VideoFile, source ffmpeg.IntelSource) error {
+	var selected *ffmpeg.FFProbeStream
+	for index := range file.JSON.Streams {
+		stream := &file.JSON.Streams[index]
+		if stream.CodecType == "video" && stream.Index == source.StreamIndex {
+			selected = stream
+			break
+		}
+	}
+	if selected == nil {
+		return fmt.Errorf("GPU-selected stream %d missing from source headers", source.StreamIndex)
+	}
+	file.VideoStream, file.VideoCodec = selected, source.Codec
+	file.VideoBitrate, _ = strconv.ParseInt(selected.BitRate, 10, 64)
+	file.FrameCount = 0
+	if count, err := strconv.ParseInt(selected.NbFrames, 10, 64); err == nil && count > 0 {
+		file.FrameCount = count
+	}
+	if count, err := strconv.ParseInt(selected.NbReadFrames, 10, 64); err == nil && count > 0 {
+		file.FrameCount = count
+	}
+	selected.CodecName, selected.PixFmt = source.Codec, source.PixelFormat
+	selected.Profile = source.Profile
+	selected.Width, selected.Height = source.Width, source.Height
+	selected.RFrameRate, selected.AvgFrameRate = source.FrameRate, source.AverageFrameRate
+	selected.Duration = source.Duration
+	selected.SampleAspectRatio, selected.DisplayAspectRatio = source.SampleAspectRatio, source.DisplayAspectRatio
+	selected.ColorRange, selected.ColorSpace = source.ColorRange, source.ColorSpace
+	selected.ColorPrimaries, selected.ColorTransfer = source.ColorPrimaries, source.ColorTransfer
+	file.Width, file.Height = ffmpeg.IntelDisplayDimensions(source)
+	file.Rotation = int64(source.Rotation)
+	file.StartTime, _ = strconv.ParseFloat(source.StartTime, 64)
+	if math.IsInf(file.StartTime, 0) || math.IsNaN(file.StartTime) {
+		file.StartTime = 0
+	}
+	file.FrameRate = 0
+	for _, value := range []string{source.AverageFrameRate, source.FrameRate} {
+		if rate, ok := new(big.Rat).SetString(value); ok && rate.Sign() > 0 {
+			candidate, _ := rate.Float64()
+			if candidate > 0 && !math.IsInf(candidate, 0) && !math.IsNaN(candidate) {
+				// Preserve the existing VideoFile average-rate rounding contract.
+				candidate = math.Round(candidate*100) / 100
+				if !math.IsInf(candidate, 0) {
+					file.FrameRate = candidate
+					break
+				}
+			}
+		}
+	}
+	file.VideoStreamDuration, _ = strconv.ParseFloat(source.Duration, 64)
+	if file.VideoStreamDuration <= 0 || math.IsInf(file.VideoStreamDuration, 0) || math.IsNaN(file.VideoStreamDuration) {
+		file.VideoStreamDuration = 0
+		if file.FileDuration > 0 && !math.IsInf(file.FileDuration, 0) && !math.IsNaN(file.FileDuration) {
+			file.VideoStreamDuration = file.FileDuration
+		}
+	}
+	return nil
 }

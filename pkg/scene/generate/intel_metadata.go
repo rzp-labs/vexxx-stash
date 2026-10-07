@@ -33,18 +33,12 @@ func (g Generator) intelSourceMetadata(ctx context.Context, lockCtx *fsutil.Lock
 	if config.Backend != "vaapi" && config.Backend != "qsv" {
 		return source, fmt.Errorf("GPU metadata requires an explicit Intel hardware backend")
 	}
-	if source.Codec != "h264" && source.Codec != "hevc" {
-		return source, fmt.Errorf("GPU metadata does not support decoder %q", source.Codec)
-	}
-	if source.StreamIndex < 0 {
-		return source, fmt.Errorf("GPU metadata requires a valid video stream index")
-	}
 	if g.Encoder == nil {
 		return source, fmt.Errorf("ffmpeg unavailable for GPU frame metadata")
 	}
 	args := ffmpeg.Args{"-v", "error", "-nostdin", "-abort_on", "empty_output"}
 	args = append(args, ffmpeg.IntelInputArgs(config, source)...)
-	args = append(args, "-hwaccel_metadata", "1", "-i", input, "-map", fmt.Sprintf("0:%d", source.StreamIndex), "-frames:v", "1", "-an", "-c:v", "wrapped_avframe", "-f", "null", "-")
+	args = append(args, "-noautorotate", "-display_rotation:v", "0", "-hwaccel_metadata", "1", "-i", input, "-frames:v", "1", "-an", "-c:v", "wrapped_avframe", "-f", "null", "-")
 	output, err := g.generateOutputWithContext(ffmpeg.WithIntelProbeTimeout(ctx, 10*time.Second), lockCtx, args)
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -59,7 +53,11 @@ func (g Generator) intelSourceMetadata(ctx context.Context, lockCtx *fsutil.Lock
 		}
 		return source, fmt.Errorf("GPU first-frame metadata: %w", err)
 	}
-	return mergeIntelFrameMetadata(source, output)
+	source, err = mergeIntelFrameMetadata(source, output)
+	if err == nil {
+		source.RuntimeFingerprint = ffmpeg.IntelRuntimeFingerprint(g.Encoder.Path(), config.Device)
+	}
+	return source, err
 }
 
 func mergeIntelFrameMetadata(source ffmpeg.IntelSource, output []byte) (ffmpeg.IntelSource, error) {
@@ -76,6 +74,9 @@ func mergeIntelFrameMetadata(source ffmpeg.IntelSource, output []byte) (ffmpeg.I
 		return source, fmt.Errorf("GPU metadata did not return a first hardware frame record")
 	}
 	var frame struct {
+		StreamIndex *int    `json:"stream_index"`
+		BitDepth    *int    `json:"bit_depth"`
+		IsRGB       *bool   `json:"is_rgb"`
 		Width       *int    `json:"width"`
 		Height      *int    `json:"height"`
 		PixelFormat *string `json:"pix_fmt"`
@@ -89,6 +90,35 @@ func mergeIntelFrameMetadata(source ffmpeg.IntelSource, output []byte) (ffmpeg.I
 	if err := json.Unmarshal([]byte(line), &frame); err != nil {
 		return source, fmt.Errorf("invalid GPU metadata JSON: %w", err)
 	}
+	if frame.StreamIndex == nil || *frame.StreamIndex < 0 {
+		return source, fmt.Errorf("GPU metadata requires the selected stream index")
+	}
+	if len(source.MetadataCandidates) > 0 {
+		found := false
+		for _, candidate := range source.MetadataCandidates {
+			if candidate.StreamIndex == *frame.StreamIndex {
+				source, found = candidate, true
+				break
+			}
+		}
+		if !found {
+			return source, fmt.Errorf("GPU metadata selected an unknown video stream %d", *frame.StreamIndex)
+		}
+	} else if source.StreamIndex != *frame.StreamIndex {
+		return source, fmt.Errorf("GPU metadata stream index differs from source")
+	}
+	if source.MetadataError != nil {
+		return source, source.MetadataError
+	}
+	source.MetadataCandidates = nil
+	if frame.BitDepth == nil || *frame.BitDepth <= 0 {
+		return source, fmt.Errorf("GPU metadata requires valid actual pixel bit depth")
+	}
+	source.BitDepth = *frame.BitDepth
+	if frame.IsRGB == nil {
+		return source, fmt.Errorf("GPU metadata requires the actual RGB descriptor flag")
+	}
+	source.IsRGB = *frame.IsRGB
 	if frame.Width == nil || frame.Height == nil || *frame.Width <= 0 || *frame.Height <= 0 {
 		return source, fmt.Errorf("GPU metadata requires positive actual frame dimensions")
 	}
@@ -110,9 +140,12 @@ func mergeIntelFrameMetadata(source ffmpeg.IntelSource, output []byte) (ffmpeg.I
 		pixelFormat = "yuv420p"
 	case "p010le":
 		pixelFormat = "yuv420p10le"
-	case "yuv420p", "yuv420p10le", "yuvj420p":
 	default:
-		return source, fmt.Errorf("GPU metadata returned unsupported hardware pixel format %q", pixelFormat)
+		// The strict CLI reports the software descriptor of an actual resident
+		// hardware pool; format support belongs to the operation's GPU probes.
+		if pixelFormat == "vaapi" || pixelFormat == "qsv" || pixelFormat == "vulkan" || strings.ContainsAny(pixelFormat, " ,:;\t\n") {
+			return source, fmt.Errorf("GPU metadata returned invalid surface pixel format %q", pixelFormat)
+		}
 	}
 	sar, ok := new(big.Rat).SetString(strings.ReplaceAll(*frame.SAR, ":", "/"))
 	if !ok || sar.Sign() < 0 {
@@ -150,8 +183,6 @@ func mergeIntelFrameMetadata(source ffmpeg.IntelSource, output []byte) (ffmpeg.I
 			source.FrameRate = *frame.FrameRate
 		} else if validRate(source.AverageFrameRate) {
 			source.FrameRate = source.AverageFrameRate
-		} else {
-			return source, fmt.Errorf("GPU metadata and headers contain no valid frame rate")
 		}
 	}
 	source.Width, source.Height, source.PixelFormat = *frame.Width, *frame.Height, pixelFormat

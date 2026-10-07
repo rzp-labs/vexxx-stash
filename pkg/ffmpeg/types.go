@@ -46,6 +46,10 @@ type FFProbeStream struct {
 	CodecTagString     string `json:"codec_tag_string"`
 	CodecTimeBase      string `json:"codec_time_base"`
 	CodecType          string `json:"codec_type"`
+	ColorRange         string `json:"color_range,omitempty"`
+	ColorSpace         string `json:"color_space,omitempty"`
+	ColorPrimaries     string `json:"color_primaries,omitempty"`
+	ColorTransfer      string `json:"color_transfer,omitempty"`
 	CodedHeight        int    `json:"coded_height,omitempty"`
 	CodedWidth         int    `json:"coded_width,omitempty"`
 	DisplayAspectRatio string `json:"display_aspect_ratio,omitempty"`

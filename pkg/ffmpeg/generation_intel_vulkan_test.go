@@ -49,3 +49,28 @@ func TestIntelVulkanRGBPrecisionAndCSCMetadata(t *testing.T) {
 		t.Fatal("temporary CSC tags leaked into output:", restored)
 	}
 }
+
+func TestIntelVulkanExportPrecisionUsesActualDecodedDescriptor(t *testing.T) {
+	for _, test := range []struct {
+		format string
+		depth  int
+		want   string
+	}{
+		{"nv12", 8, "bgra"}, {"p010le", 10, "x2rgb10le"},
+		{"yuv422p10le", 10, "x2rgb10le"}, {"decoded-hardware-sw-format", 9, "x2rgb10le"},
+		// The actual descriptor overrides even a contradictory format spelling.
+		{"yuv420p", 10, "x2rgb10le"}, {"yuv420p10le", 8, "bgra"},
+		{"yuv420p12le", 12, ""}, {"p016le", 16, ""}, {"gbrpf32le", 32, ""},
+		{"unknown", 0, ""}, {"nv12", -1, ""},
+		// Legacy synthetic inputs still have a known precise format description.
+		{"yuv422p10le", 0, "x2rgb10le"}, {"yuv420p12le", 0, ""},
+	} {
+		source := IntelSource{PixelFormat: test.format, BitDepth: test.depth}
+		if got := IntelVulkanOutputFormat(source); got != test.want {
+			t.Errorf("%s depth%d: got %q, want %q", test.format, test.depth, got, test.want)
+		}
+		if err := intelValidateVulkanPrecision(source); (err == nil) != (test.want != "") {
+			t.Errorf("%s depth%d: precision validation %v", test.format, test.depth, err)
+		}
+	}
+}

@@ -126,15 +126,19 @@ func TestScenePreviewHardwareArgumentsPreserveContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Join(previewIntelArgs("in", previewChunkOptions{StartTime: 1.25, Duration: 0.75, OutputPath: "out.mp4", Audio: true, Preset: "veryslow"}, plan, true), " ")
-	for _, part := range []string{"-hwaccel vaapi", "-hwaccel_output_format vaapi", "-ss 1.25", "-t 0.75", "-c:v h264_vaapi", "-c:a aac", "-b:a 128k", "-map 0:2", "-map 0:a:0?", "-vsync 2", "-colorspace bt709", "-color_range tv", "-qp 21"} {
+	for _, part := range []string{"-hwaccel vaapi", "-hwaccel_output_format vaapi", "-ss 1.25", "-t 0.75", "-c:v h264_vaapi", "-c:a aac", "-b:a 128k", "-vsync 2", "-colorspace bt709", "-color_range tv", "-qp 21"} {
 		if !strings.Contains(args, part) {
 			t.Errorf("missing %q: %s", part, args)
 		}
 	}
-	for _, part := range []string{"libx264", "-crf", "-preset veryslow", "-r ", "fps=", "hwdownload", "hwupload", "scale="} {
+	for _, part := range []string{"-map ", "libx264", "-crf", "-preset veryslow", "-r ", "fps=", "hwdownload", "hwupload", "scale="} {
 		if strings.Contains(args, part) {
 			t.Errorf("unexpected %q: %s", part, args)
 		}
+	}
+	silent := strings.Join(previewIntelArgs("in", previewChunkOptions{StartTime: 1.25, Duration: 0.75, OutputPath: "out.mp4", Audio: false}, plan, false), " ")
+	if !strings.Contains(silent, "-an") || strings.Contains(silent, "-map ") || strings.Contains(silent, "-c:a ") {
+		t.Fatalf("silent scene preview changed native video selection or enabled audio: %s", silent)
 	}
 }
 

@@ -25,13 +25,15 @@ func previewIntelArgs(input string, options previewChunkOptions, plan ffmpeg.Int
 			video = append(video, tag.key, tag.value)
 		}
 	}
+	// Leave both streams to FFmpeg's native automatic selection, matching the
+	// GPU metadata probe and the canonical software preview. Mapping a video
+	// manually would also disable automatic audio selection.
 	o := transcoder.TranscodeOptions{OutputPath: options.OutputPath, StartTime: options.StartTime, Duration: options.Duration,
 		XError: true, VideoCodec: ffmpeg.VideoCodec{Name: "h264_vaapi", CodeName: "h264_vaapi"}, VideoArgs: video,
-		ExtraInputArgs: plan.InputArgs, ExtraOutputArgs: []string{"-map", fmt.Sprintf("0:%d", plan.Source.StreamIndex)}}
+		ExtraInputArgs: plan.InputArgs}
 	if options.Audio {
 		o.AudioCodec = ffmpeg.AudioCodecAAC
 		o.AudioArgs = ffmpeg.Args{}.AudioBitrate(scenePreviewAudioBitrate)
-		o.ExtraOutputArgs = append(o.ExtraOutputArgs, "-map", "0:a:0?")
 	}
 	return transcoder.Transcode(input, o)
 }

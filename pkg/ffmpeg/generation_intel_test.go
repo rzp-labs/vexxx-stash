@@ -41,7 +41,7 @@ func TestIntelPlanCommands(t *testing.T) {
 			if !strings.Contains(decode, "-ss 2.75") || strings.Contains(decode, "-vf") {
 				t.Fatal(decode)
 			}
-			if backend == "qsv" && !strings.Contains(decode, "-c:v h264_qsv") {
+			if backend == "qsv" && strings.Contains(decode, "-c:v") {
 				t.Fatal(decode)
 			}
 		})
@@ -52,12 +52,11 @@ func TestIntelEligibility(t *testing.T) {
 		name string
 		edit func(*IntelSource)
 	}{
-		{"codec", func(s *IntelSource) { s.Codec = "vp9" }},
-		{"10bit", func(s *IntelSource) { s.PixelFormat = "yuv420p10le" }},
+		{"missingcodec", func(s *IntelSource) { s.Codec = "" }},
+		{"missingformat", func(s *IntelSource) { s.PixelFormat = "" }},
 		{"rotation", func(s *IntelSource) { s.Rotation = 45 }},
 		{"pq", func(s *IntelSource) { s.ColorTransfer = "smpte2084" }},
 		{"hlg", func(s *IntelSource) { s.ColorTransfer = "arib-std-b67" }},
-		{"widegamut", func(s *IntelSource) { s.ColorPrimaries = "bt2020" }},
 		{"missingdimensions", func(s *IntelSource) { s.Width = 0 }},
 	}
 	for _, c := range cases {
@@ -71,6 +70,27 @@ func TestIntelEligibility(t *testing.T) {
 	}
 	if _, err := NewIntelGenerationPlan(IntelGenerationConfig{Backend: "auto"}, intelTestSource(), "fixture", 0, 640, false); err == nil {
 		t.Fatal("invalid backend accepted")
+	}
+}
+
+func TestIntelCodecAndSurfaceSupportBelongsToActualProbes(t *testing.T) {
+	for _, codec := range []string{"av1", "vp9", "vp8", "mpeg2video", "hevc"} {
+		source := intelTestSource()
+		source.Codec, source.PixelFormat, source.BitDepth = codec, "yuv422p10le", 10
+		source.ColorPrimaries, source.ColorSpace = "bt2020", "bt2020nc"
+		plan, err := NewIntelSpritePlan(IntelGenerationConfig{Backend: "vaapi"}, source, "fixture", 0, 160)
+		if err != nil {
+			t.Fatalf("%s rejected before actual support probes: %v", codec, err)
+		}
+		if !strings.Contains(plan.Filter, "colorspace=bt2020nc") {
+			t.Fatal("declared matrix replaced with a guess", plan.Filter)
+		}
+		called := false
+		unsupported := errors.New("selected driver cannot decode actual profile")
+		d, err := runIntelGenerationWork(context.Background(), plan, func(context.Context) error { called = true; return nil }, nil, func(context.Context, Args) error { return unsupported }, func(string) error { return nil })
+		if !errors.Is(err, unsupported) || called || d.Actual != "none" || d.Stage != "decode" {
+			t.Fatalf("unsupported runtime bypassed probes or rendered: %+v %v", d, err)
+		}
 	}
 }
 func TestIntelDeviceSelection(t *testing.T) {
