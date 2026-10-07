@@ -535,6 +535,13 @@ func TestResidentSpriteAutoRetriesOnlyExplicitResourcePressure(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			g, dir := residentSpriteTestGenerator(t, generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: tt.gpu, Threads: 1})
+			budget, err := generationbudget.NewWithResources(generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: tt.gpu, Threads: 1}, func() generationbudget.Resources {
+				return generationbudget.Resources{CPUs: 4, MemoryAvailable: 128 << 30, GPUAvailable: 64 << 30}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			g.Budget = budget
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			output := residentSpriteOutput(t, dir, "sheet")
@@ -542,7 +549,7 @@ func TestResidentSpriteAutoRetriesOnlyExplicitResourcePressure(t *testing.T) {
 				t.Fatal(err)
 			}
 			residentSpriteRelease(t, dir, "sheet")
-			_, err := g.IntelSpriteSheet(ctx, "synthetic.mp4", []float64{0.125, 1.5, 2.5, 3.5}, 9, 9, output)
+			_, err = g.IntelSpriteSheet(ctx, "synthetic.mp4", []float64{0.125, 1.5, 2.5, 3.5}, 9, 9, output)
 			if (err == nil) != tt.wantSuccess {
 				t.Fatalf("success=%t error=%v", tt.wantSuccess, err)
 			}
