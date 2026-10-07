@@ -2,6 +2,7 @@ package generate
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"image"
 	"math"
@@ -162,52 +163,92 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	if frames != nil {
 		mode = "frames"
 	}
-	workload := plan.GenerationWorkload(fmt.Sprintf("sprite/%s/%dx%d/%d", mode, columns, rows, count))
+	workload, cleanupWorkload := g.generationBudget().ScopeWorkload(generationFileWorkload(plan, fmt.Sprintf("sprite/%s/%dx%d/%d/%x", mode, columns, rows, count, sha256.Sum256([]byte(fmt.Sprint(times, frames)))), input))
+	defer func() { cleanupWorkload(err == nil) }()
 	var renderedLanes int
 	var renderedTime time.Duration
-	renderAttempt := func(ctx context.Context, lanes int) error {
+	var renderedSample generationbudget.Sample
+	var renderedRetry bool
+	renderSheet := func(ctx context.Context, lanes int, seekTimes []float64, filename string) error {
 		var args ffmpeg.Args
 		if frames == nil {
-			seekLists, counts, cleanup, seekErr := intelSpriteSeekInputs(input, source, times, lanes, filepath.Dir(output))
+			seekLists, counts, cleanup, seekErr := intelSpriteSeekInputs(input, source, seekTimes, lanes, filepath.Dir(output))
 			if seekErr != nil {
 				return seekErr
 			}
 			defer cleanup()
-			args, err = transcoder.IntelSpriteSheetInputs(seekLists, plan, counts, columns, rows, tmp.Name())
+			args, err = transcoder.IntelSpriteSheetInputs(seekLists, plan, counts, columns, rows, filename)
 		} else {
-			args, err = transcoder.IntelSpriteSheetFrames(input, plan, frames, columns, rows, tmp.Name())
+			args, err = transcoder.IntelSpriteSheetFrames(input, plan, frames, columns, rows, filename)
 		}
 		if err != nil {
 			return err
 		}
-		logger.Infof("[generator] GPU sprite decoder lanes=%d ceiling=%d tiles=%d", lanes, maxLanes, count)
+		tiles := len(seekTimes)
+		if frames != nil {
+			tiles = count
+		}
+		logger.Infof("[generator] GPU sprite decoder lanes=%d ceiling=%d tiles=%d", lanes, maxLanes, tiles)
 		return g.generateAdmittedWithContext(ctx, lockCtx, g.generationBudget().FFMpegArgs(args), lanes)
 	}
 	render := func(ctx context.Context) error {
 		budget := g.generationBudget()
+		if budget.CanTuneGPU() && frames == nil && count > columns && rows > 1 {
+			if err := g.tuneSprite(ctx, lockCtx, budget, workload, plan, times, columns, rows, maxLanes, filepath.Dir(output), renderSheet); err != nil {
+				return err
+			}
+		}
+		bestCount, candidateTimeout := 0, time.Duration(0)
+		if frames == nil {
+			bestCount, candidateTimeout = budget.PrepareCanonicalTrial(workload, count, maxLanes)
+		}
+		speculative := bestCount > 0
 		var original error
 		for attempt := 0; attempt < 2; attempt++ {
-			lanes, release, admitErr := budget.AcquireWorkload(ctx, workload, maxLanes)
-			if admitErr != nil {
-				return fmt.Errorf("waiting for GPU sprite budget: %w", admitErr)
+			lanes := 0
+			sample, attemptErr := budget.Measure(ctx, workload, func(sampleCtx context.Context) error {
+				granted, release, admitErr := budget.AcquireWorkload(sampleCtx, workload, maxLanes)
+				if admitErr != nil {
+					return fmt.Errorf("waiting for GPU sprite budget: %w", admitErr)
+				}
+				defer release() // Wait drains children before permits wake other work.
+				lanes = granted
+				if speculative {
+					// Queue time cannot consume a speculative render's deadline.
+					var cancel context.CancelFunc
+					sampleCtx, cancel = context.WithTimeout(sampleCtx, candidateTimeout)
+					defer cancel()
+				}
+				return renderSheet(sampleCtx, lanes, times, tmp.Name())
+			})
+			if attemptErr == nil && speculative {
+				attemptErr = validateSpriteTrial(tmp.Name(), plan, columns, rows)
 			}
-			start := time.Now()
-			attemptErr := renderAttempt(ctx, lanes)
-			release() // Wait drained all decoder contexts; retry owns fresh permits.
-			renderedLanes, renderedTime = lanes, time.Since(start)
+			renderedLanes, renderedTime, renderedSample, renderedRetry = lanes, sample.Elapsed, sample, attempt > 0
 			if attemptErr == nil {
 				return nil
 			} // Learn only after JPEG validation/publication.
 			attemptErr = ffmpeg.GenerationPressure(attemptErr)
-			budget.Observe(workload, lanes, renderedTime, count, attemptErr)
+			if speculative {
+				budget.RecordSample(workload, sample, lanes, count, count, attemptErr)
+			} else {
+				budget.Observe(workload, lanes, renderedTime, count, attemptErr)
+			}
 			if original == nil {
 				original = attemptErr
 			}
-			if attempt != 0 || !budget.AutoGPU() || !generationbudget.IsPressure(attemptErr) || lanes <= 1 || ctx.Err() != nil {
+			if attempt != 0 || !budget.AutoGPU() || ctx.Err() != nil || !speculative && (!generationbudget.IsPressure(attemptErr) || lanes <= 1) {
 				return fmt.Errorf("GPU sprite render: %w", attemptErr)
 			}
-			maxLanes = min(maxLanes, lanes/2)
-			logger.Warnf("[generator] GPU sprite resource failure at %d lanes; retrying at most %d after drain: %v", lanes, maxLanes, original)
+			if speculative {
+				budget.FinishTuning(workload)
+				maxLanes = min(maxLanes, bestCount)
+				logger.Warnf("[generator] Auto GPU sprite candidate failed at %d lanes; retrying validated count at most %d after drain: %v", lanes, maxLanes, original)
+				speculative = false
+			} else {
+				maxLanes = min(maxLanes, lanes/2)
+				logger.Warnf("[generator] GPU sprite resource failure at %d lanes; retrying at most %d after drain: %v", lanes, maxLanes, original)
+			}
 			if err := os.Truncate(tmp.Name(), 0); err != nil {
 				return fmt.Errorf("clearing failed GPU sprite output: %w", err)
 			}
@@ -257,7 +298,19 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	if err = os.Rename(tmp.Name(), output); err != nil {
 		return fail("output", err)
 	}
-	g.generationBudget().Observe(workload, renderedLanes, renderedTime, count, nil)
+	if g.generationBudget().AutoGPU() {
+		demand := count
+		if frames != nil || renderedRetry || !g.generationBudget().CanTuneGPU() {
+			demand = renderedLanes
+		}
+		grew := g.generationBudget().RecordCanonicalSample(workload, renderedSample, renderedLanes, count, demand)
+		if !grew && !renderedRetry && frames == nil {
+			g.generationBudget().RefineCapacity(workload, renderedLanes)
+		}
+		g.generationBudget().FinishTuning(workload)
+	} else {
+		g.generationBudget().Observe(workload, renderedLanes, renderedTime, count, nil)
+	}
 	return d, nil
 }
 

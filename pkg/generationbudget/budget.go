@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,6 +56,7 @@ type waiter struct {
 	granted   bool
 	err       error
 	exclusive bool
+	observer  *processObservation
 }
 
 // Budget atomically allocates total and GPU slots, avoiding lock-order deadlocks.
@@ -66,6 +68,7 @@ type Budget struct {
 	cpuLimit                    int
 	sharedGPULimit              int
 	resources                   func() Resources
+	processResources            func(int) ProcessResources
 	learning                    map[string]*capacity
 	gpuByWorkload               map[string]int
 	reservedMemory, reservedGPU int64
@@ -73,6 +76,7 @@ type Budget struct {
 	mu                          sync.Mutex
 	active, gpuActive           int
 	exclusiveActive             bool
+	sampleSequence              atomic.Uint64
 	queue                       []*waiter
 }
 
@@ -134,10 +138,16 @@ func (b *Budget) acquireWorkload(ctx context.Context, class Class, slots int, up
 		return 0, nil, errors.New("nested generation budget acquisition; acquire only at leaf stages")
 	}
 	w := &waiter{class: class, slots: slots, upTo: upTo, ready: make(chan struct{})}
+	if observer, ok := ctx.Value(processObservationKey{}).(*processObservation); ok && observer.budget == b {
+		w.observer = observer
+	}
 	b.mu.Lock()
 	if workload.Key != "" {
 		w.workload = workload
 		w.gpuLimit = b.selectCapacity(workload)
+		if learned := b.learning[workload.Key]; learned != nil && learned.measured {
+			w.workload.MemoryPerSlot, w.workload.GPUPerSlot = learned.memoryCost, learned.gpuCost
+		}
 		memorySlots, _ := b.memorySlots(w, 1)
 		if memorySlots < 1 && b.active == 0 {
 			b.mu.Unlock()
@@ -208,6 +218,9 @@ waiting:
 
 func (b *Budget) finish(w *waiter) {
 	b.active -= w.slots
+	if w.observer != nil {
+		w.observer.active -= w.slots
+	}
 	if w.exclusive {
 		b.exclusiveActive = false
 	}
@@ -236,6 +249,9 @@ func (b *Budget) dispatch() {
 			available = min(available, b.sharedGPULimit-b.gpuActive)
 			if learned := b.learning[w.workload.Key]; learned != nil {
 				w.gpuLimit = learned.limit
+				if learned.measured {
+					w.workload.MemoryPerSlot, w.workload.GPUPerSlot = learned.memoryCost, learned.gpuCost
+				}
 			}
 			if w.gpuLimit > 0 {
 				available = min(available, w.gpuLimit-b.gpuByWorkload[w.workload.Key])
@@ -260,6 +276,9 @@ func (b *Budget) dispatch() {
 		}
 		b.queue = b.queue[1:]
 		b.active += w.slots
+		if w.observer != nil {
+			w.observer.active += w.slots
+		}
 		b.exclusiveActive = w.exclusive
 		if w.class == GPU {
 			b.gpuActive += w.slots

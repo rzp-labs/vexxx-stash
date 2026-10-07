@@ -193,7 +193,7 @@ func (g Generator) generateIntelMarker(lockCtx *fsutil.LockContext, input, outpu
 	}
 	diagnostic, err := ffmpeg.RunIntelGenerationWork(lockCtx, plan,
 		func(ctx context.Context) error {
-			hw := g.withGenerationWorkload(plan, "marker-preview")
+			hw := g.withGenerationWorkload(plan, "marker-preview", input)
 			err := hw.generateWithContext(ctx, lockCtx, markerIntelArgs(input, output, options, plan))
 			if err == nil {
 				err = hw.validateIntelMarkerOutput(ctx, output)
@@ -386,7 +386,7 @@ func (g Generator) generateIntelMarkerScreenshot(lockCtx *fsutil.LockContext, in
 	diagnostic, err := ffmpeg.RunIntelGenerationWork(lockCtx, plan, func(ctx context.Context) error {
 		args := transcoder.IntelSpriteScreenshot(input, options.Seconds, plan)
 		args[len(args)-1] = output
-		hw := g.withGenerationWorkload(plan, "marker-screenshot")
+		hw := g.withGenerationWorkload(plan, "marker-screenshot", input)
 		err := hw.generateWithContext(ctx, lockCtx, args)
 		if err == nil {
 			err = hw.validateIntelMarkerOutput(ctx, output)

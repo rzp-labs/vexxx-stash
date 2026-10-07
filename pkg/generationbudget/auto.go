@@ -18,8 +18,17 @@ type Workload struct {
 	RuntimeUnidentified bool
 }
 type capacity struct {
-	limit, ceiling int
-	successes      int
+	limit, ceiling              int
+	successes                   int
+	measured                    bool
+	memoryCost, gpuCost         int64
+	bestLimit                   int
+	bestRate                    float64
+	bestElapsed                 time.Duration
+	demand                      int
+	bestMemoryCost, bestGPUCost int64
+	unfinished                  bool
+	nextLimit, comparisonUnits  int
 }
 
 // NewForDevice keeps one scheduler for its entire configuration lifetime. Auto
@@ -31,7 +40,7 @@ func NewForDevice(s Settings, device string) (*Budget, error) {
 
 // NewWithResources uses a read-only resource probe. It permits deterministic
 // admission tests without a physical GPU or changing host/container limits.
-func NewWithResources(s Settings, resources func() Resources) (*Budget, error) {
+func NewWithResources(s Settings, resources func() Resources, processProbe ...func(int) ProcessResources) (*Budget, error) {
 	requested, err := s.Normalize()
 	if err != nil {
 		return nil, err
@@ -39,7 +48,14 @@ func NewWithResources(s Settings, resources func() Resources) (*Budget, error) {
 	if resources == nil {
 		return nil, errors.New("generation budget requires a resource probe")
 	}
-	return newAdaptive(requested, resources), nil
+	b := newAdaptive(requested, resources)
+	if len(processProbe) > 1 {
+		return nil, errors.New("generation budget accepts one process resource probe")
+	}
+	if len(processProbe) == 1 && processProbe[0] != nil {
+		b.processResources = processProbe[0]
+	}
+	return b, nil
 }
 func newAdaptive(requested Settings, resources func() Resources) *Budget {
 	r := resources()
@@ -48,10 +64,11 @@ func newAdaptive(requested Settings, resources func() Resources) *Budget {
 	if cpuLimit == 0 {
 		cpuLimit = (Settings{}).Resolve(r).MaxProcesses
 	}
-	return &Budget{settings: effective, requested: requested, cpuLimit: cpuLimit, sharedGPULimit: effective.MaxGPUProcesses, resources: resources, learning: make(map[string]*capacity), gpuByWorkload: make(map[string]int), memoryLimit: r.MemoryAvailable / 2, gpuMemoryLimit: r.GPUAvailable / 2}
+	return &Budget{settings: effective, requested: requested, cpuLimit: cpuLimit, sharedGPULimit: effective.MaxGPUProcesses, resources: resources, processResources: DetectProcessResources, learning: make(map[string]*capacity), gpuByWorkload: make(map[string]int), memoryLimit: r.MemoryAvailable / 2, gpuMemoryLimit: r.GPUAvailable / 2}
 }
 
-func (b *Budget) AutoGPU() bool { return b != nil && b.requested.MaxGPUProcesses == 0 }
+func (b *Budget) AutoGPU() bool    { return b != nil && b.requested.MaxGPUProcesses == 0 }
+func (b *Budget) CanTuneGPU() bool { return b.AutoGPU() && b.requested.MaxProcesses != 1 }
 
 // AcquireWorkload chooses lanes atomically alongside other admitted work. Only
 // this entry point can explore beyond the seed; probes retain ordinary admission.
@@ -75,12 +92,19 @@ func (b *Budget) selectCapacity(w Workload) int {
 		return b.settings.MaxGPUProcesses
 	}
 	r := b.resources()
+	c := b.learning[w.Key]
+	if c != nil && c.measured {
+		w.MemoryPerSlot, w.GPUPerSlot = c.memoryCost, c.gpuCost
+	}
 	ceiling := b.settings.MaxProcesses
 	// Automatic total capacity can accommodate GPU lanes beyond CPU process
 	// capacity. CPU leaf work retains its own detected ceiling; GPU surface costs
 	// and actual rendering evidence determine the GPU envelope.
 	if b.requested.MaxProcesses == 0 {
 		ceiling = b.cpuLimit
+		if c != nil && c.measured {
+			ceiling = max(1, c.demand)
+		}
 	}
 	knownCeiling := false
 	if r.MemoryAvailable > 0 {
@@ -106,9 +130,8 @@ func (b *Budget) selectCapacity(w Workload) int {
 			ceiling = min(ceiling, gpuCeiling)
 		}
 	}
-	var c *capacity
-	if !w.RuntimeUnidentified {
-		c = b.learning[w.Key]
+	if w.RuntimeUnidentified {
+		c = nil
 	}
 	if c == nil {
 		// Capability probes have exercised one actual decoder/filter/encoder. The
@@ -156,7 +179,11 @@ func (b *Budget) Observe(w Workload, lanes int, elapsed time.Duration, units int
 			c.limit = min(c.limit, max(1, lanes/2))
 		}
 		c.successes = 0
+		c.invalidatePressureBest()
 	} else if err == nil && lanes >= c.limit && elapsed > 0 && units > 0 {
+		if c.measured {
+			return
+		} // Measured controllers select by throughput, not job count.
 		c.successes++
 		if c.successes >= 2 {
 			c.limit = min(c.ceiling, c.limit+1)
@@ -167,6 +194,31 @@ func (b *Budget) Observe(w Workload, lanes int, elapsed time.Duration, units int
 	}
 	b.updateCapacity(c.limit)
 	b.dispatch()
+}
+
+// Pressure invalidates any faster reference above the reduced count before a
+// recovery sample can be eligible for learning. Keep the old allocation envelope
+// conservatively reserved at fewer lanes until owned counters can replace it.
+func (c *capacity) invalidatePressureBest() {
+	if c.bestLimit > c.limit {
+		if c.measured {
+			rescale := func(cost int64) int64 {
+				total := int64(math.MaxInt64)
+				if cost <= math.MaxInt64/int64(c.bestLimit) {
+					total = cost * int64(c.bestLimit)
+				}
+				perLane := total / int64(c.limit)
+				if total%int64(c.limit) != 0 {
+					perLane++
+				}
+				return max(cost, perLane)
+			}
+			c.memoryCost = rescale(max(c.memoryCost, c.bestMemoryCost))
+			c.gpuCost = rescale(max(c.gpuCost, c.bestGPUCost))
+		}
+		c.bestLimit, c.bestRate, c.bestElapsed, c.comparisonUnits = 0, 0, 0, 0
+	}
+	c.nextLimit, c.unfinished = 0, false
 }
 
 // PressureError is supplied by the runtime layer only for explicit resource
@@ -187,6 +239,9 @@ func (b *Budget) memorySlots(w *waiter, slots int) (int, bool) {
 	// probes have passed, let an otherwise idle budget exercise one lane even
 	// when the estimate exceeds half-headroom. Its full estimated reservation
 	// still prevents overlapping work; an exhausted counter cannot be bypassed.
+	if w.class == GPU && (r.MemoryAvailable == 0 || r.GPUAvailable == 0) {
+		return 0, false
+	}
 	exclusiveTrial := slots > 0 && w.class == GPU && w.workload.Key != "" && b.active == 0 && r.MemoryAvailable != 0 && r.GPUAvailable != 0
 	// Budget half of observable headroom for generation surface estimates,
 	// leaving room for the driver, composition/output and unrelated host work.

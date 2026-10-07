@@ -53,6 +53,10 @@ func TestResidentSpriteFFmpegHelper(t *testing.T) {
 		}
 	}
 	data, _ := json.Marshal(record)
+	if history, err := os.OpenFile(filepath.Join(dir, "history-"+job+".jsonl"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600); err == nil {
+		_, _ = history.Write(append(data, '\n'))
+		_ = history.Close()
+	}
 	first, firstErr := os.OpenFile(filepath.Join(dir, "first-"+job+".json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if firstErr == nil {
 		_, _ = first.Write(data)
@@ -70,6 +74,19 @@ func TestResidentSpriteFFmpegHelper(t *testing.T) {
 			break
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if delay, err := os.ReadFile(filepath.Join(dir, "timing-"+job)); err == nil {
+		var milliseconds int
+		_, _ = fmt.Sscanf(string(delay), "%d", &milliseconds)
+		tiles := 0
+		for _, seeks := range record.Seeks {
+			tiles += strings.Count(seeks, "\ninpoint ")
+		}
+		time.Sleep(time.Duration((tiles+len(record.Seeks)-1)/len(record.Seeks)*milliseconds) * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "invalid-trial-"+job)); err == nil && strings.HasPrefix(filepath.Base(output), ".auto-sprite-") {
+		_ = os.WriteFile(output, []byte("invalid trial JPEG"), 0600)
+		os.Exit(0)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "pressure-"+job)); err == nil && len(record.Seeks) > 1 {
 		fmt.Fprintln(os.Stderr, "Cannot allocate memory")

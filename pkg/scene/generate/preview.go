@@ -153,9 +153,16 @@ func (g *Generator) previewVideo(input string, videoDuration float64, options Pr
 				workers = budget.Settings().MaxGPUProcesses
 			}
 		}
-		if err := runPreviewChunks(lockCtx, len(chunks), workers, func(ctx context.Context, i int) error {
+		run := func(ctx context.Context, i int) error {
 			return g.previewVideoChunk(lockCtx, ctx, input, chunks[i], vrMode, fallback, useVsync2)
-		}); err != nil {
+		}
+		var err error
+		if budget := g.generationBudget(); budget.CanTuneGPU() && g.previewIntelPlan != nil && g.capacityWorkload != nil {
+			err = g.runAdaptivePreviewChunks(lockCtx, chunks, run)
+		} else {
+			err = runPreviewChunks(lockCtx, len(chunks), workers, run)
+		}
+		if err != nil {
 			return err
 		}
 

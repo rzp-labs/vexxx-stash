@@ -82,9 +82,13 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 		}
 		runner := func(ctx context.Context, args ffmpeg.Args) error { return g.generateWithContext(ctx, lockCtx, args) }
 		d, err := ffmpeg.RunIntelGenerationWork(lockCtx, plan, func(ctx context.Context) error {
-			hw := g.withGenerationWorkload(plan, "scene-preview")
+			step, offset := options.getStepSizeAndOffset(duration)
+			hw := g.withGenerationWorkload(plan, fmt.Sprintf("scene-preview/%d/%g/%g/%g/%g/%t/%t", options.Segments, options.SegmentDuration, duration, step, offset, options.Audio, vsync2), input)
+			w, cleanup := hw.generationBudget().ScopeWorkload(*hw.capacityWorkload)
+			hw.capacityWorkload = &w
 			hw.previewIntelPlan = &plan
 			var renderErr error
+			defer func() { cleanup(renderErr == nil) }()
 			defer func() { hw.finishCapacityWork(ctx, renderErr) }()
 			if err := hw.previewVideo(input, duration, options, vr, false, vsync2)(lockCtx, output); err != nil {
 				renderErr = err
