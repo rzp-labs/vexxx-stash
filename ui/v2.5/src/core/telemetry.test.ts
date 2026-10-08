@@ -108,7 +108,7 @@ describe("private media telemetry", () => {
         $exception_list: [
           {
             type: "TypeError",
-            value: "private.mp4 secret",
+            value: "private.mp4 token=secret",
             stacktrace: {
               frames: [
                 {
@@ -165,7 +165,7 @@ describe("private media telemetry", () => {
         $exception_list: [
           {
             type: "TypeError",
-            value: "private-file.mp4 secret",
+            value: "private-file.mp4 token=secret",
             stacktrace: {
               frames: names.map((name) => ({
                 filename: `${window.location.origin}/assets/index-Ab12Cd34.js?token=secret`,
@@ -196,9 +196,101 @@ describe("private media telemetry", () => {
       });
     }
     expect(JSON.stringify(sanitized)).not.toMatch(
-      /private|secret|token=|https:/
+      /private|secret|token=secret|https:/
     );
   });
+  it("preserves unfamiliar errors, causes and typed context through reconstruction", () => {
+    const safe = sanitizeTelemetry(
+      event("$exception", {
+        operation: "decoder.initialize",
+        stage: "configure",
+        component: "ScenePlayer",
+        code: "E_DECODER_STATE",
+        status: 503,
+        retry_count: 2,
+        context: {
+          codec: "av1",
+          decoder: { pendingFrames: 8, ready: false },
+          response_body: "Jane Smith",
+          path: "/mnt/private/movie.mp4",
+          message: "Frame queue stalled: token=secret",
+        },
+        $exception_list: [
+          {
+            type: "DecoderStateError",
+            value: "Frame queue stalled after 8 frames",
+            mechanism: { type: "generic", exception_id: 0 },
+          },
+          {
+            type: "TypeError",
+            value:
+              "Cannot read properties of undefined (reading 'decodeFrame')",
+            mechanism: {
+              type: "chained",
+              source: "cause",
+              parent_id: 0,
+              exception_id: 1,
+            },
+          },
+        ],
+      })
+    );
+    expect(safe?.properties).toMatchObject({
+      operation: "decoder.initialize",
+      stage: "configure",
+      component: "ScenePlayer",
+      code: "E_DECODER_STATE",
+      status: 503,
+      retry_count: 2,
+      context: {
+        codec: "av1",
+        decoder: { pendingFrames: 8, ready: false },
+        response_body: "[private content redacted]",
+        path: "[private content redacted]",
+        message: "Frame queue stalled: token=[credential redacted]",
+      },
+      $exception_list: [
+        {
+          type: "DecoderStateError",
+          value: "Frame queue stalled after 8 frames",
+          mechanism: { exception_id: 0 },
+        },
+        {
+          type: "TypeError",
+          value: "Cannot read properties of undefined (reading 'decodeFrame')",
+          mechanism: { source: "cause", parent_id: 0, exception_id: 1 },
+        },
+      ],
+    });
+    expect(JSON.stringify(safe)).not.toMatch(
+      /Jane Smith|movie.mp4|token=secret/
+    );
+  });
+
+  it("tolerates malformed exception entries and bounds frames and causes", () => {
+    const frame = {
+      filename: "/assets/index-Ab12Cd34.js",
+      function: "decodeFrame",
+    };
+    const safe = sanitizeTelemetry(
+      event("$exception", {
+        $exception_list: [
+          null,
+          ...Array.from({ length: 15 }, () => ({
+            value: "Decoder failed",
+            stacktrace: {
+              frames: [null, ...Array.from({ length: 100 }, () => frame)],
+            },
+          })),
+        ],
+      })
+    );
+    expect(safe?.properties.$exception_list).toHaveLength(9);
+    expect(safe?.properties.$exception_list[0].stacktrace.frames).toHaveLength(
+      49
+    );
+  });
+
   it("rejects identities without the authenticated numeric user ID and role", () => {
     for (const properties of [
       {},
