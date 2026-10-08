@@ -2,8 +2,10 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/stashapp/stash/internal/analytics"
 	"github.com/stashapp/stash/pkg/job"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/models"
@@ -15,11 +17,14 @@ type PackagesJob struct {
 	OnComplete     func()
 }
 
-func (j *PackagesJob) installPackage(ctx context.Context, p models.PackageSpecInput, progress *job.Progress) error {
+func (j *PackagesJob) installPackage(ctx context.Context, p models.PackageSpecInput, progress *job.Progress, operation string) error {
 	defer progress.Increment()
 
 	if err := j.PackageManager.Install(ctx, p); err != nil {
-		return fmt.Errorf("installing package: %w", err)
+		analytics.CapturePackageInstallFailure(ctx, err, analytics.PackageFailureContext{
+			Operation: operation, PackageID: p.ID, JobCorrelation: job.Correlation(ctx),
+		})
+		return fmt.Errorf("%s package %s: %w", operation, p.ID, err)
 	}
 
 	return nil
@@ -32,18 +37,20 @@ type InstallPackagesJob struct {
 
 func (j *InstallPackagesJob) Execute(ctx context.Context, progress *job.Progress) error {
 	progress.SetTotal(len(j.Packages))
+	var failures []error
 
 	for _, p := range j.Packages {
 		if job.IsCancelled(ctx) {
 			logger.Info("Cancelled installing packages")
-			return nil
+			return errors.Join(failures...)
 		}
 
 		logger.Infof("Installing package %s", p.ID)
 		taskDesc := fmt.Sprintf("Installing %s", p.ID)
 		progress.ExecuteTask(taskDesc, func() {
-			if err := j.installPackage(ctx, *p, progress); err != nil {
-				logger.Errorf("Error installing package %s from %s: %v", p.ID, p.SourceURL, err)
+			if err := j.installPackage(ctx, *p, progress, "install"); err != nil {
+				logger.Errorf("Error installing package %s: %v", p.ID, err)
+				failures = append(failures, err)
 			}
 		})
 	}
@@ -52,8 +59,14 @@ func (j *InstallPackagesJob) Execute(ctx context.Context, progress *job.Progress
 		j.OnComplete()
 	}
 
-	logger.Infof("Finished installing packages")
-	return nil
+	if len(failures) > 0 {
+		logger.Infof("Completed package installation batch with %d failed packages", len(failures))
+	} else {
+		logger.Infof("Finished installing packages")
+	}
+	// Every package is attempted and OnComplete refreshes partial installs, but
+	// any failed package makes the job FAILED rather than FINISHED.
+	return errors.Join(failures...)
 }
 
 type UpdatePackagesJob struct {
@@ -80,18 +93,20 @@ func (j *UpdatePackagesJob) Execute(ctx context.Context, progress *job.Progress)
 	}
 
 	progress.SetTotal(len(j.Packages))
+	var failures []error
 
 	for _, p := range j.Packages {
 		if job.IsCancelled(ctx) {
 			logger.Info("Cancelled updating packages")
-			return nil
+			return errors.Join(failures...)
 		}
 
 		logger.Infof("Updating package %s", p.ID)
 		taskDesc := fmt.Sprintf("Updating %s", p.ID)
 		progress.ExecuteTask(taskDesc, func() {
-			if err := j.installPackage(ctx, *p, progress); err != nil {
-				logger.Errorf("Error updating package %s from %s: %v", p.ID, p.SourceURL, err)
+			if err := j.installPackage(ctx, *p, progress, "update"); err != nil {
+				logger.Errorf("Error updating package %s: %v", p.ID, err)
+				failures = append(failures, err)
 			}
 		})
 	}
@@ -100,8 +115,12 @@ func (j *UpdatePackagesJob) Execute(ctx context.Context, progress *job.Progress)
 		j.OnComplete()
 	}
 
-	logger.Infof("Finished updating packages")
-	return nil
+	if len(failures) > 0 {
+		logger.Infof("Completed package update batch with %d failed packages", len(failures))
+	} else {
+		logger.Infof("Finished updating packages")
+	}
+	return errors.Join(failures...)
 }
 
 type UninstallPackagesJob struct {
