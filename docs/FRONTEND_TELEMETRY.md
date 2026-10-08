@@ -15,8 +15,12 @@ error vocabulary. Syntactically valid custom error types are retained. The SDK's
 cause/member relationships, exception IDs, handled/synthetic flags and severity
 remain available. Messages are capped at 2,048 characters plus a truncation marker.
 The first ten valid exception entries and first fifty accepted bundle frames per
-entry are retained in source order. Malformed entries and rejected foreign/private
-frames do not consume those limits. This applies to the envelope received by
+entry are retained in source order. An entry is useful when it has a nonblank
+string message, a valid error type, retained mechanism metadata (including cause
+IDs), or accepted bundle frames. Missing/non-string messages use the existing
+`Non-string error message [redacted]` fallback without dropping that metadata.
+Empty/malformed entries and rejected foreign/private frames do not consume those
+limits. This applies to the envelope received by
 `before_send`, including manually supplied entries: the installed SDK parser itself
 caps ordinary parsed stacks at fifty frames before this hook runs. The sanitizer
 cannot restore a frame already omitted by that parser.

@@ -325,13 +325,165 @@ describe("private media telemetry", () => {
     });
   });
 
+  it.each([
+    ["stack-only", undefined],
+    ["stack-only", 42],
+    ["type-only", undefined],
+    ["type-only", { private: "content" }],
+    ["mechanism-only", undefined],
+    ["mechanism-only", null],
+  ])("retains %s diagnostics with value %j", (kind, value) => {
+    const frame = {
+      filename: "/assets/index-Ab12Cd34.js",
+      lineno: 12,
+      colno: 8,
+      function: "decodeFrame",
+      chunk_id: "11111111-2222-4333-8444-555555555555",
+    };
+    const metadata =
+      kind === "stack-only"
+        ? { stacktrace: { frames: [frame] } }
+        : kind === "type-only"
+        ? { type: "DecoderStateError" }
+        : {
+            mechanism: {
+              exception_id: 1,
+              parent_id: 0,
+              source: "cause",
+              type: "chained",
+            },
+          };
+    const safe = sanitizeTelemetry(
+      event("$exception", {
+        $exception_list: [
+          { ...metadata, ...(value === undefined ? {} : { value }) },
+        ],
+      })
+    );
+    const entries = safe?.properties.$exception_list;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      type: kind === "type-only" ? "DecoderStateError" : "Error",
+      value: "Non-string error message [redacted]",
+      mechanism: kind === "mechanism-only" ? metadata.mechanism : {},
+      stacktrace: {
+        type: "raw",
+        frames: kind === "stack-only" ? [frame] : [],
+      },
+    });
+  });
+
+  it("keeps a message-less root ID linked to a child cause", () => {
+    const safe = sanitizeTelemetry(
+      event("$exception", {
+        $exception_list: [
+          { mechanism: { exception_id: 0 } },
+          {
+            type: "TypeError",
+            value:
+              "Cannot read properties of undefined (reading 'decodeFrame')",
+            mechanism: { exception_id: 1, parent_id: 0, source: "cause" },
+          },
+        ],
+      })
+    );
+    expect(safe?.properties.$exception_list).toMatchObject([
+      {
+        type: "Error",
+        value: "Non-string error message [redacted]",
+        mechanism: { exception_id: 0 },
+      },
+      {
+        type: "TypeError",
+        mechanism: { exception_id: 1, parent_id: 0, source: "cause" },
+      },
+    ]);
+  });
+
+  it("skips empty or unsafe entries before counting ten useful message-less diagnostics", () => {
+    const junk = [
+      null,
+      undefined,
+      42,
+      "private",
+      [],
+      {},
+      { value: 42 },
+      { value: "" },
+      { value: "   " },
+      { type: "invalid private type" },
+      { mechanism: { type: "private", handled: "yes", exception_id: -1 } },
+      {
+        stacktrace: {
+          frames: [null, {}, { filename: "https://foreign.example/plugin.js" }],
+        },
+      },
+    ];
+    const useful = Array.from({ length: 12 }, (_, n) => ({
+      ...(n % 2 ? { value: 42 } : {}),
+      ...(n % 3 === 0
+        ? {
+            stacktrace: {
+              frames: [{ filename: "/assets/index-Ab12Cd34.js", lineno: n }],
+            },
+          }
+        : n % 3 === 1
+        ? { type: `DecoderError${n}` }
+        : { mechanism: { exception_id: n, parent_id: 0, source: "cause" } }),
+    }));
+    const safe = sanitizeTelemetry(
+      event("$exception", {
+        $exception_list: [
+          ...Array.from({ length: 24 }, (_, n) => junk[n % junk.length]),
+          ...useful,
+        ],
+      })
+    );
+    const entries = safe?.properties.$exception_list;
+    expect(entries).toHaveLength(10);
+    expect(entries.map((item: { value: string }) => item.value)).toEqual(
+      Array(10).fill("Non-string error message [redacted]")
+    );
+    expect(
+      entries.map(
+        (
+          item: {
+            type: string;
+            mechanism: { exception_id?: number };
+            stacktrace: { frames: { lineno: number }[] };
+          },
+          n: number
+        ) =>
+          n % 3 === 0
+            ? item.stacktrace.frames[0].lineno
+            : n % 3 === 1
+            ? item.type
+            : item.mechanism.exception_id
+      )
+    ).toEqual([
+      0,
+      "DecoderError1",
+      2,
+      3,
+      "DecoderError4",
+      5,
+      6,
+      "DecoderError7",
+      8,
+      9,
+    ]);
+    expect(entries[2].mechanism).toEqual({
+      exception_id: 2,
+      parent_id: 0,
+      source: "cause",
+    });
+  });
+
   it("retains symbolication frames after rejected prefixes and limits accepted frames in order", () => {
     const safe = sanitizeTelemetry(
       event("$exception", {
         $exception_list: [
           {
-            type: "TypeError",
-            value: "Decoder failed",
             stacktrace: {
               frames: [
                 null,
@@ -383,7 +535,7 @@ describe("private media telemetry", () => {
       event("$exception", {
         $exception_list: [
           {
-            value: "Decoder failed",
+            type: "TypeError",
             stacktrace: {
               frames: [
                 {
@@ -417,7 +569,6 @@ describe("private media telemetry", () => {
         event("$exception", {
           $exception_list: [
             {
-              value: "Decoder failed",
               stacktrace: {
                 frames: [
                   {

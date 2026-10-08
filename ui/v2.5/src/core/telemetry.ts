@@ -151,56 +151,57 @@ export function sanitizeTelemetry(
       const safe = diagnosticContext(source[key]);
       if (safe !== undefined) properties[key] = safe;
     }
-    properties.$exception_list = (
-      Array.isArray(source.$exception_list) ? source.$exception_list : []
-    )
-      .filter(
-        (item) =>
-          item &&
-          typeof item === "object" &&
-          !Array.isArray(item) &&
-          typeof item.value === "string"
+    const exceptions: Record<string, unknown>[] = [];
+    for (const item of Array.isArray(source.$exception_list)
+      ? source.$exception_list
+      : []) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const validType =
+        typeof item.type === "string" &&
+        /^[A-Za-z_$][\w.$]{0,79}$/.test(item.type);
+      const mechanism = {
+        ...(typeof item.mechanism?.handled === "boolean"
+          ? { handled: item.mechanism.handled }
+          : {}),
+        ...(typeof item.mechanism?.synthetic === "boolean"
+          ? { synthetic: item.mechanism.synthetic }
+          : {}),
+        ...(["generic", "chained", "onerror", "onunhandledrejection"].includes(
+          item.mechanism?.type
+        )
+          ? { type: item.mechanism.type }
+          : {}),
+        ...(["cause", "member"].includes(item.mechanism?.source)
+          ? { source: item.mechanism.source }
+          : {}),
+        ...Object.fromEntries(
+          ["exception_id", "parent_id"].flatMap((key) =>
+            Number.isSafeInteger(item.mechanism?.[key]) &&
+            item.mechanism[key] >= 0
+              ? [[key, item.mechanism[key]]]
+              : []
+          )
+        ),
+      };
+      const frames = bundleFrames(item.stacktrace?.frames);
+      // A manual envelope can omit a message and still carry useful diagnostics.
+      // Check retained metadata once; empty/unsafe entries must not consume slots.
+      if (
+        !(typeof item.value === "string" && item.value.trim().length > 0) &&
+        !validType &&
+        !Object.keys(mechanism).length &&
+        !frames.length
       )
-      .slice(0, 10)
-      .map((item) => ({
-        type:
-          typeof item.type === "string" &&
-          /^[A-Za-z_$][\w.$]{0,79}$/.test(item.type)
-            ? diagnosticMessage(item.type)
-            : "Error",
+        continue;
+      exceptions.push({
+        type: validType ? diagnosticMessage(item.type) : "Error",
         value: diagnosticMessage(item.value),
-        mechanism: {
-          ...(typeof item.mechanism?.handled === "boolean"
-            ? { handled: item.mechanism.handled }
-            : {}),
-          ...(typeof item.mechanism?.synthetic === "boolean"
-            ? { synthetic: item.mechanism.synthetic }
-            : {}),
-          ...([
-            "generic",
-            "chained",
-            "onerror",
-            "onunhandledrejection",
-          ].includes(item.mechanism?.type)
-            ? { type: item.mechanism.type }
-            : {}),
-          ...(["cause", "member"].includes(item.mechanism?.source)
-            ? { source: item.mechanism.source }
-            : {}),
-          ...Object.fromEntries(
-            ["exception_id", "parent_id"].flatMap((key) =>
-              Number.isSafeInteger(item.mechanism?.[key]) &&
-              item.mechanism[key] >= 0
-                ? [[key, item.mechanism[key]]]
-                : []
-            )
-          ),
-        },
-        stacktrace: {
-          type: "raw",
-          frames: bundleFrames(item.stacktrace?.frames),
-        },
-      }));
+        mechanism,
+        stacktrace: { type: "raw", frames },
+      });
+      if (exceptions.length === 10) break;
+    }
+    properties.$exception_list = exceptions;
   }
   // Omit top-level $set/$set_once and every arbitrary payload/attachment too.
   return {
