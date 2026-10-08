@@ -295,6 +295,39 @@ exit 23
 	t.Logf("sanitized_sdk_payload=%s", encoded)
 }
 
+func TestVerboseFallbackJobStatusPreservesAllModuleCauses(t *testing.T) {
+	received := packageReceiver(t)
+	m, specs, _ := packageFixture(t, map[string]map[string]string{"PythonTools": {"plugin.py": "import badone\nimport badtwo\n"}}, `if [ "$1" = '-c' ]; then printf '%s\n' badone badtwo; exit 0; fi
+i=0
+while [ "$i" -lt 3072 ]; do printf x; i=$((i+1)); done
+printf '\nERROR: verbose-wheel-sentinel token=fixture-secret\n' >&2
+if [ "$4" = 'badone' ]; then exit 23; fi
+exit 24
+`)
+	result := runPackageJob(t, &InstallPackagesJob{PackagesJob: PackagesJob{PackageManager: m}, Packages: specs})
+	if result.Status != job.StatusFailed || result.Error == nil {
+		t.Fatal("verbose module failure did not reach job status")
+	}
+	for _, module := range []string{"badone", "badtwo"} {
+		if strings.Count(*result.Error, "installing module "+module+":") != 1 {
+			t.Fatal("job status lost or duplicated a failed module prefix")
+		}
+	}
+	for _, cause := range []string{"exit status 23", "exit status 24", "verbose-wheel-sentinel"} {
+		if !strings.Contains(*result.Error, cause) {
+			t.Fatal("verbose output displaced concise per-module causes")
+		}
+	}
+	_, output, found := strings.Cut(*result.Error, "\nOutput: ")
+	if !found || len(output) > python.MaxDiagnosticBytes || strings.Contains(*result.Error, "fixture-secret") {
+		t.Fatal("job output bypassed its independent bound or redaction")
+	}
+	events := received()
+	if len(events) != 1 || events[0].Properties["package_failure_count"] != float64(2) {
+		t.Fatal("summary fix changed package event multiplicity")
+	}
+}
+
 func TestPythonPreparationAndStartFailuresReachJobAndSDK(t *testing.T) {
 	for _, test := range []struct {
 		name, stage, script string

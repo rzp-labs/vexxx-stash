@@ -403,8 +403,8 @@ func (m *Manager) scanAndInstallDependencies(ctx context.Context, pkgID, package
 			return errors.Join(append(failures, ctx.Err())...)
 		}
 		if err := py.PipInstall(ctx, mod); err != nil {
-			logger.Errorf("Failed to install module %s for plugin %s: %v", mod, pkgID, err)
-			failures = append(failures, fmt.Errorf("installing module %s: %w", mod, err))
+			logger.Errorf("Python dependency installation failed for plugin %s: %v", pkgID, err)
+			failures = append(failures, err)
 			// Continue trying others, but preserve every failure for the caller.
 		}
 	}

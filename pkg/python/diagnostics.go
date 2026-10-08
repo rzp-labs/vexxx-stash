@@ -22,8 +22,22 @@ type CommandError struct {
 }
 
 func (e *CommandError) Error() string {
-	return fmt.Sprintf("%s failed: %s\nOutput: %s", e.Stage, SanitizeDiagnostic(e.Err.Error(), nil), e.Output)
+	text := e.Summary()
+	if output := SanitizeDiagnostic(e.Output, nil); output != "" {
+		text += "\nOutput: " + output
+	}
+	return text
 }
+
+// Summary keeps module identity and process cause independent of verbose output.
+func (e *CommandError) Summary() string {
+	text := fmt.Sprintf("%s failed: %s", e.Stage, SanitizeDiagnostic(e.Err.Error(), nil))
+	if module := SanitizeDiagnostic(e.Module, nil); module != "" {
+		text = "installing module " + module + ": " + text
+	}
+	return text
+}
+
 func (e *CommandError) Unwrap() error { return e.Err }
 
 func newCommandError(stage string, err error, output []byte, private []string) *CommandError {

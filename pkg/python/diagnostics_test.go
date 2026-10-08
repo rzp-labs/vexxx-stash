@@ -103,3 +103,36 @@ func TestCommandFailurePreservesExitAndOrigin(t *testing.T) {
 		t.Fatal("failure formatting lost cause or leaked credentials")
 	}
 }
+
+func TestDirectSilentPipFailureIncludesModuleOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	binary := filepath.Join(t.TempDir(), "fake-python")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 23\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	err := New(binary).PipInstall(context.Background(), "badone")
+	if err == nil || strings.Count(err.Error(), "badone") != 1 || !strings.Contains(err.Error(), "exit status 23") {
+		t.Fatal("direct silent pip failure lost or duplicated module identity")
+	}
+	var command *CommandError
+	var exit *exec.ExitError
+	if !errors.As(err, &command) || command.Module != "badone" || command.Output != "" || !errors.As(err, &exit) || exit.ExitCode() != 23 || !errors.Is(err, exit) {
+		t.Fatal("direct pip failure altered typed error or exit identity")
+	}
+}
+
+func TestCommandSummaryAndOutputRedactEachField(t *testing.T) {
+	cause := errors.New("token=fixture-cause\nunknown-wheel-cause")
+	command := &CommandError{Stage: "module_install", Module: "password=correct horse battery staple", Err: cause, Output: "Cookie: theme=dark; sid=fixture-output\nunknown-wheel-output"}
+	text := command.Error()
+	for _, private := range []string{"correct", "horse", "battery", "staple", "fixture-cause", "fixture-output"} {
+		if strings.Contains(text, private) {
+			t.Fatal("command summary/output field bypassed targeted redaction")
+		}
+	}
+	if !strings.Contains(text, "unknown-wheel-cause") || !strings.Contains(text, "unknown-wheel-output") || !errors.Is(command, cause) {
+		t.Fatal("field redaction discarded unknown diagnostics or wrapped cause")
+	}
+}
