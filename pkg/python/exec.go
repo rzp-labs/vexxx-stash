@@ -66,7 +66,9 @@ func (p *Python) PipInstall(ctx context.Context, module string) error {
 	cmd := p.Command(ctx, []string{"-m", "pip", "install", module})
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("pip install %s failed: %w\nOutput: %s", module, err, string(output))
+		failure := newCommandError("module_install", err, output, []string{module})
+		failure.Module = SanitizeDiagnostic(module, nil)
+		return failure
 	}
 	logger.Debugf("pip install %s: %s", module, string(output))
 	return nil
@@ -79,7 +81,7 @@ func (p *Python) PipRequirements(ctx context.Context, requirementsPath string) e
 	output, err := cmd.CombinedOutput()
 	outputStr := string(output)
 	if err != nil {
-		return fmt.Errorf("pip install -r %s failed: %w\nOutput: %s", requirementsPath, err, outputStr)
+		return newCommandError("requirements_install", err, output, []string{requirementsPath})
 	}
 
 	// Log which packages were installed
@@ -175,7 +177,7 @@ with open(req_file, 'r') as f:
 	cmd := p.Command(ctx, args)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("analyzing requirements failed: %w\nOutput: %s", err, string(output))
+		return newCommandError("requirements_analyze", err, output, []string{requirementsPath})
 	}
 
 	var installList []string
@@ -207,7 +209,7 @@ with open(req_file, 'r') as f:
 	pipArgs := append([]string{"-m", "pip", "install"}, installList...)
 	installCmd := p.Command(ctx, pipArgs)
 	if out, err := installCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("safe install failed: %w\nOutput: %s", err, string(out))
+		return newCommandError("requirements_install", err, out, append([]string{requirementsPath}, installList...))
 	} else {
 		logger.Debugf("Safe install output: %s", string(out))
 	}
@@ -246,7 +248,7 @@ print('\n'.join(missing))
 	cmd := p.Command(ctx, args)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("checking modules failed: %w\nOutput: %s", err, string(output))
+		return nil, newCommandError("module_check", err, output, nil)
 	}
 
 	missing := splitLines(string(output))

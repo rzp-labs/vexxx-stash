@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/stashapp/stash/pkg/logger"
@@ -156,17 +159,30 @@ func (m *Manager) getStore(remoteURL string) *Store {
 	return store
 }
 
-func (m *Manager) Install(ctx context.Context, spec models.PackageSpecInput) error {
+func (m *Manager) Install(ctx context.Context, spec models.PackageSpecInput) (installErr error) {
+	stage := "repository"
+	defer func() {
+		if installErr != nil {
+			stack := make([]uintptr, 32)
+			n := runtime.Callers(2, stack)
+			installErr = &InstallError{Stage: stage, Err: installErr, Stack: stack[:n]}
+		}
+	}()
 	remote, err := m.remoteFromURL(spec.SourceURL)
 	if err != nil {
 		return fmt.Errorf("creating remote repository: %w", err)
 	}
 
+	stage = "package_lookup"
 	pkg, err := m.packageByID(ctx, spec)
 	if err != nil {
 		return fmt.Errorf("getting remote package: %w", err)
 	}
+	if pkg == nil {
+		return fmt.Errorf("package %q not found in repository", spec.ID)
+	}
 
+	stage = "package_download"
 	fromRemote, err := remote.GetPackageZip(ctx, *pkg)
 	if err != nil {
 		return fmt.Errorf("getting remote package: %w", err)
@@ -179,11 +195,13 @@ func (m *Manager) Install(ctx context.Context, spec models.PackageSpecInput) err
 		return fmt.Errorf("reading package data: %w", err)
 	}
 
+	stage = "package_verify"
 	sha := fmt.Sprintf("%x", sha256.Sum256(d))
 	if sha != pkg.Sha256 {
 		return fmt.Errorf("package data (%s) does not match expected SHA256 (%s)", sha, pkg.Sha256)
 	}
 
+	stage = "package_extract"
 	zr, err := zip.NewReader(bytes.NewReader(d), int64(len(d)))
 	if err != nil {
 		return fmt.Errorf("reading zip data: %w", err)
@@ -203,9 +221,12 @@ func (m *Manager) Install(ctx context.Context, spec models.PackageSpecInput) err
 	}
 
 	// Resolve Python dependencies if requirements.txt exists
+	// Files/manifest have already been written. Report the partial install so
+	// callers can refresh installed state without claiming dependencies succeeded.
+	stage = "python_dependencies"
 	packageDir := store.packageDir(pkg.ID)
 	if err := m.resolvePythonDependencies(ctx, pkg.ID, packageDir); err != nil {
-		logger.Warnf("failed to install Python dependencies for %s: %v", pkg.ID, err)
+		return fmt.Errorf("installing Python dependencies: %w", err)
 	}
 
 	return nil
@@ -357,6 +378,7 @@ func (m *Manager) scanAndInstallDependencies(ctx context.Context, pkgID, package
 	for imp := range imports {
 		candidates = append(candidates, imp)
 	}
+	sort.Strings(candidates)
 
 	py, err := python.Resolve(m.PythonPath)
 	if err != nil {
@@ -375,12 +397,17 @@ func (m *Manager) scanAndInstallDependencies(ctx context.Context, pkgID, package
 
 	logger.Infof("Installing detected missing Python dependencies for plugin %s: %v", pkgID, missing)
 
+	var failures []error
 	for _, mod := range missing {
+		if ctx.Err() != nil {
+			return errors.Join(append(failures, ctx.Err())...)
+		}
 		if err := py.PipInstall(ctx, mod); err != nil {
 			logger.Errorf("Failed to install module %s for plugin %s: %v", mod, pkgID, err)
-			// Continue trying others
+			failures = append(failures, fmt.Errorf("installing module %s: %w", mod, err))
+			// Continue trying others, but preserve every failure for the caller.
 		}
 	}
 
-	return nil
+	return errors.Join(failures...)
 }
