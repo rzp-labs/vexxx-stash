@@ -328,6 +328,41 @@ exit 24
 	}
 }
 
+func TestRequirementsJobPreservesOperationWrappers(t *testing.T) {
+	for _, stage := range []string{"requirements_analyze", "requirements_install"} {
+		t.Run(stage, func(t *testing.T) {
+			received := packageReceiver(t)
+			script := "echo 'unknown-requirements-sentinel token=fixture-secret' >&2\nexit 23\n"
+			if stage == "requirements_install" {
+				script = "if [ \"$1\" = '-c' ]; then printf '%s\\n' 'INSTALL:mystery-widget'; exit 0; fi\n" + script
+			}
+			m, specs, _ := packageFixture(t, map[string]map[string]string{"PythonTools": {"requirements.txt": "mystery-widget"}}, script)
+			result := runPackageJob(t, &InstallPackagesJob{PackagesJob: PackagesJob{PackageManager: m}, Packages: specs})
+			if result.Status != job.StatusFailed || result.Error == nil {
+				t.Fatal("requirements failure did not reach job status")
+			}
+			summary, output, found := strings.Cut(*result.Error, "\nOutput: ")
+			for _, context := range []string{"installing Python dependencies:", "installing requirements:", stage + " failed: exit status 23"} {
+				if strings.Count(summary, context) != 1 {
+					t.Fatal("actual requirements path discarded or duplicated operation context")
+				}
+			}
+			if !found || len(output) > python.MaxDiagnosticBytes || strings.Contains(*result.Error, "fixture-secret") || !strings.Contains(output, "unknown-requirements-sentinel") {
+				t.Fatal("requirements job output lost useful bounded/redacted diagnostics")
+			}
+			events := received()
+			if len(events) != 1 || events[0].Properties["package_stage"] != stage || events[0].Properties["python_exit_code"] != float64(23) {
+				t.Fatal("requirements formatting changed SDK event identity or count")
+			}
+			encoded, err := json.Marshal(events[0])
+			if err != nil || strings.Contains(string(encoded), "fixture-secret") || !strings.Contains(string(encoded), "unknown-requirements-sentinel") {
+				t.Fatal("requirements SDK payload lost useful diagnostics or bypassed redaction")
+			}
+			t.Logf("sanitized_sdk_payload=%s", encoded)
+		})
+	}
+}
+
 func TestPythonPreparationAndStartFailuresReachJobAndSDK(t *testing.T) {
 	for _, test := range []struct {
 		name, stage, script string

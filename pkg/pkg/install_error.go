@@ -36,8 +36,16 @@ func (e *InstallError) Error() string {
 			return
 		}
 		var command *python.CommandError
-		if errors.As(err, &command) {
-			visit(errors.Unwrap(err))
+		if child := errors.Unwrap(err); child != nil && errors.As(child, &command) {
+			// Ordinary %w wrappers embed the child's Error verbatim. Keep only
+			// their context here; the child formatter collects output separately.
+			prefix, suffix, embedded := strings.Cut(err.Error(), child.Error())
+			first := len(summaries)
+			visit(child)
+			if embedded && len(summaries) > first {
+				summaries[first] = sanitizeInstallContext(prefix) + summaries[first]
+				summaries[len(summaries)-1] += sanitizeInstallContext(suffix)
+			}
 			return
 		}
 		summaries = append(summaries, python.SanitizeDiagnostic(err.Error(), nil))
@@ -52,3 +60,15 @@ func (e *InstallError) Error() string {
 	return text
 }
 func (e *InstallError) Unwrap() error { return e.Err }
+
+// Preserve a wrapper's separating whitespace while sanitizing its own text.
+// SanitizeDiagnostic trims whitespace; applying it to the whole error would
+// instead let verbose output displace operation labels and module summaries.
+func sanitizeInstallContext(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return text
+	}
+	start := strings.Index(text, trimmed)
+	return text[:start] + python.SanitizeDiagnostic(trimmed, nil) + text[start+len(trimmed):]
+}
