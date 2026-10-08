@@ -30,6 +30,40 @@ function bundleFilename(value: unknown): string | undefined {
     return undefined;
   }
 }
+// Limits count retained diagnostics. Walk in source order and stop after fifty
+// accepted bundle frames, so private/foreign/malformed frames cannot hide them.
+function bundleFrames(value: unknown): Record<string, unknown>[] {
+  const frames: Record<string, unknown>[] = [];
+  if (!Array.isArray(value)) return frames;
+  for (const frame of value) {
+    if (!frame || typeof frame !== "object") continue;
+    const filename = bundleFilename(frame.filename);
+    if (!filename) continue;
+    const safe: Record<string, unknown> = {
+      filename,
+      platform: "web:javascript",
+      in_app: true,
+      // Ingestion requires a function string. Use the pinned parser's
+      // safe sentinel when an anonymous/unsafe name is redacted.
+      function: "?",
+    };
+    for (const key of ["lineno", "colno"]) {
+      if (Number.isSafeInteger(frame[key]) && Number(frame[key]) >= 0)
+        safe[key] = frame[key];
+    }
+    if (
+      typeof frame.function === "string" &&
+      /^[A-Za-z_$][\w.$<> ]{0,150}$/.test(frame.function)
+    )
+      safe.function = frame.function;
+    if (typeof frame.chunk_id === "string" && uuid.test(frame.chunk_id))
+      safe.chunk_id = frame.chunk_id;
+    frames.push(safe);
+    if (frames.length === 50) break;
+  }
+  return frames;
+}
+
 function diagnosticScreen(): string {
   return (
     window.location.pathname
@@ -120,8 +154,14 @@ export function sanitizeTelemetry(
     properties.$exception_list = (
       Array.isArray(source.$exception_list) ? source.$exception_list : []
     )
+      .filter(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          !Array.isArray(item) &&
+          typeof item.value === "string"
+      )
       .slice(0, 10)
-      .filter((item) => item && typeof item === "object")
       .map((item) => ({
         type:
           typeof item.type === "string" &&
@@ -158,39 +198,7 @@ export function sanitizeTelemetry(
         },
         stacktrace: {
           type: "raw",
-          frames: (Array.isArray(item.stacktrace?.frames)
-            ? item.stacktrace.frames
-            : []
-          )
-            .slice(0, 50)
-            .flatMap((frame: Record<string, unknown>) => {
-              if (!frame || typeof frame !== "object") return [];
-              const filename = bundleFilename(frame.filename);
-              if (!filename) return [];
-              const safe: Record<string, unknown> = {
-                filename,
-                platform: "web:javascript",
-                in_app: true,
-                // Ingestion requires a function string. Use the pinned parser's
-                // safe sentinel when an anonymous/unsafe name is redacted.
-                function: "?",
-              };
-              for (const key of ["lineno", "colno"]) {
-                if (Number.isSafeInteger(frame[key]) && Number(frame[key]) >= 0)
-                  safe[key] = frame[key];
-              }
-              if (
-                typeof frame.function === "string" &&
-                /^[A-Za-z_$][\w.$<> ]{0,150}$/.test(frame.function)
-              )
-                safe.function = frame.function;
-              if (
-                typeof frame.chunk_id === "string" &&
-                uuid.test(frame.chunk_id)
-              )
-                safe.chunk_id = frame.chunk_id;
-              return [safe];
-            }),
+          frames: bundleFrames(item.stacktrace?.frames),
         },
       }));
   }

@@ -14,7 +14,12 @@ unfamiliar technical messages and source property identifiers, including
 error vocabulary. Syntactically valid custom error types are retained. The SDK's
 cause/member relationships, exception IDs, handled/synthetic flags and severity
 remain available. Messages are capped at 2,048 characters plus a truncation marker.
-The first ten exception entries and first fifty frames per entry are processed.
+The first ten valid exception entries and first fifty accepted bundle frames per
+entry are retained in source order. Malformed entries and rejected foreign/private
+frames do not consume those limits. This applies to the envelope received by
+`before_send`, including manually supplied entries: the installed SDK parser itself
+caps ordinary parsed stacks at fifty frames before this hook runs. The sanitizer
+cannot restore a frame already omitted by that parser.
 
 Additional properties passed to `captureException(error, properties)` can include
 `operation`, `stage`, `component`, `code`, `status`, `retry_count`, `context`, and

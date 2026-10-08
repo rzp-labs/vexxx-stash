@@ -285,10 +285,84 @@ describe("private media telemetry", () => {
         ],
       })
     );
-    expect(safe?.properties.$exception_list).toHaveLength(9);
+    expect(safe?.properties.$exception_list).toHaveLength(10);
     expect(safe?.properties.$exception_list[0].stacktrace.frames).toHaveLength(
-      49
+      50
     );
+  });
+
+  it("retains valid exceptions after rejected prefixes and limits accepted entries in order", () => {
+    const malformed = [null, undefined, 42, "private", [], {}, { value: 42 }];
+    const safe = sanitizeTelemetry(
+      event("$exception", {
+        $exception_list: [
+          ...Array.from(
+            { length: 12 },
+            (_, n) => malformed[n % malformed.length]
+          ),
+          ...Array.from({ length: 12 }, (_, n) => ({
+            type: "TypeError",
+            value: `Decoder state ${n} unavailable`,
+            mechanism: {
+              exception_id: n,
+              ...(n ? { parent_id: 0, source: "cause", type: "chained" } : {}),
+            },
+          })),
+        ],
+      })
+    );
+    expect(
+      safe?.properties.$exception_list.map(
+        (item: { value: string }) => item.value
+      )
+    ).toEqual(
+      Array.from({ length: 10 }, (_, n) => `Decoder state ${n} unavailable`)
+    );
+    expect(safe?.properties.$exception_list[1].mechanism).toMatchObject({
+      exception_id: 1,
+      parent_id: 0,
+      source: "cause",
+    });
+  });
+
+  it("retains symbolication frames after rejected prefixes and limits accepted frames in order", () => {
+    const safe = sanitizeTelemetry(
+      event("$exception", {
+        $exception_list: [
+          {
+            type: "TypeError",
+            value: "Decoder failed",
+            stacktrace: {
+              frames: [
+                null,
+                {},
+                ...Array.from({ length: 50 }, () => ({
+                  filename: "https://foreign.example/plugin.js",
+                })),
+                ...Array.from({ length: 60 }, (_, n) => ({
+                  filename: "/assets/index-Ab12Cd34.js",
+                  lineno: n + 1,
+                  colno: 12,
+                  function: "decodeFrame",
+                  chunk_id: "11111111-2222-4333-8444-555555555555",
+                })),
+              ],
+            },
+          },
+        ],
+      })
+    );
+    const frames = safe?.properties.$exception_list[0].stacktrace.frames;
+    expect(frames).toHaveLength(50);
+    expect(frames.map((frame: { lineno: number }) => frame.lineno)).toEqual(
+      Array.from({ length: 50 }, (_, n) => n + 1)
+    );
+    expect(frames[0]).toMatchObject({
+      filename: "/assets/index-Ab12Cd34.js",
+      colno: 12,
+      function: "decodeFrame",
+      chunk_id: "11111111-2222-4333-8444-555555555555",
+    });
   });
 
   it("rejects identities without the authenticated numeric user ID and role", () => {
@@ -309,6 +383,7 @@ describe("private media telemetry", () => {
       event("$exception", {
         $exception_list: [
           {
+            value: "Decoder failed",
             stacktrace: {
               frames: [
                 {
@@ -342,6 +417,7 @@ describe("private media telemetry", () => {
         event("$exception", {
           $exception_list: [
             {
+              value: "Decoder failed",
               stacktrace: {
                 frames: [
                   {
