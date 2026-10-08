@@ -1,7 +1,7 @@
 import posthog, { CaptureResult, PostHogConfig } from "posthog-js/no-external";
 // Bundle the error parser locally; never load remote code into the private UI.
 import "posthog-js/dist/exception-autocapture";
-import { diagnosticMessage } from "./telemetry-redaction";
+import { diagnosticContext, diagnosticMessage } from "./telemetry-redaction";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const identity = /^(\d+|[0-9a-f-]{36})$/i;
@@ -30,18 +30,39 @@ function bundleFilename(value: unknown): string | undefined {
     return undefined;
   }
 }
-const errorTypes = new Set([
-  "Error",
-  "TypeError",
-  "RangeError",
-  "ReferenceError",
-  "SyntaxError",
-  "URIError",
-  "EvalError",
-  "UnhandledRejection",
-  "AggregateError",
-  "DOMException",
-]);
+// Limits count retained diagnostics. Walk in source order and stop after fifty
+// accepted bundle frames, so private/foreign/malformed frames cannot hide them.
+function bundleFrames(value: unknown): Record<string, unknown>[] {
+  const frames: Record<string, unknown>[] = [];
+  if (!Array.isArray(value)) return frames;
+  for (const frame of value) {
+    if (!frame || typeof frame !== "object") continue;
+    const filename = bundleFilename(frame.filename);
+    if (!filename) continue;
+    const safe: Record<string, unknown> = {
+      filename,
+      platform: "web:javascript",
+      in_app: true,
+      // Ingestion requires a function string. Use the pinned parser's
+      // safe sentinel when an anonymous/unsafe name is redacted.
+      function: "?",
+    };
+    for (const key of ["lineno", "colno"]) {
+      if (Number.isSafeInteger(frame[key]) && Number(frame[key]) >= 0)
+        safe[key] = frame[key];
+    }
+    if (
+      typeof frame.function === "string" &&
+      /^[A-Za-z_$][\w.$<> ]{0,150}$/.test(frame.function)
+    )
+      safe.function = frame.function;
+    if (typeof frame.chunk_id === "string" && uuid.test(frame.chunk_id))
+      safe.chunk_id = frame.chunk_id;
+    frames.push(safe);
+    if (frames.length === 50) break;
+  }
+  return frames;
+}
 
 function diagnosticScreen(): string {
   return (
@@ -63,7 +84,8 @@ function diagnosticScreen(): string {
   );
 }
 
-// Build a new event rather than blacklist sensitive properties. The SDK adds
+// Rebuild the SDK envelope, then retain explicitly supplied diagnostic context.
+// The SDK adds
 // URLs, referrers and persisted campaign/person properties even to manual errors.
 export function sanitizeTelemetry(
   event: CaptureResult | null
@@ -116,12 +138,28 @@ export function sanitizeTelemetry(
       )
     )
       properties.$exception_level = source.$exception_level;
-    properties.$exception_list = (
-      Array.isArray(source.$exception_list) ? source.$exception_list : []
-    ).map((item) => ({
-      type: errorTypes.has(item.type) ? item.type : "Error",
-      value: diagnosticMessage(item.value),
-      mechanism: {
+    for (const key of [
+      "operation",
+      "stage",
+      "component",
+      "code",
+      "status",
+      "retry_count",
+      "context",
+      "diagnostic_context",
+    ]) {
+      const safe = diagnosticContext(source[key]);
+      if (safe !== undefined) properties[key] = safe;
+    }
+    const exceptions: Record<string, unknown>[] = [];
+    for (const item of Array.isArray(source.$exception_list)
+      ? source.$exception_list
+      : []) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const validType =
+        typeof item.type === "string" &&
+        /^[A-Za-z_$][\w.$]{0,79}$/.test(item.type);
+      const mechanism = {
         ...(typeof item.mechanism?.handled === "boolean"
           ? { handled: item.mechanism.handled }
           : {}),
@@ -144,38 +182,26 @@ export function sanitizeTelemetry(
               : []
           )
         ),
-      },
-      stacktrace: {
-        type: "raw",
-        frames: (Array.isArray(item.stacktrace?.frames)
-          ? item.stacktrace.frames
-          : []
-        ).flatMap((frame: Record<string, unknown>) => {
-          const filename = bundleFilename(frame.filename);
-          if (!filename) return [];
-          const safe: Record<string, unknown> = {
-            filename,
-            platform: "web:javascript",
-            in_app: true,
-            // Ingestion requires a function string. Use the pinned parser's
-            // safe sentinel when an anonymous/unsafe name is redacted.
-            function: "?",
-          };
-          for (const key of ["lineno", "colno"]) {
-            if (Number.isSafeInteger(frame[key]) && Number(frame[key]) >= 0)
-              safe[key] = frame[key];
-          }
-          if (
-            typeof frame.function === "string" &&
-            /^[A-Za-z_$][\w.$<> ]{0,150}$/.test(frame.function)
-          )
-            safe.function = frame.function;
-          if (typeof frame.chunk_id === "string" && uuid.test(frame.chunk_id))
-            safe.chunk_id = frame.chunk_id;
-          return [safe];
-        }),
-      },
-    }));
+      };
+      const frames = bundleFrames(item.stacktrace?.frames);
+      // A manual envelope can omit a message and still carry useful diagnostics.
+      // Check retained metadata once; empty/unsafe entries must not consume slots.
+      if (
+        !(typeof item.value === "string" && item.value.trim().length > 0) &&
+        !validType &&
+        !Object.keys(mechanism).length &&
+        !frames.length
+      )
+        continue;
+      exceptions.push({
+        type: validType ? diagnosticMessage(item.type) : "Error",
+        value: diagnosticMessage(item.value),
+        mechanism,
+        stacktrace: { type: "raw", frames },
+      });
+      if (exceptions.length === 10) break;
+    }
+    properties.$exception_list = exceptions;
   }
   // Omit top-level $set/$set_once and every arbitrary payload/attachment too.
   return {

@@ -36,7 +36,11 @@ export class ErrorBoundary extends React.Component<
       errorHelpId = "errors.lazy_component_error_help";
     }
     if (posthog.__loaded) {
-      posthog.captureException(error);
+      posthog.captureException(error, {
+        operation: "react.render",
+        component: "ErrorBoundary",
+        context: { component_stack: errorInfo.componentStack },
+      });
     }
     this.setState({
       error,
