@@ -70,6 +70,7 @@ func (p *Progress) SetTotal(total int) {
 	defer p.mutex.Unlock()
 
 	p.total = total
+	p.countersKnown = true
 	p.defined = true
 	p.calculatePercent()
 }
@@ -81,6 +82,7 @@ func (p *Progress) AddTotal(total int) {
 	defer p.mutex.Unlock()
 
 	p.total += total
+	p.countersKnown = true
 	p.calculatePercent()
 }
 
@@ -91,11 +93,11 @@ func (p *Progress) SetProcessed(processed int) {
 	defer p.mutex.Unlock()
 
 	p.processed = processed
+	p.countersKnown = true
 	p.calculatePercent()
 }
 
 func (p *Progress) calculatePercent() {
-	p.countersKnown = true
 	switch {
 	case !p.defined || p.total <= 0:
 		p.percent = ProgressIndefinite
@@ -138,6 +140,7 @@ func (p *Progress) Increment() {
 
 	if !p.defined || p.total <= 0 || p.processed < p.total {
 		p.processed++
+		p.countersKnown = true
 		p.calculatePercent()
 	}
 }
@@ -154,6 +157,7 @@ func (p *Progress) AddProcessed(v int) {
 	}
 
 	p.processed = newVal
+	p.countersKnown = true
 	p.calculatePercent()
 }
 

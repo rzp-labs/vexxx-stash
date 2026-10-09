@@ -564,14 +564,46 @@ const ResourceMonitor: React.FC = () => {
   );
 };
 
+// Preserve jobs updated by the subscription after a query began. Counts may
+// legitimately reset or totals grow, so freshness cannot be inferred from values.
+function reconcileQueueSnapshot(
+  snapshot: JobFragment[],
+  current: JobFragment[],
+  changed: ReadonlySet<string>,
+  terminal: ReadonlyMap<string, ReturnType<typeof setTimeout>>
+): JobFragment[] {
+  const currentById = new Map(current.map((j) => [j.id, j]));
+  const included = new Set<string>();
+  const next: JobFragment[] = [];
+  for (const job of snapshot) {
+    const value = changed.has(job.id) || terminal.has(job.id)
+      ? currentById.get(job.id)
+      : job;
+    // A REMOVE may already have expired its grace timer while the query waited.
+    if (value) {
+      next.push(value);
+      included.add(value.id);
+    }
+  }
+  for (const job of current) {
+    if (!included.has(job.id) && (changed.has(job.id) || terminal.has(job.id))) {
+      next.push(job);
+    }
+  }
+  return next;
+}
+
 // ─── Job table ────────────────────────────────────────────────────────────────
 
 export const JobTable: React.FC = () => {
   const intl = useIntl();
   const jobStatus = useJobQueue();
   const jobsSubscribe = useJobsSubscribe();
-  const { refetch, startPolling, stopPolling } = jobStatus;
+  const { refetch } = jobStatus;
   const removalTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const initialSnapshotReceived = useRef(false);
+  const initialChanges = useRef(new Set<string>());
+  const pendingRefresh = useRef<Set<string> | undefined>();
 
   useEffect(() => {
     const timers = removalTimers.current;
@@ -581,29 +613,46 @@ export const JobTable: React.FC = () => {
     };
   }, []);
 
-  useEffect(() => {
-    // Subscription messages can be missed while disconnected or when server
-    // buffers fill. Recover authoritative counts instead of counting messages.
-    startPolling(5000);
-    const dispose = getWSClient().on("connected", () => {
-      void refetch().catch(() => undefined);
-    });
-    return () => {
-      dispose();
-      stopPolling();
-    };
-  }, [refetch, startPolling, stopPolling]);
-
   const [queue, setQueue] = useState<JobFragment[]>(jobStatus.data?.jobQueue ?? []);
 
   useEffect(() => {
-    if (!jobStatus.data) return;
-    const snapshot = jobStatus.data.jobQueue ?? [];
-    setQueue((q) => [
-      ...snapshot.filter((j) => !removalTimers.current.has(j.id)),
-      ...q.filter((j) => removalTimers.current.has(j.id)),
-    ]);
+    if (!jobStatus.data || initialSnapshotReceived.current) return;
+    initialSnapshotReceived.current = true;
+    const changed = initialChanges.current;
+    initialChanges.current = new Set<string>();
+    setQueue((q) => reconcileQueueSnapshot(
+      jobStatus.data!.jobQueue ?? [], q, changed, removalTimers.current
+    ));
   }, [jobStatus.data]);
+
+  useEffect(() => {
+    let disposed = false;
+    async function refreshQueue() {
+      // Keep one query in flight so an older query cannot finish after a newer one.
+      if (pendingRefresh.current) return;
+      const changed = new Set<string>();
+      pendingRefresh.current = changed;
+      try {
+        const response = await refetch();
+        if (!disposed && response.data) {
+          setQueue((q) => reconcileQueueSnapshot(
+            response.data.jobQueue ?? [], q, changed, removalTimers.current
+          ));
+        }
+      } catch {
+        // Retain the last snapshot; the next poll or reconnect can recover.
+      } finally {
+        if (pendingRefresh.current === changed) pendingRefresh.current = undefined;
+      }
+    }
+    const timer = setInterval(() => { void refreshQueue(); }, 5000);
+    const dispose = getWSClient().on("connected", () => { void refreshQueue(); });
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+      dispose();
+    };
+  }, [refetch]);
 
   useEffect(() => {
     if (jobStatus.loading || !jobStatus.data) return;
@@ -630,6 +679,8 @@ export const JobTable: React.FC = () => {
     if (!jobsSubscribe.data) return;
 
     const event = jobsSubscribe.data.jobsSubscribe;
+    pendingRefresh.current?.add(event.job.id);
+    if (!initialSnapshotReceived.current) initialChanges.current.add(event.job.id);
 
     function updateJob() {
       setQueue((q) =>

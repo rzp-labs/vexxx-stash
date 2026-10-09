@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import { print } from "graphql";
 import { IntlProvider } from "react-intl";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as GQL from "src/core/generated-graphql";
 import { JobTable } from "./JobTable";
 
@@ -71,6 +71,7 @@ beforeEach(() => {
   mocks.queue = { jobQueue: [job()] };
   mocks.event = undefined;
 });
+afterEach(() => vi.useRealTimers());
 describe("authoritative work-unit progress", () => {
   it("requests actual counts in queue, find and subscription operations", () => {
     for (const document of [
@@ -201,6 +202,116 @@ describe("authoritative work-unit progress", () => {
     expect(screen.queryByText(/work units processed/)).not.toBeInTheDocument();
     expect(screen.getByText("90%")).toBeInTheDocument();
   });
+  it("keeps subscription updates newer than the initial queue response", () => {
+    mocks.queue = undefined;
+    const { rerender } = render(table());
+    update(job({ processed: 720 }));
+    rerender(table());
+    mocks.queue = { jobQueue: [job({ processed: 600 })] };
+    rerender(table());
+    expect(
+      screen.getByText("720 / 1200 work units processed")
+    ).toBeInTheDocument();
+  });
+
+  it("keeps subscription updates newer than an in-flight queue response", async () => {
+    mocks.queue = {
+      jobQueue: [job({ processed: 600 }), job({ id: "2", processed: 10 })],
+    };
+    const { rerender } = render(table());
+    let finish!: (value: unknown) => void;
+    mocks.refetch.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    act(() => mocks.connected!());
+    update(job({ processed: 720 }));
+    rerender(table());
+    expect(
+      screen.getByText("720 / 1200 work units processed")
+    ).toBeInTheDocument();
+    const response = {
+      jobQueue: [
+        job({ processed: 600 }),
+        job({ id: "2", processed: 20 }),
+        job({ id: "3", processed: 30 }),
+      ],
+    };
+    await act(async () => {
+      mocks.queue = response;
+      rerender(table());
+      finish({ data: response });
+    });
+    expect(
+      screen.getByText("720 / 1200 work units processed")
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("600 / 1200 work units processed")
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("20 / 1200 work units processed")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("30 / 1200 work units processed")
+    ).toBeInTheDocument();
+    mocks.refetch.mockResolvedValueOnce({
+      data: { jobQueue: [job({ processed: 500, total: 2400 })] },
+    });
+    await act(async () => mocks.connected!());
+    expect(
+      screen.getByText("500 / 2400 work units processed")
+    ).toBeInTheDocument();
+  });
+
+  it("does not resurrect a removed job after its grace timer expires during a query", async () => {
+    vi.useFakeTimers();
+    const { rerender } = render(table());
+    let finish!: (value: unknown) => void;
+    mocks.refetch.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    act(() => mocks.connected!());
+    update(
+      job({ status: GQL.JobStatus.Cancelled }),
+      GQL.JobStatusUpdateType.Remove
+    );
+    rerender(table());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    const response = { jobQueue: [job({ processed: 600 })] };
+    await act(async () => {
+      mocks.queue = response;
+      rerender(table());
+      finish({ data: response });
+    });
+    expect(screen.queryByText(/work units processed/)).not.toBeInTheDocument();
+    expect(screen.getByText("All tasks completed")).toBeInTheDocument();
+  });
+
+  it("polls for missed events and stops querying after unmount", async () => {
+    vi.useFakeTimers();
+    mocks.refetch.mockResolvedValue({
+      data: { jobQueue: [job({ processed: 900 })] },
+    });
+    const view = render(table());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(mocks.refetch).toHaveBeenCalledOnce();
+    expect(
+      screen.getByText("900 / 1200 work units processed")
+    ).toBeInTheDocument();
+    view.unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(mocks.refetch).toHaveBeenCalledOnce();
+  });
+
   it("recovers counts on remount and reconnect and polls for missed events", async () => {
     const first = render(table());
     first.unmount();
@@ -211,17 +322,16 @@ describe("authoritative work-unit progress", () => {
     expect(
       screen.getByText("1100 / 1200 work units processed")
     ).toBeInTheDocument();
-    expect(mocks.startPolling).toHaveBeenCalledWith(5000);
+    mocks.refetch.mockResolvedValueOnce({
+      data: { jobQueue: [job({ processed: 1200, progress: 1 })] },
+    });
     await act(async () => mocks.connected!());
     expect(mocks.refetch).toHaveBeenCalledOnce();
-    mocks.queue = { jobQueue: [job({ processed: 1200, progress: 1 })] };
-    second.rerender(table());
     expect(
       screen.getByText("1200 / 1200 work units processed")
     ).toBeInTheDocument();
     second.unmount();
     expect(mocks.dispose).toHaveBeenCalledTimes(2);
-    expect(mocks.stopPolling).toHaveBeenCalledTimes(2);
   });
   it("upserts concurrent jobs and does not reset subscriptions on hook rerenders", () => {
     const { rerender } = render(table());

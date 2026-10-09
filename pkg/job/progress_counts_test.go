@@ -93,6 +93,28 @@ func TestProgressCountsChangingTotalsAndModes(t *testing.T) {
 	require.Nil(t, m.GetJob(id).Processed)
 }
 
+func TestProgressModesDoNotInventCounters(t *testing.T) {
+	for _, percentageOnly := range []bool{false, true} {
+		m, p, id := countProgress(t)
+		if percentageOnly {
+			p.SetPercent(0.5)
+		}
+		p.Indefinite()
+		require.Nil(t, m.GetJob(id).Processed)
+		require.Nil(t, m.GetJob(id).Total)
+		p.Definite()
+		require.Nil(t, m.GetJob(id).Processed)
+		require.Nil(t, m.GetJob(id).Total)
+		p.SetProcessed(7)
+		p.Indefinite()
+		require.Equal(t, 7, *m.GetJob(id).Processed)
+		require.Nil(t, m.GetJob(id).Total)
+		p.SetPercent(0.5)
+		p.Definite()
+		require.Nil(t, m.GetJob(id).Processed, "mode change cannot revive percentage-only counters")
+	}
+}
+
 func TestProgressCountsConcurrentSnapshots(t *testing.T) {
 	m, p, id := countProgress(t)
 	p.SetTotal(600)
