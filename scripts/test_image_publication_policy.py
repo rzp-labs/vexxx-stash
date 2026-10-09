@@ -218,22 +218,36 @@ class ImagePublicationPolicyTests(unittest.TestCase):
     def test_cli_requires_complete_gate_and_outputs_safe_values(self):
         with tempfile.TemporaryDirectory() as directory:
             event, output = Path(directory) / "event.json", Path(directory) / "output"
+            fixture_plan = Path(directory) / "fixture-plan.json"
+            ambient_plan = Path(directory) / "ambient-plan.json"
+            ambient_contents = b'{"checkout":"ambient-validation","publish":false}\n'
+            ambient_plan.write_bytes(ambient_contents)
             event.write_text(json.dumps({"inputs": {"publish_test_image": "true", "test_label": "candidate"}}))
             checkout = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-            env = {**os.environ, "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output),
+            with patch.dict(os.environ, {"VALIDATION_PLAN_PATH": str(ambient_plan)}):
+                env = dict(os.environ)
+            env.update({"GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output),
                    "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF_TYPE": "branch",
                    "GITHUB_REF_NAME": "master", "GITHUB_SHA": checkout, "GITHUB_REPOSITORY": REPO,
                    "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
-                   "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary")}
+                   "VALIDATION_PLAN_PATH": str(fixture_plan),
+                   "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary")})
             subprocess.run([sys.executable, str(Path(policy.__file__))], env=env, check=True, capture_output=True)
+            self.assertEqual(ambient_plan.read_bytes(), ambient_contents)
+            plan = json.loads(fixture_plan.read_text())
+            self.assertEqual(plan["checkout"], checkout)
+            self.assertTrue(plan["publish"])
             self.assertIn("publish=true\n", output.read_text())
             self.assertIn(f"image_ref=ghcr.io/{REPO}-test:test-{checkout[:12]}-123-1\n", output.read_text())
             self.assertNotIn("edge\n", output.read_text())
             event.write_text(json.dumps({"inputs": {"publish_test_image": "true", "test_label": "../unsafe"}}))
             output.unlink()
+            fixture_plan.unlink()
             result = subprocess.run([sys.executable, str(Path(policy.__file__))], env=env, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(output.exists())
+            self.assertFalse(fixture_plan.exists())
+            self.assertEqual(ambient_plan.read_bytes(), ambient_contents)
 
     @unittest.skipUnless(shutil.which("ruby") and shutil.which("bash"), "offline YAML/shell parsers unavailable")
     def test_immutable_publication_registry_guard_fails_closed(self):
