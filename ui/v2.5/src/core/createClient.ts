@@ -13,6 +13,10 @@ import { getMainDefinition } from "@apollo/client/utilities";
 import createUploadLink from "apollo-upload-client/createUploadLink.mjs";
 import * as GQL from "src/core/generated-graphql";
 import { FieldReadFunction } from "@apollo/client/cache";
+import {
+  applicationOperationNames,
+  createDiagnosticErrorLink,
+} from "./telemetry-api";
 
 // A read function that returns a cache reference with the given
 // typename if no valid reference is available.
@@ -22,9 +26,9 @@ const readReference = (typename: string): FieldReadFunction => {
     canRead(existing)
       ? existing
       : toReference({
-        __typename: typename,
-        id: args?.id,
-      });
+          __typename: typename,
+          id: args?.id,
+        });
 };
 
 // A read function that returns null if a cached reference is invalid.
@@ -186,7 +190,10 @@ Please disable it on the server and refresh the page.`);
     httpLink
   );
 
-  const link = from([errorLink, splitLink]);
+  const diagnosticLink = createDiagnosticErrorLink(
+    applicationOperationNames(Object.values(GQL))
+  );
+  const link = from([diagnosticLink, errorLink, splitLink]);
 
   const cache = new InMemoryCache({
     typePolicies,

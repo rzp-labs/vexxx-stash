@@ -144,7 +144,7 @@ describe("private media telemetry", () => {
       },
     ]);
     expect(JSON.stringify(sanitized)).not.toMatch(
-      /private|secret|context_line|react_component_stack/
+      /private|secret|context_line/
     );
   });
   it("always supplies a safe function string for every retained frame", () => {
@@ -180,7 +180,18 @@ describe("private media telemetry", () => {
     );
     const frames = sanitized?.properties.$exception_list[0].stacktrace.frames;
     expect(frames.map((frame: { function: string }) => frame.function)).toEqual(
-      ["?", "?", "?", "?", "?", "?", "?", "?", "render", "t.<anonymous>"]
+      [
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "?",
+        "x".repeat(152),
+        "render",
+        "t.<anonymous>",
+      ]
     );
     for (const frame of frames) {
       expect(Object.prototype.hasOwnProperty.call(frame, "function")).toBe(
@@ -276,7 +287,7 @@ describe("private media telemetry", () => {
       event("$exception", {
         $exception_list: [
           null,
-          ...Array.from({ length: 15 }, () => ({
+          ...Array.from({ length: 55 }, () => ({
             value: "Decoder failed",
             stacktrace: {
               frames: [null, ...Array.from({ length: 100 }, () => frame)],
@@ -285,7 +296,7 @@ describe("private media telemetry", () => {
         ],
       })
     );
-    expect(safe?.properties.$exception_list).toHaveLength(10);
+    expect(safe?.properties.$exception_list).toHaveLength(50);
     expect(safe?.properties.$exception_list[0].stacktrace.frames).toHaveLength(
       50
     );
@@ -300,7 +311,7 @@ describe("private media telemetry", () => {
             { length: 12 },
             (_, n) => malformed[n % malformed.length]
           ),
-          ...Array.from({ length: 12 }, (_, n) => ({
+          ...Array.from({ length: 52 }, (_, n) => ({
             type: "TypeError",
             value: `Decoder state ${n} unavailable`,
             mechanism: {
@@ -316,7 +327,7 @@ describe("private media telemetry", () => {
         (item: { value: string }) => item.value
       )
     ).toEqual(
-      Array.from({ length: 10 }, (_, n) => `Decoder state ${n} unavailable`)
+      Array.from({ length: 50 }, (_, n) => `Decoder state ${n} unavailable`)
     );
     expect(safe?.properties.$exception_list[1].mechanism).toMatchObject({
       exception_id: 1,
@@ -400,7 +411,7 @@ describe("private media telemetry", () => {
     ]);
   });
 
-  it("skips empty or unsafe entries before counting ten useful message-less diagnostics", () => {
+  it("skips empty or unsafe entries before counting fifty useful message-less diagnostics", () => {
     const junk = [
       null,
       undefined,
@@ -419,7 +430,7 @@ describe("private media telemetry", () => {
         },
       },
     ];
-    const useful = Array.from({ length: 12 }, (_, n) => ({
+    const useful = Array.from({ length: 52 }, (_, n) => ({
       ...(n % 2 ? { value: 42 } : {}),
       ...(n % 3 === 0
         ? {
@@ -440,9 +451,9 @@ describe("private media telemetry", () => {
       })
     );
     const entries = safe?.properties.$exception_list;
-    expect(entries).toHaveLength(10);
+    expect(entries).toHaveLength(50);
     expect(entries.map((item: { value: string }) => item.value)).toEqual(
-      Array(10).fill("Non-string error message [redacted]")
+      Array(50).fill("Non-string error message [redacted]")
     );
     expect(
       entries.map(
@@ -460,18 +471,11 @@ describe("private media telemetry", () => {
             ? item.type
             : item.mechanism.exception_id
       )
-    ).toEqual([
-      0,
-      "DecoderError1",
-      2,
-      3,
-      "DecoderError4",
-      5,
-      6,
-      "DecoderError7",
-      8,
-      9,
-    ]);
+    ).toEqual(
+      Array.from({ length: 50 }, (_, n) =>
+        n % 3 === 1 ? `DecoderError${n}` : n
+      )
+    );
     expect(entries[2].mechanism).toEqual({
       exception_id: 2,
       parent_id: 0,

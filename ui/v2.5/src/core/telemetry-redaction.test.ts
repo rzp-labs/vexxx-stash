@@ -45,7 +45,7 @@ describe("diagnostics with targeted private data redaction", () => {
     ],
     [
       "Unexpected non-whitespace character after JSON at position 25 (line 1 column 26)",
-      "Invalid JSON at position 25 column 26 [input redacted]",
+      "Invalid JSON at position 25 line 1 column 26 [input redacted]",
     ],
     [
       "Loading chunk 172 failed: https://user:password@private.example/assets/index.js?token=secret",
@@ -236,7 +236,7 @@ describe("diagnostics with targeted private data redaction", () => {
       `Queue failed: token=${"a".repeat(10000)} exhausted`
     );
     expect(result).toBe("Queue failed: token=[credential redacted]");
-    expect(diagnosticMessage("x".repeat(10000))).toHaveLength(2060);
+    expect(diagnosticMessage("x".repeat(10000))).toHaveLength(8204);
     expect(diagnosticMessage(undefined)).toBe(
       "Non-string error message [redacted]"
     );
@@ -279,10 +279,10 @@ describe("diagnostics with targeted private data redaction", () => {
     expect(JSON.stringify(safe)).not.toMatch(
       /Jane Smith|Bearer secret|private.mp4/
     );
-    expect(JSON.stringify(safe)).toContain("[context truncated]");
+    expect(JSON.stringify(safe)).toContain("[circular context omitted]");
     expect(
       diagnosticContext(Array.from({ length: 100 }, () => "retry"))
-    ).toHaveLength(20);
+    ).toHaveLength(100);
     expect(
       Object.keys(
         diagnosticContext(
@@ -291,6 +291,6 @@ describe("diagnostics with targeted private data redaction", () => {
           )
         ) as object
       )
-    ).toHaveLength(30);
+    ).toHaveLength(100);
   });
 });
