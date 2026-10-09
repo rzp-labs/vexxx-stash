@@ -1,6 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PostHog, CaptureResult } from "posthog-js/no-external";
-import { telemetryConfig } from "./telemetry";
+import { telemetryConfig, sanitizeTelemetry } from "./telemetry";
+// @ts-expect-error Node-only test helper; UI types intentionally exclude Node globals.
+import { createRequire } from "node:module";
+// @ts-expect-error Node-only evidence writer; never included in the production bundle.
+import { writeFileSync } from "node:fs";
+// @ts-expect-error Node-only isolated execution of the installed injection snippet.
+import { runInNewContext } from "node:vm";
+const require = createRequire(import.meta.url);
+const { createChunkIdSnippet } = createRequire(
+  require.resolve("@posthog/rollup-plugin")
+)("@posthog/plugin-utils") as {
+  createChunkIdSnippet: (chunk: string, release?: string) => string;
+};
 
 // Exercise the installed parser and production before_send, then intercept the
 // request handed to SDK transport. No telemetry leaves this offline test.
@@ -9,6 +21,8 @@ describe("pinned PostHog error parser", () => {
     vi.restoreAllMocks();
     delete (globalThis as typeof globalThis & { _posthogChunkIds?: unknown })
       ._posthogChunkIds;
+    delete (globalThis as typeof globalThis & { _posthogReleaseId?: unknown })
+      ._posthogReleaseId;
     vi.unstubAllEnvs();
   });
   it("retains symbolication metadata from an actual SDK exception without sending", async () => {
@@ -24,11 +38,16 @@ describe("pinned PostHog error parser", () => {
       });
     const captured: CaptureResult[] = [];
     const sdk = new PostHog();
+    const beforeSend: CaptureResult[] = [];
     vi.spyOn(sdk, "_send_retriable_request").mockImplementation((request) => {
       captured.push(request.data as CaptureResult);
     });
     sdk.init("test-public-project-token", {
       ...telemetryConfig,
+      before_send: (event) => {
+        if (event) beforeSend.push(event);
+        return sanitizeTelemetry(event);
+      },
       api_host: "https://example.invalid",
       persistence: "memory",
       bootstrap: { distinctID: "00000000-0000-4000-8000-000000000000" },
@@ -49,7 +68,28 @@ describe("pinned PostHog error parser", () => {
     captured.length = 0;
     const chunk = "11111111-2222-4333-8444-555555555555";
     const stack = `TypeError: Cannot read properties of undefined (reading 'decodeFrame')\n    at ${window.location.origin}/assets/index-Ab12Cd34.js:124:29373\n    at t.<anonymous> (${window.location.origin}/assets/ScenePlayer-BVCijiWf.js:25:35113)`;
-    Object.assign(globalThis, { _posthogChunkIds: { [stack]: chunk } });
+    // Execute the installed plugin's CLI-compatible injection, rather than
+    // hand-authoring the global chunk map/release property.
+    const injected: {
+      Error: unknown;
+      _posthogReleaseId?: string;
+      _posthogChunkIds?: unknown;
+    } = {
+      Error: class {
+        stack = stack;
+      },
+    };
+    runInNewContext(createChunkIdSnippet(chunk, "build-release-vex80"), {
+      window: injected,
+    });
+    Object.assign(globalThis, {
+      _posthogReleaseId: injected._posthogReleaseId,
+      _posthogChunkIds: injected._posthogChunkIds,
+    });
+    sdk.addExceptionStep("Decoder started; token=secret", {
+      codec: "av1",
+      headers: { Authorization: "Bearer secret" },
+    });
     const error = new TypeError(
       "Cannot read properties of undefined (reading 'decodeFrame')"
     );
@@ -63,6 +103,7 @@ describe("pinned PostHog error parser", () => {
       operation: "decoder.initialize",
       stage: "configure",
       component: "ScenePlayer",
+      acceleration_driver: "mesa-24.2",
       context: {
         codec: "av1",
         pendingFrames: 8,
@@ -85,6 +126,29 @@ describe("pinned PostHog error parser", () => {
     await vi.waitFor(() => expect(captured).toHaveLength(1));
     const safe = captured[0];
     expect(safe.event).toBe("$exception");
+    expect(safe.properties).toMatchObject({
+      $release_id: "build-release-vex80",
+      acceleration_driver: "mesa-24.2",
+      $browser: expect.any(String),
+      $browser_version: beforeSend.at(-1)?.properties.$browser_version,
+      $sdk_dist_channel: beforeSend.at(-1)?.properties.$sdk_dist_channel,
+      $exception_steps: [
+        {
+          $message: "Decoder started; token=[credential redacted]",
+          $timestamp: expect.any(String),
+          codec: "av1",
+          headers: "[private content redacted]",
+        },
+      ],
+    });
+    expect(safe.properties).not.toHaveProperty("$raw_user_agent");
+    const evidencePath = (
+      globalThis as typeof globalThis & {
+        process?: { env: Record<string, string | undefined> };
+      }
+    ).process?.env.VEX80_SDK_EVIDENCE;
+    if (evidencePath)
+      writeFileSync(evidencePath, JSON.stringify(safe, null, 2));
     expect(safe.properties).toMatchObject({
       $app_namespace: "vexxx-ui",
       $app_version: "v0.2.1",
@@ -162,5 +226,123 @@ describe("pinned PostHog error parser", () => {
     );
     expect(fetch).not.toHaveBeenCalled();
     expect(xhr).not.toHaveBeenCalled();
+  });
+  it("does not deliver or imply acceptance for missing and opted-out SDK clients", () => {
+    const missing = new PostHog();
+    const missingTransport = vi.spyOn(missing, "_send_retriable_request");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      missing.captureException(new Error("Decoder unavailable"))
+    ).toBeUndefined();
+    expect(missingTransport).not.toHaveBeenCalled();
+    warning.mockRestore();
+    const optedOut = new PostHog();
+    const disabledTransport = vi.spyOn(optedOut, "_send_retriable_request");
+    optedOut.init("test-opted-out-token", {
+      ...telemetryConfig,
+      api_host: "https://example.invalid",
+      persistence: "memory",
+      capture_pageview: false,
+      capture_exceptions: false,
+      opt_out_capturing_by_default: true,
+      opt_out_persistence_by_default: true,
+      bootstrap: { distinctID: "00000000-0000-4000-8000-000000000000" },
+    });
+    expect(
+      optedOut.captureException(new Error("Decoder unavailable"))
+    ).toBeUndefined();
+    expect(disabledTransport).not.toHaveBeenCalled();
+  });
+  it("protects parsed causes and top-level opaque content through actual SDK transport", async () => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network forbidden"));
+    const xhr = vi
+      .spyOn(XMLHttpRequest.prototype, "send")
+      .mockImplementation(() => {
+        throw new Error("network forbidden");
+      });
+    const captured: CaptureResult[] = [];
+    const sdk = new PostHog();
+    vi.spyOn(sdk, "_send_retriable_request").mockImplementation((request) => {
+      captured.push(request.data as CaptureResult);
+    });
+    sdk.init("test-public-review-token", {
+      ...telemetryConfig,
+      api_host: "https://example.invalid",
+      persistence: "memory",
+      bootstrap: { distinctID: "00000000-0000-4000-8000-000000000000" },
+      capture_pageview: false,
+      capture_exceptions: false,
+      request_batching: false,
+    });
+    captured.length = 0;
+    const wideContext = Object.fromEntries(
+      Array.from({ length: 10 }, (_, index) => [
+        `decoder${index}`,
+        Object.fromEntries(
+          Array.from({ length: 10000 }, (_value, metric) => [
+            `metric${metric}`,
+            metric,
+          ])
+        ),
+      ])
+    );
+    let chain: Error | undefined;
+    for (let index = 49; index >= 0; index -= 1) {
+      const next = new Error(`Decoder cause ${index}`);
+      next.stack = `Error: Decoder cause ${index}\n    at decodeFrame (${
+        window.location.origin
+      }/assets/index-Ab12Cd34.js:${index + 10}:12)`;
+      if (chain) Object.assign(next, { cause: chain });
+      chain = next;
+    }
+    sdk.captureException(chain, {
+      operation: "decoder.initialize",
+      acceleration: { codec: "av1", frames: 8 },
+      context: wideContext,
+      input: "Jane Smith",
+      content: ["Unlabelled private media name"],
+      variables: "Jane Smith",
+      args: ["Jane Smith"],
+      data: "Jane Smith",
+    });
+    await vi.waitFor(() => expect(captured).toHaveLength(1));
+    const safe = captured[0];
+    expect(safe.properties.$exception_list).toHaveLength(50);
+    expect(
+      safe.properties.$exception_list.map(
+        (item: { value: string }) => item.value
+      )
+    ).toEqual(
+      Array.from({ length: 50 }, (_, index) => `Decoder cause ${index}`)
+    );
+    expect(safe.properties.$exception_list[49].mechanism).toMatchObject({
+      exception_id: 49,
+      parent_id: 48,
+      source: "cause",
+    });
+    expect(
+      safe.properties.$exception_list[49].stacktrace.frames[0]
+    ).toMatchObject({
+      filename: "/assets/index-Ab12Cd34.js",
+      lineno: 59,
+      function: "decodeFrame",
+    });
+    for (const key of ["input", "content", "variables", "args", "data"])
+      expect(safe.properties[key]).toBe("[private content redacted]");
+    expect(safe.properties.acceleration).toEqual({ codec: "av1", frames: 8 });
+    expect(JSON.stringify(safe)).not.toMatch(
+      /Jane Smith|Unlabelled private media name/
+    );
+    expect(fetch).not.toHaveBeenCalled();
+    expect(xhr).not.toHaveBeenCalled();
+    const evidencePath = (
+      globalThis as typeof globalThis & {
+        process?: { env: Record<string, string | undefined> };
+      }
+    ).process?.env.VEX80_R2_SDK_EVIDENCE;
+    if (evidencePath)
+      writeFileSync(evidencePath, JSON.stringify(safe, null, 2));
   });
 });
