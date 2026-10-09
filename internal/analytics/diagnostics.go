@@ -16,6 +16,7 @@ import (
 	"github.com/posthog/posthog-go"
 	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/plugin"
 )
 
 var deliveryAccepted, deliverySucceeded, deliveryFailed, enqueueFailed, sdkWarnings atomic.Uint64
@@ -354,6 +355,11 @@ func CaptureJobFailure(ctx context.Context, err error, correlation, kind string)
 		if !shouldCapture(ctx, entry.Err) || diagnostics.Reported(ctx, entry.Err) {
 			continue
 		}
+		var pluginFailure *plugin.ExecutionError
+		if errors.As(entry.Err, &pluginFailure) {
+			CapturePluginFailure(ctx, entry.Err)
+			continue
+		}
 		event := FailureException(entry.Err, "job", posthog.NewProperties().Set("job_correlation", safeCorrelation(correlation)).Set("job_type", kind), diagnostics.Private(ctx))
 		// Entry cause already contains its wrappers: don't duplicate them in Value.
 		private := append(diagnostics.ErrorPrivate(entry.Err), diagnostics.Private(ctx)...)
@@ -366,6 +372,10 @@ func CaptureAPIFailure(ctx context.Context, err error, field, operation, code st
 		return ""
 	}
 	event := FailureException(err, "graphql", posthog.NewProperties().Set("graphql_field", field).Set("graphql_operation_type", operation).Set("graphql_error_code", code), diagnostics.Private(ctx))
+	var pluginFailure *plugin.ExecutionError
+	if errors.As(err, &pluginFailure) {
+		event = pluginFailureException(ctx, err, pluginFailure)
+	}
 	return captureException(ctx, err, event)
 }
 func CaptureAPIPanic(ctx context.Context, value any, field, operation string) string {

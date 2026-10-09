@@ -83,9 +83,8 @@ func (t *rpcPluginTask) Start() error {
 func (t *rpcPluginTask) waitToFinish(result *common.PluginOutput) {
 	defer t.client.Close()
 	defer t.waitGroup.Done()
-	<-t.done
-
-	t.result = result
+	call := <-t.done
+	t.complete(result, call.Error, nil)
 }
 
 func (t *rpcPluginTask) Wait() {

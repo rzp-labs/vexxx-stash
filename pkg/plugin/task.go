@@ -43,6 +43,8 @@ type pluginTask struct {
 	gqlHandler   http.Handler
 	serverConfig ServerConfig
 	ctx          context.Context
+	kind, hook   string
+	onError      func(context.Context, error)
 
 	progress chan float64
 	result   *common.PluginOutput

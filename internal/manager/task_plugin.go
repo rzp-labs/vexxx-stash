@@ -28,7 +28,7 @@ func (s *Manager) RunPluginTask(
 			return fmt.Errorf("Error running plugin task: %w", err)
 		}
 
-		done := make(chan bool)
+		done := make(chan error, 1)
 		go func() {
 			defer close(done)
 			task.Wait()
@@ -43,12 +43,13 @@ func (s *Manager) RunPluginTask(
 					logger.Debugf("Plugin returned: %v", output.Output)
 				}
 			}
+			done <- output.Err()
 		}()
 
 		for {
 			select {
-			case <-done:
-				return nil
+			case err := <-done:
+				return err
 			case p := <-pluginProgress:
 				progress.SetPercent(p)
 			case <-jobCtx.Done():

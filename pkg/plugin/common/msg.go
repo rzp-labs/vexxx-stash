@@ -1,6 +1,9 @@
 package common
 
-import "net/http"
+import (
+	"errors"
+	"net/http"
+)
 
 const (
 	HookContextKey = "hookContext"
@@ -101,6 +104,21 @@ type PluginInput struct {
 type PluginOutput struct {
 	Error  *string     `json:"error"`
 	Output interface{} `json:"output"`
+	// Failure retains the local process cause without changing the plugin wire protocol.
+	Failure error `json:"-"`
+}
+
+func (o *PluginOutput) Err() error {
+	if o == nil {
+		return nil
+	}
+	if o.Failure != nil {
+		return o.Failure
+	}
+	if o.Error != nil {
+		return errors.New(*o.Error)
+	}
+	return nil
 }
 
 // SetError is a convenience method that sets the Error field based on the

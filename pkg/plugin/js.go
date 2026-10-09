@@ -31,10 +31,11 @@ type jsPluginTask struct {
 }
 
 func (t *jsPluginTask) onError(err error) {
-	errString := err.Error()
-	t.result = &common.PluginOutput{
-		Error: &errString,
+	if errors.Is(err, errStop) {
+		t.complete(nil, nil, nil)
+		return
 	}
+	t.complete(nil, err, nil)
 }
 
 func (t *jsPluginTask) makeOutput(o goja.Value) {
@@ -51,6 +52,7 @@ func (t *jsPluginTask) makeOutput(o goja.Value) {
 		errStr := err.String()
 		t.result.Error = &errStr
 	}
+	t.complete(t.result, nil, nil)
 }
 
 func (t *jsPluginTask) initVM() error {

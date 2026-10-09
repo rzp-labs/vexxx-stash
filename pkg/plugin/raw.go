@@ -1,14 +1,17 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	stashExec "github.com/stashapp/stash/pkg/exec"
 	"github.com/stashapp/stash/pkg/logger"
@@ -63,61 +66,91 @@ func (t *rawPluginTask) Start() error {
 		cmd = stashExec.Command(command[0], command[1:]...)
 	}
 
-	stdin, err := cmd.StdinPipe()
+	inBytes, err := json.Marshal(t.input)
 	if err != nil {
-		return fmt.Errorf("error getting plugin process stdin: %v", err)
+		return fmt.Errorf("error marshalling plugin input: %w", err)
 	}
+	cmd.Stdin = bytes.NewReader(inBytes)
+	cmd.WaitDelay = time.Second
 
-	go func() {
-		defer stdin.Close()
-
-		inBytes, err := json.Marshal(t.input)
-		if err != nil {
-			logger.Warnf("error marshalling raw command input")
-		}
-		if k, err := stdin.Write(inBytes); err != nil {
-			logger.Warnf("error writing input to plugins stdin (wrote %v bytes out of %v): %v", k, len(string(inBytes)), err)
-		}
-	}()
-
-	stderr, err := cmd.StderrPipe()
+	// Own these pipes: Cmd.Wait can reap the primary process without closing
+	// readers before their buffered diagnostics have drained.
+	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
-		logger.Error("plugin stderr not available: " + err.Error())
+		return fmt.Errorf("plugin stderr not available: %w", err)
 	}
+	defer stderrWriter.Close()
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, stdoutWriter, err := os.Pipe()
 	if nil != err {
-		logger.Error("plugin stdout not available: " + err.Error())
+		stderr.Close()
+		return fmt.Errorf("plugin stdout not available: %w", err)
 	}
+	defer stdoutWriter.Close()
+	cmd.Stderr, cmd.Stdout = stderrWriter, stdoutWriter
 
-	t.waitGroup.Add(1)
 	t.done = make(chan bool, 1)
 	if err = cmd.Start(); err != nil {
-		return fmt.Errorf("error running plugin: %v", err)
+		stderr.Close()
+		stdout.Close()
+		return fmt.Errorf("error running plugin: %w", err)
 	}
+	// Only the process and its descendants should retain write handles now.
+	stderrWriter.Close()
+	stdoutWriter.Close()
+	t.waitGroup.Add(1)
 
-	go t.handlePluginStderr(t.plugin.Name, stderr)
+	var diagnostic stderrTail
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		defer stderr.Close()
+		t.handlePluginStderr(t.plugin.Name, io.NopCloser(io.TeeReader(stderr, &diagnostic)))
+		// The local line scanner may stop at an oversized line; still drain the process.
+		_, _ = io.Copy(io.Discard, io.TeeReader(stderr, &diagnostic))
+	}()
 	t.cmd = cmd
 
 	logger.Debugf("Plugin %s started: %s", t.plugin.Name, strings.Join(cmd.Args, " "))
 
-	// send the stdout to the plugin output
+	stdoutDone := make(chan struct{})
+	var stdoutData []byte
+	go func() {
+		defer close(stdoutDone)
+		defer stdout.Close()
+		stdoutData, _ = io.ReadAll(stdout)
+	}()
+
 	go func() {
 		defer t.waitGroup.Done()
 		defer close(t.done)
-		stdoutData, _ := io.ReadAll(stdout)
-		stdoutString := string(stdoutData)
-
-		output := t.getOutput(stdoutString)
-
 		err := cmd.Wait()
-		if err != nil && output.Error == nil {
-			errStr := err.Error()
-			output.Error = &errStr
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
+		out, diag := stdoutDone, stderrDone
+		for out != nil || diag != nil {
+			select {
+			case <-out:
+				out = nil
+			case <-diag:
+				diag = nil
+			case <-timer.C:
+				// Inherited handles must not hold a completed primary task open.
+				stdout.Close()
+				stderr.Close()
+				<-stdoutDone
+				<-stderrDone
+				out, diag = nil, nil
+			}
 		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			// An inherited input pipe is not a failed primary process.
+			err = nil
+		}
+		output := t.getOutput(string(stdoutData))
 		logger.Debugf("Plugin %s finished", t.plugin.Name)
 
-		t.result = &output
+		t.complete(&output, err, &diagnostic)
 	}()
 
 	t.started = true
