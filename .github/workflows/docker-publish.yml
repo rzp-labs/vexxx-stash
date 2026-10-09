@@ -216,8 +216,11 @@ jobs:
           docker run --detach --name vexxx-smoke \
             --publish 127.0.0.1:9999:9999 \
             --env STASH_HOST=0.0.0.0 \
+            --env POSTHOG_PROJECT_TOKEN=offline-smoke \
+            --env POSTHOG_HOST=http://127.0.0.1:1 \
             "$(cat image.id)"
           trap 'docker logs vexxx-smoke; docker rm --force vexxx-smoke' EXIT
+          docker exec vexxx-smoke sh -ec 'test "$POSTHOG_PROJECT_TOKEN" = offline-smoke && test "$POSTHOG_HOST" = http://127.0.0.1:1'
           curl --fail --silent --show-error --retry 30 \
             --retry-all-errors --retry-delay 2 --max-time 5 \
             http://127.0.0.1:9999/ > /dev/null
