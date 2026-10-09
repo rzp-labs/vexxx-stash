@@ -497,11 +497,13 @@ func (u *updater) notifyUpdate() {
 	u.updateTimer = nil
 }
 
-func (u *updater) updateProgress(progress float64, details []string) {
+func (u *updater) updateProgress(progress float64, processed, total *int, details []string) {
 	u.m.mutex.Lock()
 	defer u.m.mutex.Unlock()
 
 	u.job.Progress = progress
+	u.job.Processed = processed
+	u.job.Total = total
 	u.job.Details = details
 
 	if time.Since(u.lastUpdate) < u.m.updateThrottleLimit {

@@ -1,7 +1,6 @@
 import {
   faBan,
   faCheck,
-  faCircle,
   faCircleExclamation,
   faCog,
   faHourglassStart,
@@ -27,6 +26,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { Icon } from "src/components/Shared/Icon";
 import {
+  getWSClient,
   mutateStopJob,
   useJobQueue,
   useJobsSubscribe,
@@ -43,6 +43,7 @@ import {
   alpha,
   Theme,
 } from "@mui/material";
+import { appendActivityHistory, readActivityHistory } from "./jobActivity";
 import { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 
 // ─── Job classification ──────────────────────────────────────────────────────
@@ -99,6 +100,8 @@ type JobFragment = Pick<
   | "subTasks"
   | "description"
   | "progress"
+  | "processed"
+  | "total"
   | "error"
   | "startTime"
 >;
@@ -115,7 +118,7 @@ const Task: React.FC<IJob> = ({ job }) => {
   const [subTaskHistory, setSubTaskHistory] = useState<string[]>(() => {
     try {
       const stored = localStorage.getItem(`job-history-${job.id}`);
-      return stored ? JSON.parse(stored) : [];
+      return readActivityHistory(stored);
     } catch {
       return [];
     }
@@ -127,7 +130,8 @@ const Task: React.FC<IJob> = ({ job }) => {
   const jobClass = classifyJob(job.description);
 
   useEffect(() => {
-    requestAnimationFrame(() => setClassName("fade-in"));
+    const frame = requestAnimationFrame(() => setClassName("fade-in"));
+    return () => cancelAnimationFrame(frame);
   }, []);
 
   useEffect(() => {
@@ -136,7 +140,8 @@ const Task: React.FC<IJob> = ({ job }) => {
       job.status === GQL.JobStatus.Failed ||
       job.status === GQL.JobStatus.Finished
     ) {
-      setTimeout(() => setClassName("fade-out"), 4500);
+      const timer = setTimeout(() => setClassName("fade-out"), 4500);
+      return () => clearTimeout(timer);
     }
   }, [job.status]);
 
@@ -151,21 +156,7 @@ const Task: React.FC<IJob> = ({ job }) => {
 
   useEffect(() => {
     if (job.subTasks && job.subTasks.length > 0) {
-      setSubTaskHistory((prev) => {
-        const seen = new Set(prev);
-        let changed = false;
-        const updated = [...prev];
-        for (const t of job.subTasks!) {
-          if (t && !seen.has(t)) {
-            updated.push(t);
-            seen.add(t);
-            changed = true;
-          }
-        }
-        if (!changed) return prev;
-        if (updated.length > 500) return updated.slice(updated.length - 500);
-        return updated;
-      });
+      setSubTaskHistory((prev) => appendActivityHistory(prev, job.subTasks!));
     }
   }, [job.subTasks]);
 
@@ -262,6 +253,9 @@ const Task: React.FC<IJob> = ({ job }) => {
     return base;
   };
 
+  const exactWorkUnitCounts =
+    Number.isSafeInteger(job.processed) &&
+    (job.total == null || Number.isSafeInteger(job.total));
   const hasLog = subTaskHistory.length > 0 || !!job.error;
 
   return (
@@ -419,7 +413,19 @@ const Task: React.FC<IJob> = ({ job }) => {
           )}
         </Box>
 
-        {/* Log table */}
+        {job.processed != null && (
+          <Tooltip title="Reported work units; units vary by job and may include skipped or failed work. The total may change during execution." arrow>
+            <Typography variant="caption" sx={{ display: "block", color: "text.secondary", mb: hasLog ? 1 : 0 }}>
+              {!exactWorkUnitCounts
+                ? "Work-unit counts exceed exact display range"
+                : job.total != null
+                ? `${job.processed} / ${job.total} work units processed`
+                : `${job.processed} work units processed (total unknown)`}
+            </Typography>
+          </Tooltip>
+        )}
+
+        {/* Activity log */}
         {hasLog && (
           <Box
             ref={terminalRef}
@@ -442,7 +448,7 @@ const Task: React.FC<IJob> = ({ job }) => {
             <Box
               sx={{
                 display: "grid",
-                gridTemplateColumns: "18px 28px 1fr",
+                gridTemplateColumns: "1fr",
                 gap: 0,
                 px: 1.25,
                 py: 0.5,
@@ -454,9 +460,9 @@ const Task: React.FC<IJob> = ({ job }) => {
                 zIndex: 1,
               }}
             >
-              <Typography variant="caption" sx={{ color: "text.disabled", fontSize: "0.65rem", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>#</Typography>
-              <Typography variant="caption" sx={{ color: "text.disabled", fontSize: "0.65rem", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>ST</Typography>
-              <Typography variant="caption" sx={{ color: "text.disabled", fontSize: "0.65rem", fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>Message</Typography>
+              <Typography variant="caption" sx={{ color: "text.disabled", fontSize: "0.65rem", fontWeight: 700 }}>
+                Recent activity (up to 500 sampled messages)
+              </Typography>
             </Box>
 
             {/* Log rows */}
@@ -464,21 +470,12 @@ const Task: React.FC<IJob> = ({ job }) => {
               const isLatest = i === subTaskHistory.length - 1;
               const rowActive = isLatest && isRunning;
 
-              const indicator = (() => {
-                if (rowActive) return (
-                  <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "primary.main", animation: "pulseGlow 1.2s infinite ease-in-out", "@keyframes pulseGlow": { "0%,100%": { transform: "scale(0.8)", opacity: 0.5 }, "50%": { transform: "scale(1.3)", opacity: 1 } } }} />
-                );
-                if (isFailed && isLatest) return <Box sx={{ color: "error.main", fontSize: "9px", display: "flex" }}><Icon icon={faCircleExclamation} /></Box>;
-                if (isCancelled && isLatest) return <Box sx={{ color: "text.disabled", fontSize: "9px", display: "flex" }}><Icon icon={faBan} /></Box>;
-                return <Box sx={{ color: "success.main", fontSize: "8px", display: "flex" }}><Icon icon={faCheck} /></Box>;
-              })();
-
               return (
                 <Box
                   key={i}
                   sx={{
                     display: "grid",
-                    gridTemplateColumns: "18px 28px 1fr",
+                    gridTemplateColumns: "1fr",
                     gap: 0,
                     px: 1.25,
                     py: 0.4,
@@ -489,12 +486,6 @@ const Task: React.FC<IJob> = ({ job }) => {
                     transition: "background-color 0.2s ease",
                   }}
                 >
-                  <Typography sx={{ fontSize: "0.65rem", color: "text.disabled", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
-                    {i + 1}
-                  </Typography>
-                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    {indicator}
-                  </Box>
                   <Typography
                     variant="body2"
                     sx={{
@@ -517,7 +508,7 @@ const Task: React.FC<IJob> = ({ job }) => {
               <Box
                 sx={{
                   display: "grid",
-                  gridTemplateColumns: "18px 28px 1fr",
+                  gridTemplateColumns: "1fr",
                   gap: 0,
                   px: 1.25,
                   py: 0.4,
@@ -527,10 +518,6 @@ const Task: React.FC<IJob> = ({ job }) => {
                   borderColor: (theme: Theme) => alpha(theme.palette.error.main, 0.2),
                 }}
               >
-                <Typography sx={{ fontSize: "0.65rem", color: "text.disabled", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>!</Typography>
-                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", color: "error.main", fontSize: "9px" }}>
-                  <Icon icon={faCircleExclamation} />
-                </Box>
                 <Typography variant="body2" sx={{ fontSize: "0.775rem", color: "error.main", fontWeight: 600, lineHeight: 1.4, fontFamily: "monospace", wordBreak: "break-all" }}>
                   {job.error}
                 </Typography>
@@ -583,17 +570,47 @@ export const JobTable: React.FC = () => {
   const intl = useIntl();
   const jobStatus = useJobQueue();
   const jobsSubscribe = useJobsSubscribe();
-
-  const [queue, setQueue] = useState<JobFragment[]>([]);
+  const { refetch, startPolling, stopPolling } = jobStatus;
+  const removalTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
-    setQueue(jobStatus.data?.jobQueue ?? []);
-  }, [jobStatus]);
+    const timers = removalTimers.current;
+    return () => {
+      timers.forEach(clearTimeout);
+      timers.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    // Subscription messages can be missed while disconnected or when server
+    // buffers fill. Recover authoritative counts instead of counting messages.
+    startPolling(5000);
+    const dispose = getWSClient().on("connected", () => {
+      void refetch().catch(() => undefined);
+    });
+    return () => {
+      dispose();
+      stopPolling();
+    };
+  }, [refetch, startPolling, stopPolling]);
+
+  const [queue, setQueue] = useState<JobFragment[]>(jobStatus.data?.jobQueue ?? []);
+
+  useEffect(() => {
+    if (!jobStatus.data) return;
+    const snapshot = jobStatus.data.jobQueue ?? [];
+    setQueue((q) => [
+      ...snapshot.filter((j) => !removalTimers.current.has(j.id)),
+      ...q.filter((j) => removalTimers.current.has(j.id)),
+    ]);
+  }, [jobStatus.data]);
 
   useEffect(() => {
     if (jobStatus.loading || !jobStatus.data) return;
     try {
-      const activeIds = new Set(queue.map((j) => j.id));
+      const activeIds = new Set(
+        [...queue, ...(jobStatus.data.jobQueue ?? [])].map((j) => j.id)
+      );
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
         if (key && key.startsWith("job-history-")) {
@@ -615,18 +632,39 @@ export const JobTable: React.FC = () => {
     const event = jobsSubscribe.data.jobsSubscribe;
 
     function updateJob() {
-      setQueue((q) => q.map((j) => (j.id === event.job.id ? event.job : j)));
+      setQueue((q) =>
+        q.some((j) => j.id === event.job.id)
+          ? q.map((j) => {
+              if (j.id !== event.job.id) return j;
+              // REMOVE and UPDATE use separate server buffers. A pending running
+              // update must not overwrite final counts or terminal status.
+              if (
+                removalTimers.current.has(j.id) &&
+                event.type !== GQL.JobStatusUpdateType.Remove
+              ) return j;
+              return event.job;
+            })
+          : q.concat([event.job])
+      );
     }
 
     switch (event.type) {
       case GQL.JobStatusUpdateType.Add:
-        setQueue((q) => q.concat([event.job]));
+        // ADD can arrive after an UPDATE from a different subscription buffer.
+        setQueue((q) =>
+          q.some((j) => j.id === event.job.id) ? q : q.concat([event.job])
+        );
         break;
       case GQL.JobStatusUpdateType.Remove:
         updateJob();
-        setTimeout(() => {
-          setQueue((q) => q.filter((j) => j.id !== event.job.id));
-        }, 5000);
+        clearTimeout(removalTimers.current.get(event.job.id));
+        removalTimers.current.set(
+          event.job.id,
+          setTimeout(() => {
+            removalTimers.current.delete(event.job.id);
+            setQueue((q) => q.filter((j) => j.id !== event.job.id));
+          }, 5000)
+        );
         break;
       case GQL.JobStatusUpdateType.Update:
         updateJob();

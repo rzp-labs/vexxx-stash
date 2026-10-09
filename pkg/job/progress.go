@@ -9,11 +9,12 @@ const ProgressIndefinite float64 = -1
 // Progress is used by JobExec to communicate updates to the job's progress to
 // the JobManager.
 type Progress struct {
-	defined      bool
-	processed    int
-	total        int
-	percent      float64
-	currentTasks []*task
+	defined       bool
+	countersKnown bool
+	processed     int
+	total         int
+	percent       float64
+	currentTasks  []*task
 
 	mutex   sync.Mutex
 	updater *updater
@@ -29,7 +30,18 @@ func (p *Progress) updated() {
 		details = append(details, t.description)
 	}
 
-	p.updater.updateProgress(p.percent, details)
+	var processed, total *int
+	if p.countersKnown {
+		if p.processed >= 0 {
+			v := p.processed
+			processed = &v
+		}
+		if p.defined && p.total > 0 {
+			v := p.total
+			total = &v
+		}
+	}
+	p.updater.updateProgress(p.percent, processed, total, details)
 }
 
 // Indefinite sets the progress to an indefinite amount.
@@ -83,6 +95,7 @@ func (p *Progress) SetProcessed(processed int) {
 }
 
 func (p *Progress) calculatePercent() {
+	p.countersKnown = true
 	switch {
 	case !p.defined || p.total <= 0:
 		p.percent = ProgressIndefinite
@@ -111,6 +124,8 @@ func (p *Progress) SetPercent(percent float64) {
 		percent = 1
 	}
 
+	// A direct percentage does not describe the existing integer counters.
+	p.countersKnown = false
 	p.percent = percent
 	p.updated()
 }
