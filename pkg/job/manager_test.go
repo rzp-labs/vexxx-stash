@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,6 +10,19 @@ import (
 )
 
 const sleepTime time.Duration = 10 * time.Millisecond
+
+// Initialise the concurrency limit before starting the dispatcher: NewManager
+// starts it immediately, so changing MaxConcurrentJobs afterwards races its read.
+func newSingleJobTestManager() *Manager {
+	m := &Manager{
+		stop:                make(chan struct{}),
+		updateThrottleLimit: defaultThrottleLimit,
+		MaxConcurrentJobs:   1,
+	}
+	m.notEmpty = sync.NewCond(&m.mutex)
+	go m.dispatcher()
+	return m
+}
 
 type testExec struct {
 	started   chan struct{}
@@ -43,8 +57,7 @@ func (e *testExec) Execute(ctx context.Context, p *Progress) error {
 }
 
 func TestAdd(t *testing.T) {
-	m := NewManager()
-	m.MaxConcurrentJobs = 1
+	m := newSingleJobTestManager()
 
 	const jobName = "test job"
 	exec1 := newTestExec(make(chan struct{}))
@@ -128,8 +141,7 @@ func TestAdd(t *testing.T) {
 }
 
 func TestCancel(t *testing.T) {
-	m := NewManager()
-	m.MaxConcurrentJobs = 1
+	m := newSingleJobTestManager()
 
 	// add two jobs
 	const jobName = "test job"
@@ -197,8 +209,7 @@ func TestCancel(t *testing.T) {
 }
 
 func TestCancelAll(t *testing.T) {
-	m := NewManager()
-	m.MaxConcurrentJobs = 1
+	m := newSingleJobTestManager()
 
 	// add two jobs
 	const jobName = "test job"
