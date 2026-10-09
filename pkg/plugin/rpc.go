@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/rpc"
@@ -48,7 +47,7 @@ type rpcPluginTask struct {
 
 func (t *rpcPluginTask) Start() error {
 	if t.started {
-		return errors.New("task already started")
+		return errTaskAlreadyStarted
 	}
 
 	command := t.plugin.getExecCommand(t.operation)

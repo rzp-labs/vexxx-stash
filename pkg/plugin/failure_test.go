@@ -77,6 +77,19 @@ func TestPluginHelperProcess(t *testing.T) {
 		for {
 			time.Sleep(time.Second)
 		}
+	case "gatedSuccess":
+		release := input.Args["release"].(string)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(release); err == nil {
+				fmt.Fprintln(os.Stdout, `{"output":"done"}`)
+				break
+			}
+			if time.Now().After(deadline) {
+				os.Exit(94)
+			}
+			time.Sleep(time.Millisecond)
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "a non-fatal warning")
 		fmt.Fprintln(os.Stdout, `{"output":"ok"}`)

@@ -108,7 +108,7 @@ func (t *jsPluginTask) initVM() error {
 
 func (t *jsPluginTask) Start() error {
 	if t.started {
-		return errors.New("task already started")
+		return errTaskAlreadyStarted
 	}
 
 	t.started = true

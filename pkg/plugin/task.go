@@ -2,10 +2,13 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/stashapp/stash/pkg/plugin/common"
 )
+
+var errTaskAlreadyStarted = errors.New("task already started")
 
 type PluginTask struct {
 	Name        string  `json:"name"`
@@ -67,9 +70,14 @@ type startupReportingTask struct {
 
 func (t *startupReportingTask) Start() error {
 	if err := t.Task.Start(); err != nil {
+		if errors.Is(err, errTaskAlreadyStarted) {
+			// Preserve backend validation without replacing its active/completed result.
+			return err
+		}
 		t.metadata.complete(nil, err, nil)
 		return t.metadata.result.Err()
 	}
+	t.metadata.result = nil
 	return nil
 }
 

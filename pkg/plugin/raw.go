@@ -38,7 +38,7 @@ type rawPluginTask struct {
 
 func (t *rawPluginTask) Start() error {
 	if t.started {
-		return errors.New("task already started")
+		return errTaskAlreadyStarted
 	}
 
 	command := t.plugin.getExecCommand(t.operation)
