@@ -13,6 +13,10 @@ type Job {
   subTasks: [String!]
   description: String!
   progress: Float
+  "Reported work units processed, not successful tasks. Null for percentage-only jobs."
+  processed: Int64
+  "Current total work units. May change; null until a positive total is defined."
+  total: Int64
   startTime: Time
   endTime: Time
   addTime: Time!

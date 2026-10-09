@@ -44,6 +44,15 @@ func jobToJobModel(j job.Job) *Job {
 		Error:       j.Error,
 	}
 
+	if j.Processed != nil {
+		processed := int64(*j.Processed)
+		ret.Processed = &processed
+	}
+	if j.Total != nil {
+		total := int64(*j.Total)
+		ret.Total = &total
+	}
+
 	if j.Progress != -1 {
 		ret.Progress = &j.Progress
 	}
