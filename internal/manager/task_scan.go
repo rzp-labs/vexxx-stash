@@ -831,7 +831,7 @@ func (g *imageGenerators) Generate(ctx context.Context, i *models.Image, f model
 				Overwrite: overwrite,
 			}
 
-			taskPreview.Start(ctx)
+			startScanPreviewTask(ctx, &taskPreview)
 			progress.Increment()
 		}
 
@@ -884,6 +884,7 @@ type sceneGenerators struct {
 
 func (g *sceneGenerators) Generate(ctx context.Context, s *models.Scene, f *models.VideoFile) error {
 	const overwrite = false
+	var previewErr error
 
 	progress := g.progress
 	t := g.input
@@ -936,7 +937,7 @@ func (g *sceneGenerators) Generate(ctx context.Context, s *models.Scene, f *mode
 
 	if t.ScanGeneratePreviews {
 		progress.AddTotal(1)
-		previewsFn := func(ctx context.Context) {
+		previewsFn := func(ctx context.Context) error {
 			options := getGeneratePreviewOptions(GeneratePreviewOptionsInput{})
 
 			generator := &generate.Generator{
@@ -959,14 +960,18 @@ func (g *sceneGenerators) Generate(ctx context.Context, s *models.Scene, f *mode
 				generator:           generator,
 				repository:          mgr.Repository,
 			}
-			taskPreview.Start(ctx)
+			err := startScanPreviewTask(ctx, &taskPreview)
 			progress.Increment()
+			return err
 		}
 
 		if g.sequentialScanning {
-			previewsFn(ctx)
+			previewErr = previewsFn(ctx)
 		} else {
-			g.taskQueue.Add(fmt.Sprintf("Generating preview for %s", path), previewsFn)
+			g.taskQueue.Add(fmt.Sprintf("Generating preview for %s", path), func(ctx context.Context) {
+				// Queued failures are reported at the task boundary; keep draining siblings.
+				_ = previewsFn(ctx)
+			})
 		}
 	}
 
@@ -983,5 +988,5 @@ func (g *sceneGenerators) Generate(ctx context.Context, s *models.Scene, f *mode
 		})
 	}
 
-	return nil
+	return previewErr
 }

@@ -486,7 +486,7 @@ func (g *watcherImageGenerator) Generate(ctx context.Context, i *models.Image, f
 			Image:     ii,
 			Overwrite: overwrite,
 		}
-		taskPreview.Start(ctx)
+		startScanPreviewTask(ctx, &taskPreview)
 	}
 
 	if opts.ScanGenerateImagePhashes {
@@ -509,6 +509,7 @@ type watcherSceneGenerator struct {
 
 func (g *watcherSceneGenerator) Generate(ctx context.Context, s *models.Scene, f *models.VideoFile) error {
 	const overwrite = false
+	var previewErr error
 	cfg := config.GetInstance()
 	opts := cfg.GetDefaultScanSettings()
 	if opts == nil {
@@ -566,7 +567,7 @@ func (g *watcherSceneGenerator) Generate(ctx context.Context, s *models.Scene, f
 			generator:           generator,
 			repository:          mgr.Repository,
 		}
-		taskPreview.Start(ctx)
+		previewErr = startScanPreviewTask(ctx, &taskPreview)
 	}
 
 	if opts.ScanGenerateCovers {
@@ -578,7 +579,7 @@ func (g *watcherSceneGenerator) Generate(ctx context.Context, s *models.Scene, f
 		taskCover.Start(ctx)
 	}
 
-	return nil
+	return previewErr
 }
 
 // autoIdentify runs Identify against a single scene using the configured
