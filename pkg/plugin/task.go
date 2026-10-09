@@ -2,10 +2,13 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/stashapp/stash/pkg/plugin/common"
 )
+
+var errTaskAlreadyStarted = errors.New("task already started")
 
 type PluginTask struct {
 	Name        string  `json:"name"`
@@ -43,6 +46,8 @@ type pluginTask struct {
 	gqlHandler   http.Handler
 	serverConfig ServerConfig
 	ctx          context.Context
+	kind, hook   string
+	onError      func(context.Context, error)
 
 	progress chan float64
 	result   *common.PluginOutput
@@ -54,4 +59,31 @@ func (t *pluginTask) GetResult() *common.PluginOutput {
 
 func (t *pluginTask) createTask() Task {
 	return t.plugin.Interface.getTaskBuilder().build(*t)
+}
+
+// Standalone callers receive startup failures through the same observer and
+// retained error identity as execution failures. Wait/Stop keep backend semantics.
+type startupReportingTask struct {
+	Task
+	metadata pluginTask
+}
+
+func (t *startupReportingTask) Start() error {
+	if err := t.Task.Start(); err != nil {
+		if errors.Is(err, errTaskAlreadyStarted) {
+			// Preserve backend validation without replacing its active/completed result.
+			return err
+		}
+		t.metadata.complete(nil, err, nil)
+		return t.metadata.result.Err()
+	}
+	t.metadata.result = nil
+	return nil
+}
+
+func (t *startupReportingTask) GetResult() *common.PluginOutput {
+	if t.metadata.result != nil {
+		return t.metadata.result
+	}
+	return t.Task.GetResult()
 }

@@ -10,11 +10,18 @@ import (
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/errcode"
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/vektah/gqlparser/v2/ast"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/vektah/gqlparser/v2/lexer"
 	"github.com/vektah/gqlparser/v2/parser"
 )
+
+// Share accepted capture identities across resolver and presenter boundaries,
+// per operation (including individual operations on a WebSocket connection).
+func graphQLCaptureState(ctx context.Context, next graphql.OperationHandler) graphql.ResponseHandler {
+	return next(diagnostics.WithState(ctx))
+}
 
 // Framework validation diagnostics can embed request names/literals even when
 // no resolver (and therefore no FieldContext) exists. Change only the capture

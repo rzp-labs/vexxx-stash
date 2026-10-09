@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/rpc"
@@ -48,7 +47,7 @@ type rpcPluginTask struct {
 
 func (t *rpcPluginTask) Start() error {
 	if t.started {
-		return errors.New("task already started")
+		return errTaskAlreadyStarted
 	}
 
 	command := t.plugin.getExecCommand(t.operation)
@@ -83,9 +82,8 @@ func (t *rpcPluginTask) Start() error {
 func (t *rpcPluginTask) waitToFinish(result *common.PluginOutput) {
 	defer t.client.Close()
 	defer t.waitGroup.Done()
-	<-t.done
-
-	t.result = result
+	call := <-t.done
+	t.complete(result, call.Error, nil)
 }
 
 func (t *rpcPluginTask) Wait() {

@@ -9,7 +9,6 @@ package plugin
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -104,6 +103,8 @@ type Cache struct {
 	plugins      []Config
 	sessionStore *session.Store
 	gqlHandler   http.Handler
+	// OnError observes completed plugin failures; hooks still continue after plugin errors.
+	OnError func(context.Context, error)
 }
 
 // NewCache returns a new Cache.
@@ -292,8 +293,10 @@ func (c Cache) CreateTask(ctx context.Context, pluginID string, operationName *s
 		gqlHandler:   c.gqlHandler,
 		serverConfig: c.config,
 		ctx:          ctx,
+		kind:         "task",
+		onError:      c.OnError,
 	}
-	return task.createTask(), nil
+	return &startupReportingTask{Task: task.createTask(), metadata: task}, nil
 }
 
 func (c Cache) RunPlugin(ctx context.Context, pluginID string, args OperationInput) (interface{}, error) {
@@ -313,11 +316,15 @@ func (c Cache) RunPlugin(ctx context.Context, pluginID string, args OperationInp
 		input:        pluginInput,
 		gqlHandler:   c.gqlHandler,
 		serverConfig: c.config,
+		ctx:          ctx,
+		kind:         "run",
+		onError:      c.OnError,
 	}
 
 	task := pt.createTask()
 	if err := task.Start(); err != nil {
-		return nil, err
+		pt.complete(nil, err, nil)
+		return nil, pt.result.Err()
 	}
 
 	if err := waitForTask(ctx, task); err != nil {
@@ -329,8 +336,8 @@ func (c Cache) RunPlugin(ctx context.Context, pluginID string, args OperationInp
 		logger.Debugf("%s: returned no result", pluginID)
 		return nil, nil
 	} else {
-		if output.Error != nil {
-			return nil, errors.New(*output.Error)
+		if err := output.Err(); err != nil {
+			return nil, err
 		}
 
 		return output.Output, nil
@@ -415,11 +422,15 @@ func (c Cache) executePostHooks(ctx context.Context, hookType hook.TriggerEnum, 
 				gqlHandler:   c.gqlHandler,
 				serverConfig: c.config,
 				ctx:          ctx,
+				kind:         "hook",
+				hook:         hookType.String(),
+				onError:      c.OnError,
 			}
 
 			task := pt.createTask()
 			if err := task.Start(); err != nil {
-				return err
+				pt.complete(nil, err, nil)
+				return pt.result.Err()
 			}
 
 			if err := waitForTask(ctx, task); err != nil {

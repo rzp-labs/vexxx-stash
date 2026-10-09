@@ -49,6 +49,7 @@ func Initialize(cfg *config.Config, l *log.Logger) (*Manager, error) {
 	scraperCache := scraper.NewCache(cfg, scraperRepository)
 
 	pluginCache := plugin.NewCache(cfg)
+	pluginCache.OnError = analytics.CapturePluginFailure
 
 	sceneService := &scene.Service{
 		File:             db.File,
