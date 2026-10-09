@@ -296,7 +296,7 @@ func (c Cache) CreateTask(ctx context.Context, pluginID string, operationName *s
 		kind:         "task",
 		onError:      c.OnError,
 	}
-	return task.createTask(), nil
+	return &startupReportingTask{Task: task.createTask(), metadata: task}, nil
 }
 
 func (c Cache) RunPlugin(ctx context.Context, pluginID string, args OperationInput) (interface{}, error) {

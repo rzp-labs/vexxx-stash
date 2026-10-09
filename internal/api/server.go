@@ -204,6 +204,7 @@ func Initialize() (*Server, error) {
 
 	gqlSrv := gqlHandler.New(NewExecutableSchema(Config{Resolvers: resolver}))
 	gqlSrv.SetRecoverFunc(recoverGraphQL)
+	gqlSrv.AroundOperations(graphQLCaptureState)
 
 	// Add mutation authorization middleware for multi-user support
 	gqlSrv.AroundOperations(MutationMiddleware(repo.User, repo.TxnManager))

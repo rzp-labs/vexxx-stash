@@ -104,9 +104,11 @@ func (t *pluginTask) privateValues() ([]string, bool) {
 			complete = false
 			return
 		}
-		if !v.IsValid() || !v.CanInterface() {
+		if !v.IsValid() {
 			return
 		}
+		// Kind accessors inspect unexported fields without calling Interface.
+		// Custom JSON serializers and JS methods may expose these stored strings.
 		switch v.Kind() {
 		case reflect.String:
 			private = append(private, v.String())

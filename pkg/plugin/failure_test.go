@@ -63,6 +63,10 @@ func TestPluginHelperProcess(t *testing.T) {
 	case "pem":
 		fmt.Fprint(os.Stderr, syntheticPEMDiagnostic())
 		os.Exit(7)
+	case "privateJSON":
+		value := input.Args["privateJSON"].(map[string]any)["scene"]
+		fmt.Fprintf(os.Stderr, "ModuleNotFoundError: unfamiliar-wheel-sentinel %v\n", value)
+		os.Exit(7)
 	case "reported":
 		fmt.Fprintln(os.Stdout, `{"error":"reported sentinel password=synthetic-secret"}`)
 	case "both":
@@ -266,6 +270,53 @@ func TestPluginPrivateInspectionFailsClosed(t *testing.T) {
 		if strings.Contains(task.GetResult().Err().Error(), "Private Alice") {
 			t.Fatal("incomplete private inspection leaked text")
 		}
+	}
+}
+
+type privatePluginArgument struct{ scene string }
+
+func (v privatePluginArgument) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]string{"scene": v.scene})
+}
+
+func (v privatePluginArgument) Scene() string { return v.scene }
+
+func TestPluginUnexportedInputPrivacyAtExecutionBoundary(t *testing.T) {
+	t.Setenv("VEX84_PLUGIN_HELPER", "1")
+	const private = "SyntheticPrivateSceneIdentity9182"
+	for _, kind := range []string{"raw", "js"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := pluginHelperConfig(t, "privateJSON")
+			if kind == "js" {
+				cfg.Interface, cfg.Exec = InterfaceEnumJS, []string{"fixture.js"}
+				script := `throw new Error("ModuleNotFoundError: unfamiliar-wheel-sentinel " + input.Args.privateJSON.scene());`
+				if err := os.WriteFile(filepath.Join(filepath.Dir(cfg.path), "fixture.js"), []byte(script), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			pt := pluginTask{plugin: &cfg, serverConfig: pluginTestConfig{}, ctx: context.Background(), kind: "task",
+				input:   common.PluginInput{Args: common.ArgsMap{"privateJSON": privatePluginArgument{scene: private}}},
+				onError: func(context.Context, error) { calls++ }}
+			task := pt.createTask()
+			if err := task.Start(); err != nil {
+				t.Fatal(err)
+			}
+			task.Wait()
+			var failure *ExecutionError
+			if !errors.As(task.GetResult().Err(), &failure) || calls != 1 {
+				t.Fatal("missing execution failure")
+			}
+			text := failure.Error()
+			if strings.Contains(text, private) {
+				t.Fatal("unexported input echoed through supported serialization/JS method")
+			}
+			for _, retained := range []string{"ModuleNotFoundError", "unfamiliar-wheel-sentinel"} {
+				if !strings.Contains(text, retained) {
+					t.Fatal("useful diagnostic lost", retained, text)
+				}
+			}
+		})
 	}
 }
 
