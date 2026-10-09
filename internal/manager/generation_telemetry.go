@@ -2,8 +2,11 @@ package manager
 
 import (
 	"context"
+	"sync"
 
+	"github.com/stashapp/stash/internal/analytics"
 	"github.com/stashapp/stash/pkg/file/video"
+	"github.com/stashapp/stash/pkg/job"
 	"github.com/stashapp/stash/pkg/models"
 )
 
@@ -114,4 +117,35 @@ func reportGenerationFailure(ctx context.Context, err error) {
 	if report, ok := ctx.Value(generationFailureReporterKey{}).(func(error)); ok {
 		report(err)
 	}
+}
+
+// Scan generation runs after the file transaction commits. Observe preview
+// failures without aborting the scan or preventing other assets from running.
+// Clip previews report internally and return nil; scene previews return errors.
+func startScanPreviewTask(ctx context.Context, task Task) error {
+	cfg := GetInstance().Config
+	requested, _ := cfg.GetRequestedGenerationConfiguration()
+	active := cfg.GetActiveGenerationConfiguration()
+	info := analytics.GenerationFailureContext{
+		JobCorrelation:  job.Correlation(ctx),
+		Workload:        generationTaskWorkload(task),
+		PrivateValues:   generationTaskPrivateValues(task),
+		Configured:      requested.Limits(),
+		Effective:       active.Limits(),
+		ParallelTasks:   cfg.GetParallelTasksWithAutoDetection(),
+		BudgetEnabled:   active.BudgetEnabled,
+		SelectedBackend: "software",
+	}
+	if info.Workload == "preview" {
+		info.SelectedBackend = active.PreviewBackend
+	}
+	var reported sync.Once
+	report := func(err error) {
+		reported.Do(func() { analytics.CaptureGenerationFailure(ctx, err, info) })
+	}
+	err := task.Start(withGenerationFailureReporter(ctx, report))
+	if err != nil {
+		report(err)
+	}
+	return err
 }
