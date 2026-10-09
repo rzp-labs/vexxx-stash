@@ -4,6 +4,8 @@ fragment JobData on Job {
   subTasks
   description
   progress
+  processed
+  total
   startTime
   endTime
   addTime

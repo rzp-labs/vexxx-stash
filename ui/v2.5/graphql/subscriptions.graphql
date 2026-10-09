@@ -7,6 +7,8 @@ subscription JobsSubscribe {
       subTasks
       description
       progress
+      processed
+      total
       error
       startTime
     }

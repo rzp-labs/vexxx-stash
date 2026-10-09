@@ -70,7 +70,12 @@ type Job struct {
 	Details     []string
 	Description string
 	// Progress in terms of 0 - 1.
-	Progress  float64
+	Progress float64
+	// Reported work units, not successful tasks or activity messages. Nil when
+	// counters are unavailable (e.g. percentage-only progress). Total is nil
+	// until the job defines a positive total; it may change during execution.
+	Processed *int
+	Total     *int
 	StartTime *time.Time
 	EndTime   *time.Time
 	AddTime   time.Time
@@ -91,6 +96,8 @@ func (j *Job) statusCopy() Job {
 		Details:     j.Details,
 		Description: j.Description,
 		Progress:    j.Progress,
+		Processed:   j.Processed,
+		Total:       j.Total,
 		StartTime:   j.StartTime,
 		EndTime:     j.EndTime,
 		AddTime:     j.AddTime,
