@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -180,5 +181,57 @@ func TestBundledDestinationEnablesEventsAndLogsForSameProject(t *testing.T) {
 				t.Fatalf("event/log requests=%d/%d, want 1/1", eventRequests, logRequests)
 			}
 		})
+	}
+}
+
+func TestLifecycleSDKResourcePrivacyAndDiscardAccounting(t *testing.T) {
+	var mu sync.Mutex
+	var payloads [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		payloads = append(payloads, data)
+		mu.Unlock()
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOG_PROJECT_TOKEN", "synthetic-log-project")
+	t.Setenv("POSTHOG_HOST", server.URL)
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "private.attr=resource-secret,password=env-secret")
+	t.Setenv("OTEL_SERVICE_NAME", "private-service-name")
+	if err := InitializeLogs(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = CloseLogs(ctx)
+		logsProvider, logsLogger = nil, nil
+	})
+	before := logExportFailures.Load()
+	LogInfo("lifecycle-sentinel password='body-secret'")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = logsProvider.ForceFlush(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(payloads) != 1 {
+		t.Fatalf("log payloads=%d", len(payloads))
+	}
+	// Protobuf strings are transmitted verbatim; inspect the actual exporter wire
+	// bytes, not merely the application record before resource enrichment.
+	wire := string(payloads[0])
+	for _, secret := range []string{"resource-secret", "env-secret", "private-service-name", "body-secret"} {
+		if strings.Contains(wire, secret) {
+			t.Fatalf("resource/body fixture leaked %s", secret)
+		}
+	}
+	for _, retained := range []string{"vexxx-server", "service.version", "service.build", "lifecycle-sentinel"} {
+		if !strings.Contains(wire, retained) {
+			t.Errorf("resource context lost %s", retained)
+		}
+	}
+	if logExportFailures.Load() != before+1 {
+		t.Fatal("log delivery discard was not counted")
 	}
 }

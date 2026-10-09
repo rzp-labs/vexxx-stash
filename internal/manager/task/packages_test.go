@@ -195,7 +195,7 @@ exit 23
 				t.Fatal("expected exactly one package exception (no batch/log duplicate)")
 			}
 			p := events[0].Properties
-			if p["package_operation"] != operation || p["package_id"] != "PythonTools" || p["package_stage"] != "requirements_install" || p["python_exit_code"] != float64(23) || p["package_error_cause"] != "exit status 23" || p["package_files_installed"] != true || p["package_failure_count"] != float64(1) || p["job_correlation"] == "unavailable" {
+			if p["package_operation"] != operation || p["package_id"] != "PythonTools" || p["package_stage"] != "requirements_install" || p["python_exit_code"] != float64(23) || !strings.Contains(p["package_error_cause"].(string), "installing requirements") || !strings.Contains(p["package_error_cause"].(string), "exit status 23") || p["package_files_installed"] != true || p["package_failure_count"] != float64(1) || p["job_correlation"] == "unavailable" {
 				t.Fatal("SDK payload lost structured package/exit/partial-install context")
 			}
 			output, ok := p["python_output"].(string)
@@ -281,7 +281,7 @@ exit 23
 	}
 	for i, module := range []string{"badone", "badtwo"} {
 		detail := details[i].(map[string]any)
-		if detail["module"] != module || detail["error_cause"] != "installing module "+module+": exit status 23" || detail["stage"] != "module_install" || detail["exit_code"] != float64(23) {
+		if detail["module"] != module || !strings.Contains(detail["error_cause"].(string), "installing module "+module+":") || !strings.Contains(detail["error_cause"].(string), "exit status 23") || detail["stage"] != "module_install" || detail["exit_code"] != float64(23) {
 			t.Fatal("equal exit codes and empty output obscured failed dependency identity")
 		}
 		if _, exists := detail["python_output"]; exists {
@@ -448,4 +448,63 @@ func TestCancellationKeepsCancelledStatusAndEmitsNoFailure(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("cancelled fake process did not drain")
+}
+
+func TestSeparateMissingPackageIndexesEachReportOnce(t *testing.T) {
+	received := packageReceiver(t)
+	root := t.TempDir()
+	manager := &pkg.Manager{Local: &pkg.Store{BaseDir: filepath.Join(root, "installed"), ManifestFile: pkg.ManifestFile}, PackagePathGetter: packagePaths{}}
+	specs := []*models.PackageSpecInput{
+		{ID: "MissingOne", SourceURL: (&url.URL{Scheme: "file", Path: filepath.Join(root, "first-missing-index.yaml")}).String()},
+		{ID: "MissingTwo", SourceURL: (&url.URL{Scheme: "file", Path: filepath.Join(root, "second-missing-index.yaml")}).String()},
+	}
+	executor := &InstallPackagesJob{PackagesJob: PackagesJob{PackageManager: manager}, Packages: specs}
+	jobs := job.NewManager()
+	jobs.OnError = func(ctx context.Context, err error, kind string) {
+		analytics.CaptureJobFailure(ctx, err, job.Correlation(ctx), kind)
+	}
+	t.Cleanup(func() { jobs.StopAndWait(time.Second) })
+	id := jobs.Add(context.Background(), "synthetic missing indexes", executor)
+	deadline := time.Now().Add(3 * time.Second)
+	var result *job.Job
+	for time.Now().Before(deadline) {
+		result = jobs.GetJob(id)
+		if result != nil && result.EndTime != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if result == nil || result.EndTime == nil || result.Status != job.StatusFailed || result.Error == nil || !strings.Contains(*result.Error, "MissingOne") || !strings.Contains(*result.Error, "MissingTwo") {
+		t.Fatal("batch did not preserve both failed package identities")
+	}
+	events := received()
+	if len(events) != 2 {
+		t.Fatalf("want one exception per package and no job duplicate, got %d", len(events))
+	}
+	ids := map[string]int{}
+	for _, event := range events {
+		if event.Properties["failure_origin"] != "package_install" || event.Properties["package_stage"] != "package_lookup" {
+			t.Fatal("failure context lost")
+		}
+		ids[event.Properties["package_id"].(string)]++
+		data, _ := json.Marshal(event)
+		if strings.Contains(string(data), root) || strings.Contains(string(data), "missing-index.yaml") {
+			t.Fatal("private index location leaked")
+		}
+		if !strings.Contains(string(data), "no such file or directory") {
+			t.Fatal("filesystem cause lost")
+		}
+	}
+	if ids["MissingOne"] != 1 || ids["MissingTwo"] != 1 {
+		t.Fatal("package occurrence identity lost", ids)
+	}
+	if dir := os.Getenv("VEX80_EVIDENCE_DIR"); dir != "" {
+		data, err := json.MarshalIndent(events, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir+"/"+t.Name()+"-events.json", data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

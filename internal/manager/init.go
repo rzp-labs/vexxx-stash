@@ -165,6 +165,10 @@ func initJobManager(cfg *config.Config) *job.Manager {
 		analytics.CaptureWorkerPanic(ctx, value, job.Correlation(ctx))
 	}
 
+	ret.OnError = func(ctx context.Context, err error, kind string) {
+		analytics.CaptureJobFailure(ctx, err, job.Correlation(ctx), kind)
+	}
+
 	// desktop notifications
 	ctx := context.Background()
 	c := ret.Subscribe(context.Background())

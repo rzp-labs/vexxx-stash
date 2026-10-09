@@ -43,10 +43,10 @@ func panicBoundsForDiagnostics() {
 
 func TestPanicExceptionRedactsPrivateValuesAndKeepsFilesystemOperation(t *testing.T) {
 	for _, value := range []any{
-		"Jane Smith private.mp4 token=secret",
+		`"Jane Smith private.mp4" token=secret`,
 		errors.New("https://private/media.mp4?token=secret"),
 		&fs.PathError{Op: "open", Path: "/mnt/user/media/private.mp4", Err: syscall.EACCES},
-		&fs.PathError{Op: "privateUsername", Path: "C:\\Users\\private\\media.mp4", Err: errors.New("token=secret")},
+		&fs.PathError{Op: "unfamiliarOperation", Path: "C:\\Users\\private\\media.mp4", Err: errors.New("token=secret")},
 		fmt.Errorf("opening media: %w", &fs.PathError{Op: "open", Path: "/mnt/user/Jane Doe/private.funscript", Err: syscall.EACCES}),
 	} {
 		exception := PanicException(value)
@@ -57,7 +57,7 @@ func TestPanicExceptionRedactsPrivateValuesAndKeepsFilesystemOperation(t *testin
 		if strings.Contains(string(encoded), "private") || strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), "Jane") || strings.Contains(string(encoded), "Doe") {
 			t.Fatalf("private panic content escaped: %s", encoded)
 		}
-		if err, ok := value.(*fs.PathError); ok && err.Err == syscall.EACCES && exception.ExceptionList[0].Value != "open: permission denied [path redacted]" {
+		if err, ok := value.(*fs.PathError); ok && err.Err == syscall.EACCES && exception.ExceptionList[0].Value != "open [location redacted]: permission denied" {
 			t.Fatal("lost filesystem diagnostic")
 		}
 	}

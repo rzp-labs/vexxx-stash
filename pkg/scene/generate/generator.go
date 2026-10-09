@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/generationbudget"
@@ -304,5 +305,5 @@ func (g Generator) commandError(args []string, admitted int, started bool, err e
 	if len(args) > 0 {
 		private = append(private, args[len(args)-1])
 	}
-	return &ffmpeg.GenerationCommandError{Err: err, Admitted: admitted, Started: started, Limits: limits, PrivateValues: private}
+	return &ffmpeg.GenerationCommandError{Err: err, Admitted: admitted, Started: started, Limits: limits, PrivateValues: private, NativeStack: diagnostics.CaptureStack()}
 }
