@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -42,7 +43,7 @@ func Sanitize(message string, private []string, limit int) Text {
 		if value == "" || value == "-" || device.MatchString(value) {
 			continue
 		}
-		message = strings.ReplaceAll(message, value, "[location redacted]")
+		message = redactPrivateValue(message, value)
 		if strings.ContainsAny(value, "/\\") {
 			base := filepath.Base(strings.ReplaceAll(value, "\\", "/"))
 			if base != "." && base != "/" && len(base) > 3 {
@@ -136,6 +137,35 @@ func Sanitize(message string, private []string, limit int) Text {
 		result.Value = marker + message[offset:]
 	}
 	return result
+}
+
+// Very short titles/names are private as standalone tokens, but replacing their
+// letters inside ordinary words destroys the diagnostic and its stage inference.
+func redactPrivateValue(message, value string) string {
+	word := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsMark(r) || unicode.IsDigit(r) || r == '_' }
+	if utf8.RuneCountInString(value) > 3 || strings.IndexFunc(value, func(r rune) bool { return !word(r) }) >= 0 {
+		return strings.ReplaceAll(message, value, "[location redacted]")
+	}
+	var out strings.Builder
+	for offset := 0; offset < len(message); {
+		i := strings.Index(message[offset:], value)
+		if i < 0 {
+			out.WriteString(message[offset:])
+			break
+		}
+		i += offset
+		end := i + len(value)
+		before, _ := utf8.DecodeLastRuneInString(message[:i])
+		after, _ := utf8.DecodeRuneInString(message[end:])
+		out.WriteString(message[offset:i])
+		if (i == 0 || !word(before)) && (end == len(message) || !word(after)) {
+			out.WriteString("[location redacted]")
+		} else {
+			out.WriteString(value)
+		}
+		offset = end
+	}
+	return out.String()
 }
 func Safe(message string, private []string) string {
 	return Sanitize(message, private, MaxTextBytes).Value

@@ -37,9 +37,7 @@ func CaptureGenerationFailure(ctx context.Context, err error, info GenerationFai
 		return
 	}
 	for _, entry := range diagnostics.Split(err).Entries {
-		event := generationException(entry.Err, err, info)
-		private := append(diagnostics.ErrorPrivate(entry.Err), info.PrivateValues...)
-		event.Properties.Set("operation_cause", diagnostics.Safe(entry.Cause, private))
+		event := generationException(entry.Err, err, entry.Cause, info)
 		captureException(ctx, entry.Err, event)
 	}
 
@@ -64,9 +62,9 @@ func safeCorrelation(value string) string {
 }
 
 func GenerationException(err error, info GenerationFailureContext) posthog.Exception {
-	return generationException(err, err, info)
+	return generationException(err, err, "", info)
 }
-func generationException(err, root error, info GenerationFailureContext) posthog.Exception {
+func generationException(err, root error, cause string, info GenerationFailureContext) posthog.Exception {
 	properties := ReleaseProperties().Set("$process_person_profile", false).Set("$exception_level", "error").
 		Set("failure_origin", "generation").Set("job_correlation", safeCorrelation(info.JobCorrelation)).
 		Set("generation_workload", safeWorkload(info.Workload)).Set("generation_budget_enabled", info.BudgetEnabled).
@@ -81,8 +79,8 @@ func generationException(err, root error, info GenerationFailureContext) posthog
 	}
 	selected, actual, stage := safeBackend(info.SelectedBackend), "none", "generation"
 	private := append([]string(nil), info.PrivateValues...)
-	var intel *ffmpeg.IntelGenerationError
-	if errors.As(root, &intel) {
+	intel := generationIntelDiagnostic(err, root)
+	if intel != nil {
 		selected, actual = safeBackend(intel.Diagnostic.Selected), safeBackend(intel.Diagnostic.Actual)
 		stage = safeStage(intel.Diagnostic.Stage)
 		if intel.Source.Width > 0 && intel.Source.Height > 0 {
@@ -103,10 +101,11 @@ func generationException(err, root error, info GenerationFailureContext) posthog
 		}
 	}
 	// Retain the operation/cause chain independently of process output.
-	failure := diagnostics.Split(err)
-	cause := err.Error()
-	if len(failure.Entries) > 0 {
-		cause = failure.Entries[0].Cause
+	if cause == "" {
+		cause = err.Error()
+		if failure := diagnostics.Split(err); len(failure.Entries) > 0 {
+			cause = failure.Entries[0].Cause
+		}
 	}
 	var pathErr *fs.PathError
 	if errors.As(err, &pathErr) {
@@ -165,6 +164,25 @@ func generationException(err, root error, info GenerationFailureContext) posthog
 		sanitizeStackImages(&event)
 	}
 	return event
+}
+
+// Prefer this entry's facts. A wrapper above the join may supply common facts,
+// but searching below that join would borrow another entry's Intel diagnostic.
+func generationIntelDiagnostic(entry, root error) *ffmpeg.IntelGenerationError {
+	var intel *ffmpeg.IntelGenerationError
+	if errors.As(entry, &intel) {
+		return intel
+	}
+	for depth := 0; root != nil && depth < 128; depth++ {
+		if _, joined := root.(interface{ Unwrap() []error }); joined {
+			break
+		}
+		if intel, ok := root.(*ffmpeg.IntelGenerationError); ok {
+			return intel
+		}
+		root = errors.Unwrap(root)
+	}
+	return nil
 }
 
 var vaStatus = regexp.MustCompile(`(?i)(?:VA_STATUS|va(?:api)? (?:status|error)|failed to (?:end picture|create (?:decode )?(?:configuration|context|surface)))[^\n]*?[:= ](0x[0-9a-f]+|[0-9]+)(?:\b|:)`)

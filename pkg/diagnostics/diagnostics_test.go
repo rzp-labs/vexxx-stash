@@ -134,3 +134,17 @@ func TestDistinctOccurrencesSharingSentinelRemainReportable(t *testing.T) {
 		}
 	}
 }
+
+func TestShortPrivateTokensDoNotEraseDiagnosticWords(t *testing.T) {
+	got := Sanitize("encoder failed; scene title: e; rune: é; opaque: abc; alphabet; échec", []string{"e", "é", "abc"}, 4096).Value
+	for _, retained := range []string{"encoder failed", "alphabet", "échec"} {
+		if !strings.Contains(got, retained) {
+			t.Errorf("diagnostic word corrupted: %q in %q", retained, got)
+		}
+	}
+	for _, private := range []string{"title: e", "rune: é", "opaque: abc"} {
+		if strings.Contains(got, private) {
+			t.Errorf("standalone private token retained: %q", private)
+		}
+	}
+}

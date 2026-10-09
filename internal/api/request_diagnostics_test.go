@@ -83,6 +83,14 @@ func TestGraphQLRequestValidationDiagnosticPrivacy(t *testing.T) {
 		{"variable path", request(`query Probe($filter:FindFilterType) { findScenes(filter:$filter) { count } }`, map[string]any{"variables": map[string]any{"filter": map[string]any{"JaneSmithPrivateMedia": true}}}), "JaneSmithPrivateMedia", "unknown field"},
 		{"JSON numeric decode value", `{"operationName":918273645}`, "918273645", "cannot unmarshal number"},
 		{"enum delimiter value", request(`query Probe($filter:FindFilterType) { findScenes(filter:$filter) { count } }`, map[string]any{"variables": map[string]any{"filter": map[string]any{"direction": "JaneSmithPrivateMedia is not a valid PrivateSuffix"}}}), "JaneSmithPrivateMedia", "is not a valid SortDirectionEnum"},
+		{"lexer unknown escape", request(`{ findScene(id:"\zJaneSmithPrivateMedia") { id } }`, nil), "JaneSmithPrivateMedia", "Unexpected"},
+		{"lexer short Unicode escape", request(`{ findScene(id:"\uJaneSmithPrivateMedia") { id } }`, nil), "JaneSmithPrivateMedia", "Unexpected"},
+		{"lexer zero prefix", request(`{ findScene(id:01JaneSmithPrivateMedia) { id } }`, nil), "JaneSmithPrivateMedia", "Unexpected"},
+		{"lexer missing exponent", request(`{ findScene(id:1eJaneSmithPrivateMedia) { id } }`, nil), "JaneSmithPrivateMedia", "Unexpected"},
+		{"lexer missing fraction", request(`{ findScene(id:1.JaneSmithPrivateMedia) { id } }`, nil), "JaneSmithPrivateMedia", "Unexpected"},
+		{"lexer single quote", request(`{ findScene(id:'JaneSmithPrivateMedia') { id } }`, nil), "JaneSmithPrivateMedia", "Unexpected"},
+		{"lexer unterminated string", request(`{ findScene(id:"JaneSmithPrivateMedia`, nil), "JaneSmithPrivateMedia", "Unexpected"},
+		{"lexer unexpected character", request(`{ findScene(id:?JaneSmithPrivateMedia) { id } }`, nil), "JaneSmithPrivateMedia", "Unexpected"},
 		{"malformed JSON", `{"query":"JaneSmithPrivateMedia",`, "JaneSmithPrivateMedia", "json request body could not be decoded"},
 	}
 	for _, tc := range cases {
@@ -129,6 +137,10 @@ func TestGraphQLRequestValidationDiagnosticPrivacy(t *testing.T) {
 				// "spread "; retain that existing internal-error response.
 				if response.Errors[0].Message != "an internal error occurred" {
 					t.Fatal("client sanitizer changed")
+				}
+			} else if strings.HasPrefix(tc.name, "lexer ") {
+				if !strings.Contains(response.Errors[0].Message, "Unexpected <Invalid>") {
+					t.Fatal("pinned lexer/parser client cause changed", rec.Body.String())
 				}
 			} else if !strings.Contains(rec.Body.String(), tc.private) {
 				t.Fatal("original framework response changed", rec.Body.String())

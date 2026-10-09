@@ -9,6 +9,8 @@ Useful unfamiliar diagnostics are retained. The shared `pkg/diagnostics` policy
 removes credential assignments, authorization/cookie records, recognizable key
 and token formats, private-key blocks, URLs, email identities, private paths and
 media filenames. Callers provide known private values for exact replacement;
+short alphanumeric values (up to three Unicode characters) are replaced only as
+standalone tokens, preserving diagnostic words such as `encoder`.
 GraphQL argument strings are used as local redaction targets, never raw log values. Generation provides
 known paths and scene titles. Unknown unlabelled content cannot reliably be
 classified as a secret or media identity. There is no blanket allowlist of
@@ -19,7 +21,10 @@ Operation/cause summaries preserve their beginning and end. Process output keeps
 its useful final records separately. Python job-status output retains its 4096
 byte compatibility bound. Package events retain up to 64 module causes, compact
 per-module summaries, and 64 KiB total output, with 4096 bytes per module. Generic
-and generation reports keep separate causes and output. The shared sanitizer
+and generation reports keep separate causes and output. Joined generation entries
+use their own Intel backend/stage/source facts; a wrapper above the join supplies
+common facts only when an entry has no Intel diagnostic. Common operation wrappers
+remain in each bounded cause and exception message. The shared sanitizer
 works on complete head/tail records within 256 KiB, with explicit omitted-byte
 counts. Oversized or partial credential/path records are omitted; a partial PEM
 block never becomes unlabelled key material. UTF-8 boundaries are preserved.

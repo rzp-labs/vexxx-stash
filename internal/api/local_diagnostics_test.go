@@ -162,3 +162,36 @@ func TestGraphQLShortPrivateInputLocalLogRetainsCause(t *testing.T) {
 		t.Fatal("short token leaked or erased diagnostic word")
 	}
 }
+
+// The generated executor owns FieldContext.Args keys. Caller-defined argument
+// and variable names never become the debug map's keys.
+func TestGraphQLCallerArgumentNamesDoNotReachLocalDebugLog(t *testing.T) {
+	readLog := localDiagnosticLog(t)
+	srv := handler.New(NewExecutableSchema(Config{Resolvers: &Resolver{}}))
+	srv.AddTransport(transport.POST{})
+	srv.SetErrorPresenter(gqlErrorHandler)
+	for _, query := range []string{
+		`mutation { changeOwnPassword(SyntheticCallerArgPrivate:"opaque",current_password:"current",new_password:"next") }`,
+		`mutation ($SyntheticCallerVariablePrivate:String!) { changeOwnPassword(current_password:$SyntheticCallerVariablePrivate,new_password:"next") }`,
+	} {
+		body, _ := json.Marshal(map[string]any{"query": query, "variables": map[string]any{"SyntheticCallerVariablePrivate": "SyntheticOpaqueCredential"}})
+		req := httptest.NewRequest(http.MethodPost, "/graphql", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), `"errors"`) {
+			t.Fatal("expected validation or authorization failure")
+		}
+	}
+	text := readLog()
+	for _, private := range []string{"SyntheticCallerArgPrivate", "SyntheticCallerVariablePrivate", "SyntheticOpaqueCredential"} {
+		if strings.Contains(text, private) {
+			t.Errorf("caller-defined name/value reached local debug log: %q", private)
+		}
+	}
+	for _, fixed := range []string{"changeOwnPassword", "current_password", "new_password", "not authenticated"} {
+		if !strings.Contains(text, fixed) {
+			t.Errorf("generated schema debug record lost %q", fixed)
+		}
+	}
+}
