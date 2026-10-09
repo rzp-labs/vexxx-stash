@@ -1,4 +1,5 @@
 import { onError } from "@apollo/client/link/error";
+import { ApolloError } from "@apollo/client/errors";
 import { DocumentNode, OperationDefinitionNode } from "graphql";
 import posthog from "posthog-js/no-external";
 import { recordTelemetryCaptureFailure } from "./telemetry";
@@ -66,7 +67,12 @@ export function createDiagnosticErrorLink(operationNames: ReadonlySet<string>) {
       stage: "graphql",
       operation_kind: definition?.operation ?? "unknown",
     };
-    for (const error of graphQLErrors ?? []) {
+    // GraphQLWsLink wraps server error payloads in ApolloError, exposing them to
+    // onError as networkError. Its message/cause contain raw server text. Apply
+    // the same per-error contract as HTTP, never capture that aggregate wrapper.
+    const apolloError =
+      networkError instanceof ApolloError ? networkError : undefined;
+    for (const error of graphQLErrors ?? apolloError?.graphQLErrors ?? []) {
       if (captured.has(error)) continue;
       captured.add(error);
       const extensions = error.extensions ?? {};
@@ -91,9 +97,12 @@ export function createDiagnosticErrorLink(operationNames: ReadonlySet<string>) {
           : {}),
       });
     }
-    if (networkError && !captured.has(networkError)) {
-      captured.add(networkError);
-      capture(networkError, {
+    const transportError = apolloError?.graphQLErrors.length
+      ? apolloError.networkError
+      : networkError;
+    if (transportError && !captured.has(transportError)) {
+      captured.add(transportError);
+      capture(transportError, {
         ...context,
         stage: "graphql.transport",
       });

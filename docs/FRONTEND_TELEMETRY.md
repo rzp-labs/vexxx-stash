@@ -19,6 +19,9 @@ private-content rules as nested context. Structured technical `data`, `args`, `i
 `variables` can retain numeric/boolean/object metadata; opaque string leaves or
 string arrays in those containers are private. Producers must never pass an actual
 request/variables object merely because it is structured.
+For example, `input: { name: "Jane Smith" }` would retain that unlabelled value if
+passed directly as capture properties. No application capture producer passes
+request/variables objects; the Apollo link constructs its own technical context.
 
 Application namespace/version/build/revision come from the embedded build. The
 SDK release ID comes from the CLI/plugin-injected `_posthogReleaseId`, bounded to
@@ -92,8 +95,11 @@ entries and private frames can be omitted before the retained-entry limit.
 A GraphQL error is suppressed individually only when
 `extensions.telemetry_captured === true` and `extensions.telemetry_event_id` is a
 UUID. The backend sets these only after successful enqueue. Mixed responses still
-capture every unmarked error, and transport failures remain eligible. Backend
-capture owns detailed safe diagnostics; frontend fallback emits a generic operation
+capture every unmarked error, and transport failures remain eligible.
+WebSocket error payloads wrapped by the installed `GraphQLWsLink` in `ApolloError`
+follow this same per-error contract; their aggregate message and cause are not
+captured. A separately wrapped genuine network error remains eligible.
+Backend capture owns detailed safe diagnostics; frontend fallback emits a generic operation
 failure with the shipped error-code/schema identity, not the raw server message.
 Operation identity must match the generated application documents. Caller names,
 aliases, query text, variables, request/result objects and response bodies are not

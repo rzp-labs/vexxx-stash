@@ -1,5 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { ApolloLink, execute, gql, Observable } from "@apollo/client";
+import {
+  ApolloError,
+  ApolloLink,
+  execute,
+  gql,
+  Observable,
+} from "@apollo/client";
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
+import { Client } from "graphql-ws";
 import { telemetryDeliveryHealth } from "./telemetry";
 import { GraphQLError } from "graphql";
 import posthog from "posthog-js/no-external";
@@ -42,6 +50,46 @@ const responseLink = (errors: GraphQLError[]) =>
   );
 beforeEach(() => vi.clearAllMocks());
 describe("Apollo diagnostic contract", () => {
+  it.each([false, true])(
+    "handles actual WebSocket error envelopes with all marked=%s",
+    async (allMarked) => {
+      const errors = [
+        error({ telemetry_captured: true, telemetry_event_id: eventID }),
+        error({
+          code: "BAD_INPUT",
+          telemetry_captured: allMarked,
+          telemetry_event_id: eventID,
+        }),
+      ];
+      const subscribe: Client["subscribe"] = (_payload, sink) => {
+        sink.error(errors);
+        return () => {};
+      };
+      const link = ApolloLink.from([
+        createDiagnosticErrorLink(new Set(["FindScenes"])),
+        new GraphQLWsLink({ subscribe } as Client),
+      ]);
+      await expect(run(link)).rejects.toMatchObject({ graphQLErrors: errors });
+      await expect(run(link)).rejects.toMatchObject({ graphQLErrors: errors });
+      expect(posthog.captureException).toHaveBeenCalledTimes(allMarked ? 0 : 1);
+      if (!allMarked) {
+        expect(posthog.captureException).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: "GraphQL operation failed (BAD_INPUT)",
+          }),
+          {
+            operation: "FindScenes",
+            stage: "graphql",
+            operation_kind: "query",
+            code: "BAD_INPUT",
+            backend_event_id: eventID,
+          }
+        );
+        const [exception] = vi.mocked(posthog.captureException).mock.calls[0];
+        expect(exception).not.toHaveProperty("cause");
+      }
+    }
+  );
   it("suppresses only successfully enqueued marked errors in a mixed response", async () => {
     const errors = [
       error({ telemetry_captured: true, telemetry_event_id: eventID }),
@@ -120,6 +168,35 @@ describe("Apollo diagnostic contract", () => {
       operation_kind: "query",
       stage: "graphql.transport",
     });
+  });
+  it("retains a genuine transport failure alongside wrapped server errors", async () => {
+    const failure = new TypeError("Transport stream reset after 3 retries");
+    const wrapped = new ApolloError({
+      graphQLErrors: [
+        error({ telemetry_captured: true, telemetry_event_id: eventID }),
+        error({ code: "BAD_INPUT" }),
+      ],
+      networkError: failure,
+    });
+    const link = ApolloLink.from([
+      createDiagnosticErrorLink(new Set(["FindScenes"])),
+      new ApolloLink(
+        () => new Observable((observer) => observer.error(wrapped))
+      ),
+    ]);
+    await expect(run(link)).rejects.toBe(wrapped);
+    await expect(run(link)).rejects.toBe(wrapped);
+    expect(posthog.captureException).toHaveBeenCalledTimes(2);
+    expect(posthog.captureException).toHaveBeenCalledWith(failure, {
+      operation: "FindScenes",
+      operation_kind: "query",
+      stage: "graphql.transport",
+    });
+    expect(
+      vi
+        .mocked(posthog.captureException)
+        .mock.calls.some(([captured]) => captured === wrapped)
+    ).toBe(false);
   });
   it("deduplicates shared error objects across subscriptions", async () => {
     const errors = [error()];
