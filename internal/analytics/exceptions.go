@@ -1,56 +1,51 @@
 package analytics
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/posthog/posthog-go"
+	"github.com/stashapp/stash/pkg/diagnostics"
 )
 
-var runtimePanicMessage = regexp.MustCompile(`^runtime error: (?:invalid memory address or nil pointer dereference|integer divide by zero|index out of range \[-?\d+\](?: with length \d+)?|slice bounds out of range \[[0-9: -]+\](?: with (?:length|capacity) \d+)?|makeslice: len out of range|makeslice: cap out of range|assignment to entry in nil map|hash of unhashable type [A-Za-z0-9_.*\[\]]+|comparing uncomparable type [A-Za-z0-9_.*\[\]]+)$`)
-
-// PanicException retains runtime diagnostics and native symbolication addresses,
-// while never exporting arbitrary panic text, media paths or local build roots.
-func PanicException(value any) posthog.Exception {
-	title, message := "ApplicationPanic", "Unrecognized panic text [redacted]"
-	var pathErr *fs.PathError
-	if err, ok := value.(error); ok {
-		errors.As(err, &pathErr)
+// PanicException retains unfamiliar causes and the SDK's actual panic stack.
+func PanicException(value any) posthog.Exception { return panicException(value, nil) }
+func panicException(value any, private []string) posthog.Exception {
+	title, message := "ApplicationPanic", ""
+	switch v := value.(type) {
+	case string:
+		message = v
+	case error:
+		message = v.Error()
+	case bool, int, int32, int64, uint, uint64, float32, float64:
+		message = fmt.Sprint(v)
+	default:
+		clean := safeProperties(posthog.NewProperties().Set("panic_context", value))["panic_context"]
+		data, err := json.Marshal(clean)
+		if err == nil {
+			message = string(data)
+		} else {
+			message = "panic value could not be serialized"
+		}
 	}
-	if err, ok := value.(runtime.Error); ok {
+	if err, ok := value.(error); ok {
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			private = append(private, pathErr.Path)
+		}
+	}
+	if _, ok := value.(runtime.Error); ok {
 		title = "RuntimePanic"
-		if text := err.Error(); runtimePanicMessage.MatchString(text) {
-			message = text
-		}
-	} else if err := pathErr; err != nil {
-		// Keep the failed operation and standard OS cause, never Path or an
-		// arbitrary wrapped error string from a filesystem/plugin implementation.
-		op := "filesystem operation"
-		for _, allowed := range []string{"open", "read", "write", "stat", "lstat", "mkdir", "remove", "rename", "chmod", "chown", "readdir", "close"} {
-			if err.Op == allowed {
-				op = allowed
-				break
-			}
-		}
-		cause := "filesystem error"
-		if errors.Is(err.Err, fs.ErrPermission) {
-			cause = "permission denied"
-		} else if errors.Is(err.Err, fs.ErrNotExist) {
-			cause = "file does not exist"
-		} else if errors.Is(err.Err, fs.ErrExist) {
-			cause = "file already exists"
-		} else if errors.Is(err.Err, fs.ErrInvalid) {
-			cause = "invalid argument"
-		} else if errors.Is(err.Err, fs.ErrClosed) {
-			cause = "file already closed"
-		}
-		message = fmt.Sprintf("%s: %s [path redacted]", op, cause)
+	}
+	message = diagnostics.Summary(message, private, diagnostics.MaxTextBytes).Value
+	if message == "" {
+		message = "application panic (empty value)"
 	}
 	exception := posthog.NewDefaultException(time.Now(), "server", title, message)
 	exception.Properties = ReleaseProperties().Set("$process_person_profile", false).Set("$exception_level", "fatal")
@@ -81,11 +76,11 @@ func diagnosticBinaryPath(filename string) string {
 func diagnosticSourcePath(filename string) string {
 	filename = filepath.ToSlash(filename)
 	for _, root := range []string{"internal/", "pkg/", "cmd/"} {
-		if index := strings.LastIndex(filename, "/"+root); index >= 0 {
-			return filename[index+1:]
-		}
 		if strings.HasPrefix(filename, root) {
 			return filename
+		}
+		if index := strings.Index(filename, "/"+root); index >= 0 {
+			return filename[index+1:]
 		}
 	}
 	// Standard library/dependency source filenames remain useful without a

@@ -2,10 +2,10 @@ package python
 
 import (
 	"fmt"
-	"regexp"
 	"runtime"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/stashapp/stash/pkg/diagnostics"
 )
 
 const MaxDiagnosticBytes = 4096
@@ -14,11 +14,13 @@ const MaxDiagnosticBytes = 4096
 // arguments. Err remains wrapped for errors.As/Is (including exec.ExitError).
 // Output is redacted and bounded before logging or job-status formatting.
 type CommandError struct {
-	Stage  string
-	Module string
-	Err    error
-	Output string
-	Stack  []uintptr
+	Stage              string
+	Module             string
+	Err                error
+	Output             string
+	Stack              []uintptr
+	NativeStack        diagnostics.Stack
+	OutputOmittedBytes int
 }
 
 func (e *CommandError) Error() string {
@@ -31,75 +33,38 @@ func (e *CommandError) Error() string {
 
 // Summary keeps module identity and process cause independent of verbose output.
 func (e *CommandError) Summary() string {
-	text := fmt.Sprintf("%s failed: %s", e.Stage, SanitizeDiagnostic(e.Err.Error(), nil))
+	text := fmt.Sprintf("%s failed: %s", e.Stage, diagnostics.Summary(e.Err.Error(), diagnostics.ErrorPrivate(e.Err), MaxDiagnosticBytes).Value)
 	if module := SanitizeDiagnostic(e.Module, nil); module != "" {
 		text = "installing module " + module + ": " + text
 	}
 	return text
 }
 
+func (e *CommandError) DiagnosticOutput() string { return e.Output }
+
 func (e *CommandError) Unwrap() error { return e.Err }
 
 func newCommandError(stage string, err error, output []byte, private []string) *CommandError {
 	stack := make([]uintptr, 32)
 	n := runtime.Callers(2, stack)
-	return &CommandError{Stage: stage, Err: err, Output: SanitizeDiagnostic(string(output), private), Stack: stack[:n]}
+	var locations []string
+	for _, value := range private {
+		if strings.ContainsAny(value, "/\\") {
+			locations = append(locations, value)
+		}
+	}
+	safe := diagnostics.Sanitize(string(output), locations, MaxDiagnosticBytes)
+	return &CommandError{Stage: stage, Err: err, Output: safe.Value, Stack: stack[:n], NativeStack: diagnostics.CaptureStack(), OutputOmittedBytes: safe.OmittedBytes}
 }
 
-// An unquoted credential's end is ambiguous: spaces and semicolons can be part
-// of the secret. Omit the remainder of that record, leaving other lines intact.
-var diagnosticCredentials = regexp.MustCompile(`(?i)(?:["']?(?:password|passwd|pwd|token|api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|(?:aws[_-]?)?secret[_-]?access[_-]?key|secret|credential|signature|x-amz-signature)["']?[ \t]*[:=][ \t]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n]*))`)
-var diagnosticHeaders = regexp.MustCompile(`(?im)\b(?:authorization|proxy-authorization|cookie|set-cookie)["']?[ \t]*[:=][ \t]*[^\r\n]*`)
-var diagnosticBearer = regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[A-Za-z0-9_./+=-]+`)
-var diagnosticTokens = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|(?:sk|phx|phc)[_-][A-Za-z0-9_-]+|(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b`)
-var diagnosticPrivateKey = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)`)
-var diagnosticURL = regexp.MustCompile(`(?i)\b(?:https?|ftp|file|git\+https?|ssh)://[^\s'"<>]+`)
-var diagnosticEmail = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
-var diagnosticMediaFilename = regexp.MustCompile(`(?i)(?:[\p{L}\p{M}\p{N}\p{S}_. -]+\.(?:mp4|mkv|avi|mov|webm|jpg|jpeg|png|webp|vtt|m3u8|ts|ffconcat|funscript))\b`)
-var diagnosticQuotedPath = regexp.MustCompile(`(?:"(?:[A-Za-z]:[\\/]|/|\\\\)[^"]*"|'(?:[A-Za-z]:[\\/]|/|\\\\)[^']*')`)
-var diagnosticPath = regexp.MustCompile(`(^|[\s=:"'(\[])((?:[A-Za-z]:[\\/]|\\\\|/))`)
-var diagnosticOSCause = regexp.MustCompile(`(?i): (?:permission denied|no such file or directory|input/output error|invalid argument|operation not permitted|read-only file system|no space left on device|file exists|is a directory|not a directory)[.!]?$`)
-
-// SanitizeDiagnostic preserves unfamiliar pip/OS diagnostic text. It removes
-// credential forms and private locations rather than allowlisting messages.
-// Redaction precedes truncation so credentials cannot survive as cut fragments.
+// SanitizeDiagnostic retains the job-status output limit while using the shared policy.
 func SanitizeDiagnostic(message string, private []string) string {
+	// Plain requirement names remain public diagnostic context.
+	var locations []string
 	for _, value := range private {
-		// Plain requirement/module names are diagnostic context, not private paths.
 		if strings.ContainsAny(value, "/\\") {
-			message = strings.ReplaceAll(message, value, "[location redacted]")
+			locations = append(locations, value)
 		}
 	}
-	message = diagnosticPrivateKey.ReplaceAllString(message, "[credential redacted]")
-	message = diagnosticHeaders.ReplaceAllString(message, "[credential redacted]")
-	message = diagnosticURL.ReplaceAllString(message, "[URL redacted]")
-	message = diagnosticCredentials.ReplaceAllString(message, "[credential redacted]")
-	message = diagnosticBearer.ReplaceAllString(message, "[credential redacted]")
-	message = diagnosticTokens.ReplaceAllString(message, "[credential redacted]")
-	message = diagnosticEmail.ReplaceAllString(message, "[identity redacted]")
-	message = diagnosticMediaFilename.ReplaceAllString(message, "[media filename redacted]")
-	message = diagnosticQuotedPath.ReplaceAllString(message, "[path redacted]")
-	lines := strings.Split(message, "\n")
-	for i, line := range lines {
-		if match := diagnosticPath.FindStringSubmatchIndex(line); match != nil {
-			start := match[4]
-			// Unquoted paths can contain spaces. Retain a terminal OS cause while
-			// omitting the ambiguous remainder of that one record.
-			suffix := ""
-			if span := diagnosticOSCause.FindStringIndex(line[start:]); span != nil {
-				suffix = line[start+span[0]:]
-			}
-			lines[i] = line[:start] + "[path redacted]" + suffix
-		}
-	}
-	message = strings.TrimSpace(strings.ToValidUTF8(strings.Join(lines, "\n"), "?"))
-	if len(message) > MaxDiagnosticBytes {
-		const marker = "[truncated]\n"
-		message = message[len(message)-(MaxDiagnosticBytes-len(marker)):]
-		for len(message) > 0 && !utf8.RuneStart(message[0]) {
-			message = message[1:]
-		}
-		message = marker + message
-	}
-	return message
+	return diagnostics.Sanitize(message, locations, MaxDiagnosticBytes).Value
 }

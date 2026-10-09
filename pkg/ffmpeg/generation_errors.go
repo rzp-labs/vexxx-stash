@@ -2,6 +2,8 @@ package ffmpeg
 
 import (
 	"errors"
+
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/stashapp/stash/pkg/generationbudget"
 )
 
@@ -14,13 +16,14 @@ type GenerationCommandError struct {
 	Started       bool
 	Limits        generationbudget.Settings
 	PrivateValues []string
+	NativeStack   diagnostics.Stack
 }
 
 func (e *GenerationCommandError) Error() string { return e.Err.Error() }
 func (e *GenerationCommandError) Unwrap() error { return e.Err }
 
 // IntelGenerationError lets the task-level observer report the selected backend
-// and failing stage without emitting the free-text local diagnostic Reason.
+// and failing stage with targeted-redacted diagnostic context.
 type IntelGenerationError struct {
 	Err        error
 	Diagnostic IntelGenerationDiagnostic

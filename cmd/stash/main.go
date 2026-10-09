@@ -82,8 +82,7 @@ func main() {
 	l := initLog(cfg)
 
 	if err := analytics.Initialize(); err != nil {
-		exitError(fmt.Errorf("PostHog initialization error: %w", err))
-		return
+		logger.Warn("PostHog initialization failed; application startup continues")
 	}
 	defer func() {
 		if err := analytics.Close(); err != nil {
@@ -93,8 +92,7 @@ func main() {
 	defer recoverPanic()
 
 	if err := analytics.InitializeLogs(); err != nil {
-		exitError(fmt.Errorf("PostHog log initialization error: %w", err))
-		return
+		logger.Warn("PostHog log initialization failed; application startup continues")
 	}
 	defer func() {
 		analytics.LogInfo("stash_server_stopping")

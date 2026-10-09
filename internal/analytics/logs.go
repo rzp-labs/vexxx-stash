@@ -3,11 +3,15 @@ package analytics
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
+	"github.com/stashapp/stash/pkg/diagnostics"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel/sdk/resource"
 )
 
 var (
@@ -35,7 +39,8 @@ func InitializeLogs() error {
 	}
 
 	logsProvider = sdklog.NewLoggerProvider(
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(observedLogExporter{exporter})),
+		sdklog.WithResource(resource.NewSchemaless(attribute.String("service.name", "vexxx-server"), attribute.String("service.version", ReleaseProperties()["app_version"].(string)), attribute.String("service.build", ReleaseProperties()["app_revision"].(string)), attribute.String("telemetry.sdk.language", "go"))),
 	)
 	logsLogger = logsProvider.Logger("stash.posthog_logs")
 
@@ -53,7 +58,7 @@ func LogInfo(message string) {
 	record.SetTimestamp(time.Now())
 	record.SetSeverity(otellog.SeverityInfo)
 	record.SetSeverityText("INFO")
-	record.SetBody(otellog.StringValue(message))
+	record.SetBody(otellog.StringValue(diagnostics.Safe(message, nil)))
 	logsLogger.Emit(context.Background(), record)
 }
 
@@ -64,4 +69,17 @@ func CloseLogs(ctx context.Context) error {
 	}
 
 	return logsProvider.Shutdown(ctx)
+}
+
+var logExportFailures atomic.Uint64
+
+type observedLogExporter struct{ sdklog.Exporter }
+
+func (e observedLogExporter) Export(ctx context.Context, records []sdklog.Record) error {
+	err := e.Exporter.Export(ctx, records)
+	if err != nil {
+		logExportFailures.Add(uint64(len(records)))
+		deliveryWarning("logs")
+	}
+	return err
 }

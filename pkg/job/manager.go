@@ -2,9 +2,13 @@ package job
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/stashapp/stash/pkg/diagnostics"
 
 	"github.com/stashapp/stash/pkg/logger"
 )
@@ -32,6 +36,8 @@ type Manager struct {
 	// OnPanic observes a recovered worker panic before its stack unwinds. Set it
 	// before submitting jobs. Telemetry must not alter job failure handling.
 	OnPanic func(context.Context, any)
+	// OnError observes ordinary failures before job status is finalized.
+	OnError func(context.Context, error, string)
 }
 
 // NewManager initialises and returns a new Manager.
@@ -248,7 +254,7 @@ func (m *Manager) dispatch(ctx context.Context, j *Job) (done chan struct{}) {
 	m.mutex.Unlock()
 
 	// create a cancellable context for the job that is not canceled by the outer context
-	ctx, cancelFunc := context.WithCancel(withCorrelation(context.WithoutCancel(ctx)))
+	ctx, cancelFunc := context.WithCancel(diagnostics.WithState(withCorrelation(context.WithoutCancel(ctx))))
 	j.cancelFunc = cancelFunc
 
 	done = make(chan struct{})
@@ -283,12 +289,24 @@ func (m *Manager) executeJob(ctx context.Context, j *Job, done chan struct{}) {
 			m.mutex.Lock()
 			defer m.mutex.Unlock()
 			j.Status = StatusFailed
+			message := fmt.Sprint(p)
+			j.Error = &message
 		}
 	}()
 
 	progress := m.newProgress(j)
 	if err := j.exec.Execute(ctx, progress); err != nil {
 		logger.Errorf("task failed due to error: %v", err)
+		if m.OnError != nil {
+			func() {
+				defer func() {
+					if recover() != nil {
+						logger.Error("job error observer failed")
+					}
+				}()
+				m.OnError(ctx, err, reflect.TypeOf(j.exec).String())
+			}()
+		}
 		m.mutex.Lock()
 		// Cancellation can arrive after Execute's last context check. Preserve
 		// STOPPING so onJobFinish records CANCELLED rather than a late failure.

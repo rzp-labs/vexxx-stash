@@ -40,6 +40,9 @@ type IntelSource struct {
 
 type IntelGenerationDiagnostic struct {
 	Selected, Actual, Stage, Reason string
+	Device, Filter                  string
+	ProbeTimeout                    time.Duration
+	ProbeStages                     []string
 }
 
 type IntelProbeStep struct {
@@ -196,7 +199,10 @@ func RunIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardw
 	return runIntelGenerationWork(ctx, plan, hardware, software, run, ValidateIntelDevice)
 }
 func runIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardware, software func(context.Context) error, run IntelGenerationRunner, checkDevice func(string) error) (IntelGenerationDiagnostic, error) {
-	d := IntelGenerationDiagnostic{Selected: plan.Config.Backend, Actual: "none"}
+	d := IntelGenerationDiagnostic{Selected: plan.Config.Backend, Actual: "none", Device: plan.Config.Device, Filter: plan.Filter, ProbeTimeout: plan.Config.timeout()}
+	for _, probe := range plan.Probes {
+		d.ProbeStages = append(d.ProbeStages, probe.Stage)
+	}
 	if err := ctx.Err(); err != nil {
 		d.Stage = "cancellation"
 		d.Reason = err.Error()

@@ -13,7 +13,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,14 +180,6 @@ func Initialize() (*Server, error) {
 	r.Use(middleware.StripSlashes)
 	r.Use(BaseURLMiddleware)
 
-	recoverFunc := func(ctx context.Context, err interface{}) error {
-		logger.Error(err)
-		debug.PrintStack()
-
-		message := fmt.Sprintf("Internal system error. Error <%v>", err)
-		return errors.New(message)
-	}
-
 	repo := mgr.Repository
 
 	dataloaders := loaders.Middleware{
@@ -212,7 +203,7 @@ func Initialize() (*Server, error) {
 	}
 
 	gqlSrv := gqlHandler.New(NewExecutableSchema(Config{Resolvers: resolver}))
-	gqlSrv.SetRecoverFunc(recoverFunc)
+	gqlSrv.SetRecoverFunc(recoverGraphQL)
 
 	// Add mutation authorization middleware for multi-user support
 	gqlSrv.AroundOperations(MutationMiddleware(repo.User, repo.TxnManager))

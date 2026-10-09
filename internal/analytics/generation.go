@@ -1,20 +1,18 @@
 package analytics
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io/fs"
 	"os/exec"
-	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/posthog/posthog-go"
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/generationbudget"
 )
@@ -32,57 +30,18 @@ type GenerationFailureContext struct {
 }
 
 // CaptureGenerationFailure is called once at the failed production task boundary.
-// Joined marker/output failures are captured individually; job summary errors
-// have no second capture hook. Cancellation never becomes an exception.
+// Joined marker/output failures are captured individually; accepted identities
+// prevent a duplicate at the ordinary job boundary. Pure cancellation is omitted.
 func CaptureGenerationFailure(ctx context.Context, err error, info GenerationFailureContext) {
-	if client == nil || err == nil || ctx.Err() != nil {
+	if client == nil {
 		return
 	}
-	seen := make(map[error]bool)
-	var capture func(error)
-	capture = func(err error) {
-		if err == nil {
-			return
-		}
-		// An ordinary fmt wrapper around errors.Join must not collapse distinct
-		// failures, or discard them because a sibling is cancellation.
-		if joined, ok := err.(interface{ Unwrap() []error }); ok {
-			for _, child := range joined.Unwrap() {
-				capture(child)
-			}
-			return
-		}
-		if child := errors.Unwrap(err); child != nil && containsJoinedError(child) {
-			capture(child)
-			return
-		}
-		if errors.Is(err, context.Canceled) {
-			return
-		}
-		// Errors may be implemented by non-comparable values. Deduplicate pointer
-		// instances only, rather than comparing arbitrary application errors.
-		if comparableError(err) {
-			if seen[err] {
-				return
-			}
-			seen[err] = true
-		}
-		_ = client.Enqueue(GenerationException(err, info))
+	for _, entry := range diagnostics.Split(err).Entries {
+		event := generationException(entry.Err, err, entry.Cause, info)
+		captureException(ctx, entry.Err, event)
 	}
-	capture(err)
-}
 
-func containsJoinedError(err error) bool {
-	for err != nil {
-		if _, ok := err.(interface{ Unwrap() []error }); ok {
-			return true
-		}
-		err = errors.Unwrap(err)
-	}
-	return false
 }
-
-func comparableError(err error) bool { return reflect.TypeOf(err).Comparable() }
 
 func CaptureWorkerPanic(_ context.Context, value any, correlation string) {
 	if client == nil {
@@ -103,6 +62,9 @@ func safeCorrelation(value string) string {
 }
 
 func GenerationException(err error, info GenerationFailureContext) posthog.Exception {
+	return generationException(err, err, "", info)
+}
+func generationException(err, root error, cause string, info GenerationFailureContext) posthog.Exception {
 	properties := ReleaseProperties().Set("$process_person_profile", false).Set("$exception_level", "error").
 		Set("failure_origin", "generation").Set("job_correlation", safeCorrelation(info.JobCorrelation)).
 		Set("generation_workload", safeWorkload(info.Workload)).Set("generation_budget_enabled", info.BudgetEnabled).
@@ -117,16 +79,15 @@ func GenerationException(err error, info GenerationFailureContext) posthog.Excep
 	}
 	selected, actual, stage := safeBackend(info.SelectedBackend), "none", "generation"
 	private := append([]string(nil), info.PrivateValues...)
-	var intel *ffmpeg.IntelGenerationError
-	if errors.As(err, &intel) {
+	intel := generationIntelDiagnostic(err, root)
+	if intel != nil {
 		selected, actual = safeBackend(intel.Diagnostic.Selected), safeBackend(intel.Diagnostic.Actual)
 		stage = safeStage(intel.Diagnostic.Stage)
 		if intel.Source.Width > 0 && intel.Source.Height > 0 {
 			properties.Set("source_width", intel.Source.Width).Set("source_height", intel.Source.Height)
 		}
-		if technicalIdentifier.MatchString(intel.Source.Codec) {
-			properties.Set("source_codec", intel.Source.Codec)
-		}
+		addSourceProperties(properties, intel.Source)
+		properties.Set("generation_reason", diagnostics.Safe(intel.Diagnostic.Reason, info.PrivateValues)).Set("generation_device", diagnostics.Safe(intel.Diagnostic.Device, info.PrivateValues)).Set("generation_filter", diagnostics.Safe(intel.Diagnostic.Filter, info.PrivateValues)).Set("generation_probe_timeout_ms", intel.Diagnostic.ProbeTimeout.Milliseconds()).Set("generation_probe_stages", intel.Diagnostic.ProbeStages)
 	}
 	var command *ffmpeg.GenerationCommandError
 	if errors.As(err, &command) {
@@ -139,27 +100,39 @@ func GenerationException(err error, info GenerationFailureContext) posthog.Excep
 			actual = "software"
 		}
 	}
-	// Prefer stderr over the local wrapper, whose command can dwarf diagnostics
-	// and includes private paths. Start/filesystem failures retain their OS cause.
-	message := err.Error()
+	// Retain the operation/cause chain independently of process output.
+	if cause == "" {
+		cause = err.Error()
+		if failure := diagnostics.Split(err); len(failure.Entries) > 0 {
+			cause = failure.Entries[0].Cause
+		}
+	}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		private = append(private, pathErr.Path)
+	}
+	causeResult := diagnostics.Summary(cause, private, 4096)
+	properties.Set("operation_cause", causeResult.Value).Set("diagnostic_omitted_bytes", causeResult.OmittedBytes)
+	message := causeResult.Value
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		properties.Set("ffmpeg_exit_code", exitErr.ExitCode())
-		message = exitErr.Error()
 		if len(exitErr.Stderr) > 0 {
-			message = diagnosticStderr(exitErr.Stderr)
-		}
-	} else {
-		if command != nil && strings.HasPrefix(command.Err.Error(), "ffmpeg command produced no output:") {
-			message = "ffmpeg command produced no output"
-		}
-		var pathErr *fs.PathError
-		if errors.As(err, &pathErr) {
-			private = append(private, pathErr.Path)
-			message = pathErr.Op + ": " + pathErr.Err.Error()
+			output, omittedRecords := diagnosticStderrDetails(exitErr.Stderr)
+			properties.Set("ffmpeg_metadata_omitted_records", omittedRecords)
+			for _, line := range strings.Split(string(exitErr.Stderr), "\n") {
+				for prefix, key := range map[string]string{"ffmpeg version": "ffmpeg_version", "built with": "ffmpeg_build", "configuration:": "ffmpeg_configuration"} {
+					if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+						properties.Set(key, diagnostics.Safe(line, private))
+					}
+				}
+			}
+			safeOutput := diagnostics.Sanitize(output, private, 8192)
+			properties.Set("ffmpeg_output", safeOutput.Value).Set("ffmpeg_output_omitted_bytes", safeOutput.OmittedBytes).Set("ffmpeg_stderr_bytes", len(exitErr.Stderr))
+			message += "\n" + safeOutput.Value
 		}
 	}
-	message = sanitizeTechnicalMessage(message, private)
+	message = diagnostics.Safe(message, private)
 	if status := vaStatus.FindStringSubmatch(message); len(status) > 1 {
 		if value, parseErr := strconv.ParseInt(status[1], 0, 64); parseErr == nil {
 			properties.Set("va_status", value)
@@ -180,40 +153,58 @@ func GenerationException(err error, info GenerationFailureContext) posthog.Excep
 	// This is a handled external process error, not an application panic. An
 	// invented stack at the capture function would obscure its real origin.
 	handled, synthetic := true, false
-	return posthog.Exception{Timestamp: time.Now(), DistinctId: "server", Properties: properties,
+	event := posthog.Exception{Timestamp: time.Now(), DistinctId: "server", Properties: properties,
 		ExceptionList: []posthog.ExceptionItem{{Type: "GenerationError", Value: message,
 			Mechanism: &posthog.ExceptionMechanism{Handled: &handled, Synthetic: &synthetic}}}}
+	if command != nil && command.NativeStack.Trace != nil {
+		snapshot := command.NativeStack.Copy()
+		event.ExceptionList[0].Stacktrace = snapshot.Trace
+		event.DebugImages = snapshot.Images
+		event.Properties.Set("stack_origin", "process_failure")
+		sanitizeStackImages(&event)
+	}
+	return event
 }
 
-var technicalIdentifier = regexp.MustCompile(`^[a-zA-Z0-9_]{1,40}$`)
+// Prefer this entry's facts. A wrapper above the join may supply common facts,
+// but searching below that join would borrow another entry's Intel diagnostic.
+func generationIntelDiagnostic(entry, root error) *ffmpeg.IntelGenerationError {
+	var intel *ffmpeg.IntelGenerationError
+	if errors.As(entry, &intel) {
+		return intel
+	}
+	for depth := 0; root != nil && depth < 128; depth++ {
+		if _, joined := root.(interface{ Unwrap() []error }); joined {
+			break
+		}
+		if intel, ok := root.(*ffmpeg.IntelGenerationError); ok {
+			return intel
+		}
+		root = errors.Unwrap(root)
+	}
+	return nil
+}
+
 var vaStatus = regexp.MustCompile(`(?i)(?:VA_STATUS|va(?:api)? (?:status|error)|failed to (?:end picture|create (?:decode )?(?:configuration|context|surface)))[^\n]*?[:= ](0x[0-9a-f]+|[0-9]+)(?:\b|:)`)
 var hwaccelCode = regexp.MustCompile(`(?i)hwaccel initiali[sz]ation returned error (-?[0-9]+)\b`)
 
 func safeBackend(value string) string {
-	switch value {
-	case "vaapi", "qsv", "software", "none":
-		return value
-	default:
+	if value == "" {
 		return "unknown"
 	}
+	return diagnostics.Safe(value, nil)
 }
-
 func safeWorkload(value string) string {
-	switch value {
-	case "sprite", "preview", "marker", "cover", "transcode", "phash", "image_phash", "image_preview", "image_thumbnail", "gallery", "clip_preview", "interactive_heatmap":
-		return value
-	default:
+	if value == "" {
 		return "generation"
 	}
+	return diagnostics.Safe(value, nil)
 }
-
 func safeStage(value string) string {
-	switch value {
-	case "device", "metadata", "eligibility", "plan", "backend", "API", "quality", "webp", "decode", "filter", "encode", "output", "generation":
-		return value
-	default:
+	if value == "" {
 		return "generation"
 	}
+	return diagnostics.Safe(value, nil)
 }
 
 func technicalFailureStage(message string) string {
@@ -230,100 +221,78 @@ func technicalFailureStage(message string) string {
 	}
 }
 
-var metadataLine = regexp.MustCompile(`^\s*(?:[A-Za-z][A-Za-z0-9 _.-]*\s+:|Metadata:|Input #|Output #|Duration:|Stream mapping:|ffmpeg version|built with|configuration:|libav\w+\s+\d|frame=|size=)`)
+// Drop content-bearing metadata tags and input/output locations; retain versions,
+// technical stream descriptors, mappings and driver messages.
+var metadataLine = regexp.MustCompile(`(?i)^\s*(?:title|artist|album|comment|description|synopsis|author|copyright|creation_time|location|handler_name|filename|encoder)\s*:`)
+var mediaLocationLine = regexp.MustCompile(`^\s*(?:Input|Output) #`)
 
 func diagnosticStderr(stderr []byte) string {
-	// Bound work to complete diagnostic lines at the tail, where FFmpeg reports
-	// the final cause. Never slice through a credential/path-bearing record.
-	const maxInputBytes = 64 * 1024
-	if len(stderr) > maxInputBytes {
-		stderr = stderr[len(stderr)-maxInputBytes:]
-		if newline := bytes.IndexByte(stderr, '\n'); newline >= 0 {
-			stderr = stderr[newline+1:]
-		} else {
-			return "FFmpeg diagnostic record exceeded 64 KiB [record omitted]"
-		}
-	}
-	// Media/container metadata is not technical failure text. Remove those
-	// data-bearing records while keeping FFmpeg/driver diagnostics verbatim.
+	value, _ := diagnosticStderrDetails(stderr)
+	return value
+}
+func diagnosticStderrDetails(stderr []byte) (string, int) {
 	lines := []string{}
+	omitted := 0
+	metadataIndent := -1
 	for _, line := range strings.Split(string(stderr), "\n") {
-		if metadataLine.MatchString(line) || strings.TrimSpace(line) == "" {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if trimmed == "Metadata:" {
+			metadataIndent = indent
+			omitted++
+			continue
+		}
+		if metadataIndent >= 0 {
+			if indent > metadataIndent && strings.Contains(trimmed, ":") && !strings.HasPrefix(trimmed, "[") {
+				omitted++
+				continue
+			}
+			if trimmed != "" {
+				metadataIndent = -1
+			}
+		}
+		if metadataLine.MatchString(line) || mediaLocationLine.MatchString(line) {
+			omitted++
 			continue
 		}
 		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), omitted
 }
-
-var credentials = regexp.MustCompile(`(?i)\b(?:authorization\s*:\s*(?:bearer|basic)\s+[^\s,;]+|(?:password|passwd|pwd|token|api[_-]?key|access[_-]?token|secret|cookie)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+))`)
-var urls = regexp.MustCompile(`(?i)\b(?:https?|rtsp|rtmp|ftp|s3)://[^\s'"<>]+`)
-var quotedPath = regexp.MustCompile(`(?:"(?:[A-Za-z]:[\\/]|/|\\\\)[^"]*"|'(?:[A-Za-z]:[\\/]|/|\\\\)[^']*')`)
-var pathStart = regexp.MustCompile(`(^|[\s=:"'(\[])((?:[A-Za-z]:[\\/]|\\\\|/))`)
-var pathErrorSuffix = regexp.MustCompile(`(?i): (?:permission denied|no such file or directory|input/output error|cannot allocate memory|invalid argument|operation not permitted|read-only file system|no space left on device|file exists|is a directory|not a directory)[.!]?$`)
-var mediaFilename = regexp.MustCompile(`(?i)(?:[A-Za-z0-9_. -]+\.(?:mp4|mkv|avi|mov|webm|jpg|jpeg|png|webp|vtt|m3u8|ts|ffconcat))\b`)
-var emailAddress = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
 
 func sanitizeTechnicalMessage(message string, private []string) string {
-	for _, value := range private {
-		if value != "" && value != "-" {
-			message = strings.ReplaceAll(message, value, "[path redacted]")
-		}
-	}
-	message = credentials.ReplaceAllString(message, "[credential redacted]")
-	message = urls.ReplaceAllString(message, "[URL redacted]")
-	message = quotedPath.ReplaceAllString(message, "[path redacted]")
-	message = redactUnquotedPaths(message)
-	message = mediaFilename.ReplaceAllString(message, "[media filename redacted]")
-	message = emailAddress.ReplaceAllString(message, "[identity redacted]")
-	message = strings.ToValidUTF8(message, "?")
-	message = strings.TrimSpace(message)
-	const maxMessageBytes = 4096
-	if len(message) > maxMessageBytes {
-		// Preserve the tail containing the final failure, after sanitization. Never
-		// truncate raw credentials or paths into fragments that evade redaction.
-		message = message[len(message)-(maxMessageBytes-len("[truncated]\n")):]
-		for len(message) > 0 && !utf8.RuneStart(message[0]) {
-			message = message[1:]
-		}
-		message = "[truncated]\n" + message
-	}
-	if message == "" {
+	value := diagnostics.Sanitize(message, private, 4096).Value
+	if value == "" {
 		return "FFmpeg generation failed (no stderr diagnostic)"
 	}
-	return message
+	return value
 }
-
-var ffmpegDevice = regexp.MustCompile(`^/dev/dri/renderD[0-9]+$`)
-
-// An unquoted auxiliary path can contain spaces and need not be a command input.
-// Its endpoint is ambiguous, so redact the remainder of that diagnostic line,
-// retaining only a recognized terminal OS error. Never join adjacent records.
-func redactUnquotedPaths(message string) string {
-	lines := strings.Split(message, "\n")
-	for i, line := range lines {
-		offset := 0
-		for offset < len(line) {
-			match := pathStart.FindStringSubmatchIndex(line[offset:])
-			if match == nil {
-				break
-			}
-			start := offset + match[4]
-			end := start + strings.IndexAny(line[start:], " \t\r\"'<>[](),;")
-			if end < start {
-				end = len(line)
-			}
-			if ffmpegDevice.MatchString(line[start:end]) {
-				offset = end
-				continue
-			}
-			suffix := ""
-			if errorSpan := pathErrorSuffix.FindStringIndex(line[start:]); errorSpan != nil {
-				suffix = line[start+errorSpan[0]:]
-			}
-			lines[i] = line[:start] + "[path redacted]" + suffix
-			break
+func addSourceProperties(p posthog.Properties, s ffmpeg.IntelSource) {
+	for key, value := range map[string]string{"codec": s.Codec, "profile": s.Profile, "pixel_format": s.PixelFormat, "color_transfer": s.ColorTransfer, "color_primaries": s.ColorPrimaries, "color_space": s.ColorSpace, "color_range": s.ColorRange, "frame_rate": s.FrameRate, "average_frame_rate": s.AverageFrameRate, "sample_aspect_ratio": s.SampleAspectRatio, "display_aspect_ratio": s.DisplayAspectRatio, "start_time": s.StartTime, "duration": s.Duration, "runtime_fingerprint": s.RuntimeFingerprint} {
+		if value != "" {
+			p.Set("source_"+key, diagnostics.Safe(value, nil))
 		}
 	}
-	return strings.Join(lines, "\n")
+	p.Set("source_rotation", s.Rotation).Set("source_stream_index", s.StreamIndex).Set("source_bit_depth", s.BitDepth).Set("source_is_rgb", s.IsRGB)
+	if s.DisplayMatrix != nil {
+		p.Set("source_display_matrix", s.DisplayMatrix)
+	}
+	p.Set("source_metadata_candidate_count", len(s.MetadataCandidates))
+	if len(s.MetadataCandidates) > 0 {
+		var candidates []map[string]any
+		for index, candidate := range s.MetadataCandidates {
+			if index >= 16 {
+				break
+			}
+			candidate.MetadataCandidates = nil
+			properties := posthog.NewProperties()
+			addSourceProperties(properties, candidate)
+			candidates = append(candidates, map[string]any(properties))
+		}
+		p.Set("source_metadata_candidates", candidates).Set("source_metadata_candidates_omitted", max(0, len(s.MetadataCandidates)-16))
+	}
+
+	if s.MetadataError != nil {
+		p.Set("source_metadata_error", diagnostics.Safe(s.MetadataError.Error(), nil))
+	}
 }

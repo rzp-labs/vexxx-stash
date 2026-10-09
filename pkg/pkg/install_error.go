@@ -59,7 +59,8 @@ func (e *InstallError) Error() string {
 	}
 	return text
 }
-func (e *InstallError) Unwrap() error { return e.Err }
+func (e *InstallError) DiagnosticTransparent() bool { return true }
+func (e *InstallError) Unwrap() error               { return e.Err }
 
 // Preserve a wrapper's separating whitespace while sanitizing its own text.
 // SanitizeDiagnostic trims whitespace; applying it to the whole error would

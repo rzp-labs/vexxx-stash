@@ -29,6 +29,10 @@ func (t *GenerateImageThumbnailTask) logStderr(err error) {
 }
 
 func (t *GenerateImageThumbnailTask) Start(ctx context.Context) error {
+	// A task canceled before starting performs no work and reports no failure.
+	if ctx.Err() != nil {
+		return nil
+	}
 	if !t.required() {
 		return nil
 	}

@@ -11,7 +11,7 @@ func scenePrivateValues(scene *models.Scene) []string {
 	if scene == nil {
 		return nil
 	}
-	values := []string{scene.Path}
+	values := []string{scene.Path, scene.Title}
 	if scene.Path != "" {
 		values = append(values, video.GetFunscriptPath(scene.Path))
 	}

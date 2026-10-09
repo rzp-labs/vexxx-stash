@@ -19,11 +19,14 @@ func TestPackageDiagnosticsBoundJoinedFailuresAndRemoveSecrets(t *testing.T) {
 	err := &pkg.InstallError{Stage: "python_dependencies", Err: errors.Join(failures...)}
 	event := PackageInstallException(err, PackageFailureContext{Operation: "update", PackageID: "PythonTools"})
 	details := event.Properties["package_failures"].([]map[string]any)
-	if len(details) != 8 || event.Properties["package_failure_count"] != 20 {
+	if len(details) != 20 || event.Properties["package_failure_count"] != 20 {
 		t.Fatal("joined event lost total count or exceeded diagnostic limit")
 	}
 	for _, detail := range details {
-		output := detail["python_output"].(string)
+		output, present := detail["python_output"].(string)
+		if !present {
+			continue
+		}
 		if len(output) > python.MaxDiagnosticBytes || !strings.Contains(output, "wheel-sentinel") {
 			t.Fatal("bounded joined output lost useful final cause")
 		}

@@ -452,3 +452,87 @@ func TestGenerationJobHeatmapFailureRedactsColocatedFunscript(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerationJobShortPrivateTitleRetainsEncoderDiagnostic(t *testing.T) {
+	received := generationTelemetryReceiver(t)
+	mgr, input, _, _ := metadataFixture(t)
+	privateInput := filepath.Join(filepath.Dir(input), "private media file.mp4")
+	if err := os.Rename(input, privateInput); err != nil {
+		t.Fatal(err)
+	}
+	input = privateInput
+	previous := instance
+	instance = mgr
+	t.Cleanup(func() { instance = previous })
+	mgr.Config.SetInterface(config.SpriteGenerationBackend, "software")
+	mgr.Config.SetInterface(config.GenerationMaxProcesses, 16)
+	mgr.Config.SetInterface(config.GenerationMaxGPUProcesses, 16)
+	mgr.Config.SetInterface(config.GenerationThreads, 0)
+	mgr.Config.SetInterface(config.ParallelTasks, 1)
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(generationMetadataJSON), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	video := metadata["streams"].([]any)[0].(map[string]any)
+	delete(video, "side_data_list")
+	video["pix_fmt"], video["duration"], video["nb_frames"] = "yuv420p", "10", "300"
+	video["nb_read_frames"] = "300"
+	metadata["format"].(map[string]any)["duration"] = "10"
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(filepath.Dir(input), "ffprobe")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\nprintf '%s' '"+string(data)+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(filepath.Dir(input), "ffmpeg")
+	script := `#!/bin/sh
+if [ "$1" = "-version" ]; then echo "ffmpeg version 8.1.2"; exit 0; fi
+printf "%s\n" "encoder failed: unfamiliar-driver-cause" "scene title: e" "password=fixture-secret" >&2
+exit 23
+`
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	mgr.FFMpeg = ffmpeg.NewEncoder(binary)
+	file := &models.VideoFile{BaseFile: &models.BaseFile{ID: 1, Path: input}, Width: 64, Height: 36, Duration: 10}
+	scene := &models.Scene{ID: 1, Path: input, Title: "e", Checksum: "fixture", OSHash: "fixture"}
+	db := mocks.NewDatabase()
+	db.Scene.On("FindMany", mock.Anything, []int{1}).Return([]*models.Scene{scene}, nil)
+	db.Scene.On("GetFiles", mock.Anything, 1).Return([]*models.VideoFile{file}, nil)
+	m := job.NewManager()
+	t.Cleanup(func() { m.StopAndWait(time.Second) })
+	j := &GenerateJob{repository: models.Repository{TxnManager: db, Scene: db.Scene}, input: GenerateMetadataInput{SceneIDs: []string{"1"}, Sprites: true, Overwrite: true}}
+	id := m.Add(context.Background(), "private media description", j)
+	result := waitMarkerJob(t, m, id)
+	if result.Status != job.StatusFailed || result.Error == nil {
+		t.Fatal("fixture did not reach failed generation job")
+	}
+	events := received()
+	if len(events) != 1 || events[0].Event != "$exception" {
+		t.Fatalf("expected one generation exception, got %d", len(events))
+	}
+	properties := events[0].Properties
+	for key, want := range map[string]any{"generation_stage": "encode", "generation_selected_backend": "software", "generation_actual_backend": "software", "ffmpeg_exit_code": float64(23)} {
+		if properties[key] != want {
+			t.Errorf("%s=%v, want %v", key, properties[key], want)
+		}
+	}
+	output, _ := properties["ffmpeg_output"].(string)
+	if !strings.Contains(output, "encoder failed: unfamiliar-driver-cause") {
+		t.Errorf("short scene title corrupted diagnostic words: %s", output)
+	}
+	encoded, _ := json.Marshal(events)
+	for _, private := range []string{"scene title: e", "fixture-secret", input} {
+		if strings.Contains(string(encoded), private) {
+			t.Errorf("private scene value retained on SDK wire: %q", private)
+		}
+	}
+	if dir := os.Getenv("VEX80_EVIDENCE_DIR"); dir != "" && !t.Failed() {
+		data, _ := json.MarshalIndent(events, "", "  ")
+		if err := os.WriteFile(dir+"/"+t.Name()+"-events.json", data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
