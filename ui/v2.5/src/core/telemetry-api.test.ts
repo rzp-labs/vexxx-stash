@@ -191,6 +191,7 @@ describe("Apollo diagnostic contract", () => {
       operation: "FindScenes",
       operation_kind: "query",
       stage: "graphql.transport",
+      backend_event_id: eventID,
     });
     expect(
       vi
