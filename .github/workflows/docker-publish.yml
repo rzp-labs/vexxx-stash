@@ -3,7 +3,7 @@ name: Validate and deliberately publish Docker images
 # Plan validates exact normal-release syntax after the trigger prefilter.
 "on":
   pull_request:
-    branches: [master, "codex/ct102-stack-*"]
+    # Validate every PR base, including stacks outside the legacy CT102 prefix.
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   push:
     branches: [master]
