@@ -139,6 +139,27 @@ class ImagePublicationPolicyTests(unittest.TestCase):
             self.assertTrue(groups['backend'] and groups['frontend'] and groups['python'], path)
             self.assertFalse(groups['build_image'], path)
 
+    def test_ffmpeg_packaging_inputs_select_validation_without_publication(self):
+        inputs = ["scripts/ffmpeg/" + name for name in (
+            "build-libavutil.py", "build-libavformat.py", "build-strict-ffmpeg.py",
+            "vaapi-vulkan-rgb-export.patch", "no-pixel-probe.patch",
+            "add-av_stream_get_first_dts-for-chromium.patch", "strict-hardware-output.patch",
+            "future-helper.sh", "nested/future.patch")]
+        for path in inputs:
+            with self.subTest(path=path):
+                self.assertEqual(policy.obligations([path]), {
+                    "backend": True, "frontend": True, "python": True, "build_image": True})
+                for name in ("push", "pull_request"):
+                    ready = self.plan(name=name, paths=[path])
+                    self.assertTrue(ready["run_tests"] and ready["build_image"])
+                    self.assertFalse(ready["publish"])
+                draft = self.plan(name="pull_request", paths=[path],
+                                  event={"pull_request": {"draft": True}})
+                self.assertTrue(draft["deferred"])
+                self.assertFalse(draft["run_tests"] or draft["build_image"] or draft["publish"])
+        self.assertEqual(policy.affected(["scripts/ffmpeg/README.md"]), (False, False))
+        self.assertFalse(policy.obligations(["scripts/gpu_generation/benchmark.py"])["build_image"])
+
     def test_drafts_defer_and_ready_transition_selects_validation(self):
         for draft in (True, False):
             result = self.plan(name='pull_request', paths=['docker/build/x86_64/Dockerfile'],

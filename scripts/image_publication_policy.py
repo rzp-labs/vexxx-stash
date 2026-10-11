@@ -20,12 +20,14 @@ def obligations(paths):
         if path.startswith("docs/") or path in (
                 "README.md", "CONTRIBUTING.md", "AGENTS.md", "REVIEW.md", "LICENSE",
                 "docker/production/README.md", "docker/build/x86_64/README.md",
-                "ui/v2.5/README.md", "ui/v2.5/src/locales/README.md",
+                "ui/v2.5/README.md", "ui/v2.5/src/locales/README.md", "scripts/ffmpeg/README.md",
                 "pkg/sqlite/migrations/README.md", "pkg/plugin/examples/README.md",
                 "pkg/plugin/examples/react-component/README.md"):
             continue
-        if path in ("Makefile", ".dockerignore", "scripts/check_intel_runtime.py") or path.startswith("docker/"):
+        if path in ("Makefile", ".dockerignore", "scripts/check_intel_runtime.py") or path.startswith(("docker/", "scripts/ffmpeg/")):
             backend = frontend = image = True
+            # FFmpeg helpers and patches are direct Docker packaging inputs.
+            python |= path.startswith("scripts/ffmpeg/")
         elif path.startswith("scripts/") and path.endswith(".py"):
             python = True
         elif path.startswith("ui/v2.5/"):
