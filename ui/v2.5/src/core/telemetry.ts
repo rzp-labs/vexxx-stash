@@ -58,6 +58,7 @@ const rebuilt = new Set([
   "$exception_list",
   "$exception_level",
   "telemetry_diagnostics",
+  "plugin_script_frames",
   "telemetry_delivery",
 ]);
 
@@ -88,11 +89,34 @@ function bundleFilename(value: unknown): string | undefined {
     return undefined;
   }
 }
-// Limits count retained diagnostics. Walk in source order and stop after fifty
-// accepted bundle frames, so private/foreign/malformed frames cannot hide them.
+// Plugin endpoints identify a script category, but their IDs can be user-owned.
+// Preserve attribution without exporting IDs, paths, origins, or source text.
+function pluginJavascript(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    const base = new URL(
+      document.querySelector("base")?.href || "/",
+      window.location.origin
+    );
+    const prefix = new URL("plugin/", base);
+    const frame = new URL(value, base);
+    return (
+      prefix.origin === window.location.origin &&
+      frame.origin === window.location.origin &&
+      frame.pathname.startsWith(prefix.pathname) &&
+      /^[^/]+\/javascript$/.test(frame.pathname.slice(prefix.pathname.length))
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Bundle and plugin coordinates have independent retained-frame limits. Inspect
+// the bounded source window in order so either category can follow a full quota.
 function bundleFrames(
   value: unknown,
-  accounting: IDiagnosticAccounting
+  accounting: IDiagnosticAccounting,
+  pluginFrames: Record<string, unknown>[]
 ): Record<string, unknown>[] {
   const frames: Record<string, unknown>[] = [];
   if (!Array.isArray(value)) return frames;
@@ -116,7 +140,24 @@ function bundleFrames(
     const frame = record(original, accounting);
     const filename = bundleFilename(frame.filename);
     if (!filename) {
+      if (pluginJavascript(frame.filename)) {
+        if (pluginFrames.length < diagnosticLimits.frames) {
+          pluginFrames.push(
+            Object.fromEntries(
+              ["lineno", "colno"].flatMap((key) =>
+                Number.isSafeInteger(frame[key]) && Number(frame[key]) >= 0
+                  ? [[key, frame[key]]]
+                  : []
+              )
+            )
+          );
+        } else accounting.truncated += 1;
+      }
       accounting.omitted += 1;
+      continue;
+    }
+    if (frames.length >= diagnosticLimits.frames) {
+      accounting.truncated += 1;
       continue;
     }
     const safe: Record<string, unknown> = {
@@ -142,10 +183,6 @@ function bundleFrames(
     if (typeof frame.chunk_id === "string" && uuid.test(frame.chunk_id))
       safe.chunk_id = frame.chunk_id;
     frames.push(safe);
-    if (frames.length === diagnosticLimits.frames) {
-      if (index + 1 < value.length) accounting.truncated += 1;
-      break;
-    }
   }
   return frames;
 }
@@ -293,6 +330,7 @@ export function sanitizeTelemetry(
     )
       properties.$exception_level = source.$exception_level;
     const exceptions: Record<string, unknown>[] = [];
+    const pluginSources: Record<string, unknown>[] = [];
     const incoming = Array.isArray(source.$exception_list)
       ? source.$exception_list
       : [];
@@ -348,9 +386,11 @@ export function sanitizeTelemetry(
           )
         ),
       };
+      const pluginFrames: Record<string, unknown>[] = [];
       const frames = bundleFrames(
         record(item.stacktrace, exceptionAccounting).frames,
-        exceptionAccounting
+        exceptionAccounting,
+        pluginFrames
       );
       // A manual envelope can omit a message and still carry useful diagnostics.
       // Check retained metadata once; empty/unsafe entries must not consume slots.
@@ -358,10 +398,20 @@ export function sanitizeTelemetry(
         !(typeof item.value === "string" && item.value.trim().length > 0) &&
         !validType &&
         !Object.keys(mechanism).length &&
-        !frames.length
+        !frames.length &&
+        !pluginFrames.length
       ) {
         exceptionAccounting.omitted += 1;
         continue;
+      }
+      if (pluginFrames.length) {
+        if (pluginSources.length < diagnosticLimits.exceptions)
+          pluginSources.push({
+            exception_index: exceptions.length,
+            source: "plugin.javascript",
+            frames: pluginFrames,
+          });
+        else exceptionAccounting.truncated += 1;
       }
       exceptions.push({
         ...Object.fromEntries(
@@ -385,6 +435,7 @@ export function sanitizeTelemetry(
       }
     }
     properties.$exception_list = exceptions;
+    if (pluginSources.length) properties.plugin_script_frames = pluginSources;
     properties.telemetry_diagnostics = {
       ...Object.fromEntries(
         (

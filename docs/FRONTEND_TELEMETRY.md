@@ -42,8 +42,13 @@ All fifty useful exceptions supplied by the pinned SDK can survive, in source
 order. Manual malformed/empty entries do not consume the fifty-exception limit;
 missing/nonstring messages retain useful type/mechanism/stack metadata and the
 existing `Non-string error message [redacted]` fallback. Each entry retains the
-first fifty accepted bundle frames. The SDK has earlier limits that this hook
-cannot undo; the matrix below distinguishes them.
+first fifty accepted bundle frames. Same-origin plugin JavaScript endpoints can
+also supply up to fifty line/column pairs per exception, independently of the
+bundle quota, in `plugin_script_frames` with category `plugin.javascript` and the
+retained exception index. No plugin ID, name, filename, function or URL is
+exported, and absent frames produce no plugin attribution. Manual frame lists
+are inspected in source order within a 10,000-entry window. The SDK has earlier
+limits that this hook cannot undo; the matrix below distinguishes them.
 
 ## Private content and bounded work
 
@@ -154,11 +159,11 @@ bugs. Tests use PostHog 1.435.8, core 1.55.3 and plugin-utils 2.0.0.
 | 26 | Unknown messages retained, six SDK severity levels preserved. | Retained with reason |
 | 27 | SDK handled/synthetic/type/source/cause IDs retained with existing type/numeric validation. No new producer of other mechanism values found. | Retained with reason |
 | 28 | Safe module/thread metadata now retained. | Implemented |
-| 29 | Only shipped same-origin hashed bundles become filenames; private plugin/media/foreign paths excluded. | Retained with reason |
+| 29 | Only shipped same-origin hashed bundles become filenames; private plugin/media/foreign paths excluded. Same-origin plugin JavaScript coordinates survive separately without IDs or filenames. | Retained with reason |
 | 30 | Normalize own bundle to /assets; removes private installation/query/credential details. | Retained with reason |
 | 31 | Line/column/UUID chunk retained; web platform and own-bundle in_app=true. | Retained with reason |
 | 32 | Broader technical function syntax retained, with bounded identifier length. | Implemented |
-| 33 | First50 accepted bundle frames retained; source lines/locals/variables excluded for private content. | Retained with reason |
+| 33 | First50 accepted bundle frames and independently first50 plugin coordinate pairs retained within a bounded inspection window; source lines/locals/variables excluded for private content. | Retained with reason |
 | 34 | Up to two percent-decoding passes before masking. | Retained with reason |
 | 35 | JSON preview hidden; complete parser position/line/column retained. | Implemented |
 | 36 | Known HTTP response appenders redact private body, retain operation/status. | Retained with reason |
