@@ -43,6 +43,9 @@ func TestPreviewReplayMetadataAndEligibilityProducers(t *testing.T) {
 				t.Fatal("producer failure facts", kind, r, err, saved)
 			}
 			if kind == "metadata" {
+				if r.Command.Started == nil || !*r.Command.Started {
+					t.Fatal("failed execution lost actual start state", r.Command)
+				}
 				if r.Command.SeekSeconds == nil || *r.Command.SeekSeconds != 0 || r.Command.FrameLimit == nil || *r.Command.FrameLimit != 1 || r.Command.StreamIndex != nil || r.Command.InputPixels != nil {
 					t.Fatal("metadata guessed selected source", r.Command)
 				}
@@ -51,6 +54,36 @@ func TestPreviewReplayMetadataAndEligibilityProducers(t *testing.T) {
 			}
 			if kind == "eligibility" && (r.Command.InputPixels == nil || r.Command.InputPixels.Width != 8192) {
 				t.Fatal("eligibility lost actual pixels", r.Command)
+			}
+		})
+	}
+}
+
+func TestPreviewReplayMetadataParseFailureRetainsSuccessfulCommandStart(t *testing.T) {
+	for name, output := range map[string]string{
+		"missing record":   "non-metadata output",
+		"multiple records": intelMetadataPrefix + "{}\n" + intelMetadataPrefix + "{}",
+		"malformed JSON":   intelMetadataPrefix + "{",
+		"missing fields":   intelMetadataPrefix + "{}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := metadataTestGenerator(t, "cat <<'METADATA'\n"+output+"\nMETADATA\n", generationbudget.Settings{MaxProcesses: 2, MaxGPUProcesses: 1})
+			var saved []diagnostics.PreviewReplayRecord
+			ctx := diagnostics.WithPreviewSource(context.Background(), 12, 34, "", func(r diagnostics.PreviewReplayRecord) error { saved = append(saved, r); return nil })
+			lock := g.LockManager.ReadLock(ctx, "synthetic")
+			defer lock.Cancel()
+			_, err := g.intelSourceMetadata(ctx, lock, "synthetic", ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}, false)
+			replay, ok := diagnostics.PreviewFailureSnapshot(err)
+			if !ok || replay.Command.Stage != "metadata" || replay.Command.Started == nil || !*replay.Command.Started {
+				t.Fatal("successful command start lost on metadata parsing failure", replay, err)
+			}
+			if len(saved) != 1 || saved[0].Replay.Reference != replay.Reference || saved[0].Replay.Command.Started == nil || !*saved[0].Replay.Command.Started {
+				t.Fatal("local replay lost successful command start", saved)
+			}
+			_, parseErr := mergeIntelFrameMetadata(ffmpeg.IntelSource{}, []byte(output))
+			var wrapped *diagnostics.PreviewReplayError
+			if !errors.As(err, &wrapped) || wrapped.Err == nil || wrapped.Err.Error() != parseErr.Error() {
+				t.Fatal("metadata parsing error changed", err, parseErr)
 			}
 		})
 	}

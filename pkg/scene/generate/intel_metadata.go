@@ -55,6 +55,9 @@ func (g Generator) intelSourceMetadata(ctx context.Context, lockCtx *fsutil.Lock
 		}
 		return source, fmt.Errorf("GPU first-frame metadata: %w", err)
 	}
+	// Successful execution establishes start even when parsing its output fails.
+	started := true
+	command.Started = &started
 	source, err = mergeIntelFrameMetadata(source, output)
 	if err != nil && diagnostics.HasPreviewSource(ctx) {
 		command.RuntimeFingerprint = ffmpeg.IntelRuntimeFingerprint(g.Encoder.Path(), config.Device)
