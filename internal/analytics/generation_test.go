@@ -99,6 +99,30 @@ func TestGenerationTimeoutDiagnosticRemainsFailure(t *testing.T) {
 	}
 }
 
+func TestGenerationStderrCountsAndTerminalCauseRemainTruthful(t *testing.T) {
+	var capture ffmpeg.GenerationStderr
+	capture.Write([]byte("[h264_vaapi] initial driver reason\n  Metadata:\n    title: private-title\n"))
+	capture.Write([]byte(strings.Repeat("x", 12<<20)))
+	capture.Write([]byte("\n[h264_vaapi] VAAPI encode failed: 24; Input/output error\n"))
+	stderr, counts := capture.Capture()
+	exit := &exec.ExitError{Stderr: stderr}
+	err := &ffmpeg.GenerationCommandError{Err: exit, Stderr: counts}
+	event := GenerationException(err, GenerationFailureContext{SelectedBackend: "vaapi"})
+	for key, want := range map[string]any{"ffmpeg_stderr_bytes": counts.Total, "ffmpeg_stderr_retained_bytes": counts.Retained, "ffmpeg_stderr_capture_omitted_bytes": counts.Omitted, "ffmpeg_stderr_capture_truncated": true} {
+		if event.Properties[key] != want {
+			t.Errorf("%s=%v want %v", key, event.Properties[key], want)
+		}
+	}
+	encoded, _ := json.Marshal(event.APIfy())
+	if strings.Contains(string(encoded), "private-title") {
+		t.Fatal("existing metadata redaction lost")
+	}
+	output, _ := event.Properties["ffmpeg_output"].(string)
+	if !strings.Contains(output, "VAAPI encode failed: 24; Input/output error") || !strings.Contains(output, "stderr bytes omitted") {
+		t.Fatal("terminal error or capture omission hidden", output)
+	}
+}
+
 func TestAuxiliaryPathsWithSpacesAreRedactedAsWholeRecords(t *testing.T) {
 	for _, path := range []string{
 		`/mnt/user/Jane Doe/subtitle data.ass`,

@@ -312,7 +312,7 @@ func TestIntelMetadataRefusalDiagnosticPreservesBoundedStderrAndNoAssets(t *test
 		stderr := "  " + refusal + "\n"
 		if long {
 			name = "bounded"
-			stderr += strings.Repeat("x", 8192) + "BEYOND_DIAGNOSTIC_LIMIT"
+			stderr += strings.Repeat("x", 8192) + "\nBEYOND_DIAGNOSTIC_LIMIT"
 		}
 		t.Run(name, func(t *testing.T) {
 			script := "cat >&2 <<'REFUSAL'\n" + stderr + "\nREFUSAL\nexit 23\n"
@@ -336,8 +336,8 @@ func TestIntelMetadataRefusalDiagnosticPreservesBoundedStderrAndNoAssets(t *test
 			}
 			reason := diagnostics[0].Reason
 			if long {
-				if !strings.Contains(reason, strings.TrimSpace(string(exitErr.Stderr[:4096]))) || !strings.HasSuffix(reason, " [truncated]") || strings.Contains(reason, "BEYOND_DIAGNOSTIC_LIMIT") {
-					t.Fatal("stderr diagnostic did not retain a bounded first 4096 bytes")
+				if !strings.Contains(reason, refusal) || (!strings.Contains(reason, "[truncated]") && !strings.Contains(reason, "stderr bytes omitted")) || !strings.Contains(reason, "BEYOND_DIAGNOSTIC_LIMIT") {
+					t.Fatal("stderr diagnostic lost its bounded head or terminal cause")
 				}
 				commandErr := errors.Unwrap(errors.Unwrap(err))
 				if len(reason) > len("GPU first-frame metadata: ")+len(commandErr.Error())+len(": ")+4096+len(" [truncated]") {

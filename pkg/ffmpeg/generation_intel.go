@@ -269,11 +269,7 @@ func intelFailureReason(err error) string {
 	reason := err.Error()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-		stderr := string(exitErr.Stderr)
-		if len(stderr) > 4096 {
-			stderr = stderr[:4096] + " [truncated]"
-		}
-		reason += ": " + strings.TrimSpace(stderr)
+		reason += ": " + GenerationStderrText(exitErr.Stderr, 4096)
 	}
 	return reason
 }
