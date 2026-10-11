@@ -58,8 +58,12 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 			if err := lockCtx.Err(); err != nil {
 				return err
 			}
-			g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: stage, Reason: reason.Error()})
-			return ffmpeg.WithIntelGenerationDiagnostic(fmt.Errorf("GPU scene preview %s: %w", stage, reason), ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: stage}, ffmpeg.IntelSource{})
+			d := ffmpeg.IntelGenerationDiagnostic{Selected: g.IntelPreviews.Backend, Actual: "none", Stage: stage, Reason: reason.Error()}
+			if stage == "metadata" {
+				d.ProbeTimeout = intelMetadataProbeTimeout
+			}
+			g.reportPreview(d)
+			return ffmpeg.WithIntelGenerationDiagnostic(fmt.Errorf("GPU scene preview %s: %w", stage, reason), d, ffmpeg.IntelSource{})
 		}
 		source, err := g.intelSourceMetadata(lockCtx, lockCtx, input, *g.IntelPreviews, true)
 		if err != nil {

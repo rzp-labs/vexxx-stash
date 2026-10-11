@@ -237,6 +237,7 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 			exitErr.Stderr = stderr.Bytes()
 			err = exitErr
 		}
+		err = ffmpeg.WithGenerationExecutionCause(err, execCtx.Err())
 		return g.commandError(args, admitted, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
 	}
 
@@ -279,6 +280,7 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 			exitErr.Stderr = stderr.Bytes()
 			err = exitErr
 		}
+		err = ffmpeg.WithGenerationExecutionCause(err, execCtx.Err())
 		return nil, g.commandError(args, 1, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
 	}
 

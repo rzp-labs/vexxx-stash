@@ -16,6 +16,7 @@ import (
 )
 
 const intelMetadataPrefix = "VEXXX_GPU_METADATA="
+const intelMetadataProbeTimeout = 10 * time.Second
 
 // Header inspection must not discover stream properties by software decoding.
 // Decode one hardware frame separately, after releasing CPU admission, and use
@@ -39,7 +40,7 @@ func (g Generator) intelSourceMetadata(ctx context.Context, lockCtx *fsutil.Lock
 	args := ffmpeg.Args{"-v", "error", "-nostdin", "-abort_on", "empty_output"}
 	args = append(args, ffmpeg.IntelInputArgs(config, source)...)
 	args = append(args, "-noautorotate", "-display_rotation:v", "0", "-hwaccel_metadata", "1", "-i", input, "-frames:v", "1", "-an", "-c:v", "wrapped_avframe", "-f", "null", "-")
-	output, err := g.generateOutputWithContext(ffmpeg.WithIntelProbeTimeout(ctx, 10*time.Second), lockCtx, args)
+	output, err := g.generateOutputWithContext(ffmpeg.WithIntelProbeTimeout(ctx, intelMetadataProbeTimeout), lockCtx, args)
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
