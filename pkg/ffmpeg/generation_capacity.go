@@ -53,12 +53,20 @@ func GenerationPressure(err error) error {
 		return err
 	}
 	message := strings.ToLower(string(exitErr.Stderr))
-	for _, signal := range []string{"cannot allocate memory", "out of memory", "failed to allocate surface", "failed to allocate a surface", "failed to allocate video memory", "va_status_error_allocation_failed"} {
-		if strings.Contains(message, signal) {
-			return &generationbudget.PressureError{Err: err}
-		}
+	var command *GenerationCommandError
+	if generationPressureMessage(message) || (errors.As(err, &command) && command.Stderr.Pressure) {
+		return &generationbudget.PressureError{Err: err}
 	}
 	return err
+}
+
+func generationPressureMessage(message string) bool {
+	for _, signal := range []string{"cannot allocate memory", "out of memory", "failed to allocate surface", "failed to allocate a surface", "failed to allocate video memory", "va_status_error_allocation_failed"} {
+		if strings.Contains(message, signal) {
+			return true
+		}
+	}
+	return false
 }
 
 func surfaceCost(width, height int, bytesPerPixel int64) int64 {
