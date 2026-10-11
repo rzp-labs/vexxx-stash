@@ -45,7 +45,7 @@ func TestIdentifySQLiteDeletionAfterSelection(t *testing.T) {
 	require.NoError(t, db.Open(filepath.Join(t.TempDir(), "identify.sqlite")))
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	require.NoError(t, txn.WithTxn(context.Background(), db, func(ctx context.Context) error {
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 1001; i++ {
 			s := models.NewScene()
 			if err := db.Scene.Create(ctx, &s, nil); err != nil {
 				return err
@@ -58,11 +58,14 @@ func TestIdentifySQLiteDeletionAfterSelection(t *testing.T) {
 	instance = &Manager{Config: cfg, Repository: models.Repository{TxnManager: db, Scene: reader}}
 	t.Cleanup(func() { instance = previous })
 	var interleaveErr error
-	scraper := &identifyTestScraper{after: func(int) {
-		// A second scene disappears while the first is being checked. Also
+	scraper := &identifyTestScraper{after: func(id int) {
+		if id != reader.selected[0] {
+			return
+		}
+		// A scene in the next hydration batch disappears while the first is being checked. Also
 		// move that first scene out of the original unorganized selection.
 		interleaveErr = txn.WithTxn(context.Background(), db, func(ctx context.Context) error {
-			if err := db.Scene.Destroy(ctx, reader.selected[2]); err != nil {
+			if err := db.Scene.Destroy(ctx, reader.selected[1000]); err != nil {
 				return err
 			}
 			_, err := db.Scene.UpdatePartial(ctx, reader.selected[0], models.ScenePartial{Organized: models.NewOptionalBool(true)})
@@ -77,11 +80,12 @@ func TestIdentifySQLiteDeletionAfterSelection(t *testing.T) {
 		})
 	})
 	require.NoError(t, interleaveErr)
-	require.Len(t, reader.selected, 3)
+	require.Len(t, reader.selected, 1001)
 	require.Equal(t, job.StatusFinished, status.Status)
 	require.Nil(t, status.Error)
-	require.Equal(t, []int{reader.selected[0]}, scraper.ids)
-	require.Equal(t, 3, *status.Processed)
-	require.Equal(t, 3, *status.Total)
+	want := append([]int{reader.selected[0]}, reader.selected[2:1000]...)
+	require.Equal(t, want, scraper.ids)
+	require.Equal(t, 1001, *status.Processed)
+	require.Equal(t, 1001, *status.Total)
 	require.Equal(t, 1.0, status.Progress)
 }

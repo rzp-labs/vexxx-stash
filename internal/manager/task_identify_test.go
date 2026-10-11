@@ -57,9 +57,7 @@ func TestIdentifyAllScenesRemovedBeforeProcessing(t *testing.T) {
 	db.Scene.On("Query", mock.Anything, mock.Anything).Return(result, nil)
 	// This reproduces the old Resolve/FindMany failure after an ID query.
 	db.Scene.On("FindMany", mock.Anything, ids).Return(nil, fmt.Errorf("scene with id 2 not found"))
-	db.Scene.On("Find", mock.Anything, 1).Return(&models.Scene{ID: 1}, nil).Once()
-	db.Scene.On("Find", mock.Anything, 2).Return(nil, nil).Once()
-	db.Scene.On("Find", mock.Anything, 3).Return(&models.Scene{ID: 3}, nil).Once()
+	db.Scene.On("FindByIDs", mock.Anything, ids).Return([]*models.Scene{{ID: 3}, {ID: 1}}, nil).Once()
 	scraper := &identifyTestScraper{}
 	j := &IdentifyJob{}
 	status := runIdentifyTestJob(t, context.Background(), func(ctx context.Context, p *job.Progress) error {
@@ -72,7 +70,7 @@ func TestIdentifyAllScenesRemovedBeforeProcessing(t *testing.T) {
 	require.Equal(t, 3, *status.Processed)
 	require.Equal(t, 3, *status.Total)
 	require.Equal(t, 1.0, status.Progress)
-	db.Scene.AssertCalled(t, "Find", mock.Anything, 2)
+	db.Scene.AssertCalled(t, "FindByIDs", mock.Anything, ids)
 	db.Scene.AssertNotCalled(t, "FindMany", mock.Anything, ids)
 }
 
@@ -186,9 +184,13 @@ func TestIdentifyAllScenesSnapshotsSelection(t *testing.T) {
 			*o.FindFilter.Sort == "path" && o.SceneFilter != nil && !*o.SceneFilter.Organized &&
 			o.SceneFilter.Path != nil && o.SceneFilter.Path.Value == "/fixture/%"
 	})).Return(result, nil).Once()
-	db.Scene.On("Find", mock.Anything, mock.Anything).Return(func(_ context.Context, id int) *models.Scene {
-		return &models.Scene{ID: id}
-	}, nil).Times(len(result.IDs))
+	db.Scene.On("FindByIDs", mock.Anything, mock.Anything).Return(func(_ context.Context, ids []int) []*models.Scene {
+		ret := make([]*models.Scene, len(ids))
+		for i, id := range ids {
+			ret[len(ids)-1-i] = &models.Scene{ID: id}
+		}
+		return ret
+	}, nil).Twice()
 	scraper := &identifyTestScraper{}
 	j := &IdentifyJob{input: identify.Options{Paths: []string{"/fixture"}}}
 	status := runIdentifyTestJob(t, context.Background(), func(ctx context.Context, p *job.Progress) error {
@@ -305,5 +307,32 @@ func TestIdentifyRenameMissingScene(t *testing.T) {
 	require.Equal(t, job.StatusFinished, status.Status)
 	require.Nil(t, status.Error)
 	db.Scene.AssertNotCalled(t, "GetFiles", mock.Anything, 2)
+	db.Scene.AssertExpectations(t)
+}
+
+func TestIdentifyQueriedBatchFailureKeepsPartialProgress(t *testing.T) {
+	db := identifyTestRepository(t)
+	ids := make([]int, 1001)
+	scenes := make([]*models.Scene, 1000)
+	for i := range ids {
+		ids[i] = i + 1
+		if i < len(scenes) {
+			scenes[i] = &models.Scene{ID: i + 1}
+		}
+	}
+	cause := errors.New("database permission denied")
+	db.Scene.On("FindByIDs", mock.Anything, ids[:1000]).Return(scenes, nil).Once()
+	db.Scene.On("FindByIDs", mock.Anything, ids[1000:]).Return(nil, cause).Once()
+	j := &IdentifyJob{}
+	var got error
+	status := runIdentifyTestJob(t, context.Background(), func(ctx context.Context, p *job.Progress) error {
+		j.progress = p
+		got = j.identifyQueriedScenes(ctx, ids, nil)
+		return got
+	})
+	require.ErrorIs(t, got, cause)
+	require.Equal(t, job.StatusFailed, status.Status)
+	require.Equal(t, 1000, *status.Processed)
+	require.Equal(t, 1001, *status.Total)
 	db.Scene.AssertExpectations(t)
 }

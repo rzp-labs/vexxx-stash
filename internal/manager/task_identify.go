@@ -97,7 +97,7 @@ func (j *IdentifyJob) identifyAllScenes(ctx context.Context, sources []identify.
 		return fmt.Errorf("error querying for scenes: %w", err)
 	}
 
-	return j.identifyScenes(ctx, result.IDs, sources)
+	return j.identifyQueriedScenes(ctx, result.IDs, sources)
 }
 
 func (j *IdentifyJob) identifyScenes(ctx context.Context, sceneIDs []int, sources []identify.ScraperSource) error {
@@ -113,16 +113,48 @@ func (j *IdentifyJob) identifyScenes(ctx context.Context, sceneIDs []int, source
 		if err != nil {
 			return fmt.Errorf("finding scene id %d: %w", id, err)
 		}
-		if s == nil {
-			logger.Warnf("Skipping scene %d during Identify: scene no longer exists", id)
-			// Progress counts checked selections, including reported skips.
-			j.progress.Increment()
-			continue
-		}
-
-		j.identifyScene(ctx, s, sources)
+		j.identifyResolvedScene(ctx, id, s, sources)
 	}
 	return nil
+}
+
+// Hydrate queried IDs in bounded batches. FindByIDs tolerates rows deleted
+// since selection, unlike Resolve/FindMany, without one SQL query per scene.
+func (j *IdentifyJob) identifyQueriedScenes(ctx context.Context, ids []int, sources []identify.ScraperSource) error {
+	const batchSize = 1000
+	j.progress.SetTotal(len(ids))
+	for start := 0; start < len(ids); start += batchSize {
+		if job.IsCancelled(ctx) {
+			return nil
+		}
+		batchIDs := ids[start:min(start+batchSize, len(ids))]
+		scenes, err := instance.Repository.Scene.FindByIDs(ctx, batchIDs)
+		if err != nil {
+			return fmt.Errorf("loading scenes for Identify: %w", err)
+		}
+		byID := make(map[int]*models.Scene, len(scenes))
+		for _, s := range scenes {
+			byID[s.ID] = s
+		}
+		// FindByIDs does not guarantee order; retain the path-ordered selection.
+		for _, id := range batchIDs {
+			if job.IsCancelled(ctx) {
+				return nil
+			}
+			j.identifyResolvedScene(ctx, id, byID[id], sources)
+		}
+	}
+	return nil
+}
+
+func (j *IdentifyJob) identifyResolvedScene(ctx context.Context, id int, s *models.Scene, sources []identify.ScraperSource) {
+	if s == nil {
+		logger.Warnf("Skipping scene %d during Identify: scene no longer exists", id)
+		// Progress counts checked selections, including reported skips.
+		j.progress.Increment()
+		return
+	}
+	j.identifyScene(ctx, s, sources)
 }
 
 func (j *IdentifyJob) identifyScene(ctx context.Context, s *models.Scene, sources []identify.ScraperSource) {
