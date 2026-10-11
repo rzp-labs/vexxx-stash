@@ -74,6 +74,33 @@ export function privateDiagnosticValue(key: string, value: unknown): boolean {
   }
 }
 
+// The production Apollo URL embeds private arguments. Retain only its numeric
+// invariant and version before ordinary URL/JSON redaction discards the payload.
+function apolloInvariantMessage(message: string): string | undefined {
+  const match = message.match(
+    /^An error occurred! For more details, see the full error text at https:\/\/go\.apollo\.dev\/c\/err#(\S+)$/
+  );
+  if (!match) return undefined;
+  try {
+    const detail: unknown = JSON.parse(decodeURIComponent(match[1]));
+    if (!detail || typeof detail !== "object" || Array.isArray(detail))
+      return undefined;
+    const { version, message: code } = detail as Record<string, unknown>;
+    if (
+      typeof version !== "string" ||
+      !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(version) ||
+      typeof code !== "number" ||
+      !Number.isSafeInteger(code) ||
+      code < 1 ||
+      code > 100000
+    )
+      return undefined;
+    return `Apollo invariant ${code} (client ${version}) [arguments redacted]`;
+  } catch {
+    return undefined;
+  }
+}
+
 export function diagnosticMessage(
   value: unknown,
   accounting?: IDiagnosticAccounting
@@ -83,6 +110,12 @@ export function diagnosticMessage(
   // Decoding also exposes percent-encoded credentials/paths to the same rules.
   let message = value.slice(0, diagnosticLimits.inspectedCharacters);
   const inspectionTruncated = message.length !== value.length;
+  // A truncated URL is not a complete diagnostic envelope.
+  const invariant = !inspectionTruncated && apolloInvariantMessage(message);
+  if (invariant) {
+    if (accounting) accounting.redacted += 1;
+    return invariant;
+  }
   for (let pass = 0; pass < 2; pass += 1) {
     try {
       const decoded = decodeURIComponent(message);
