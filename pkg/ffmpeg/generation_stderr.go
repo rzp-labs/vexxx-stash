@@ -3,6 +3,7 @@ package ffmpeg
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -10,6 +11,12 @@ import (
 )
 
 const generationStderrHalf = 4096
+
+// Only complete numeric FFmpeg statistics may end at a carriage return.
+// Arbitrary diagnostic text must keep its newline record and privacy context.
+const generationProgressNumber = `[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?`
+
+var generationProgressRecord = regexp.MustCompile(`^\s*frame=\s*[0-9]+\s+fps=\s*(?:N/A|` + generationProgressNumber + `)\s+q=\s*(?:N/A|` + generationProgressNumber + `)\s+L?size=\s*(?:N/A|` + generationProgressNumber + `(?:[kMGT]?B|[KMGT]iB))\s+time=\s*(?:N/A|-?[0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]+)\s+bitrate=\s*(?:N/A|` + generationProgressNumber + `kbits/s)\s+speed=\s*(?:N/A|` + generationProgressNumber + `x)\s*\r$`)
 
 // GenerationStderrCapture counts source bytes, excluding the omission marker.
 type GenerationStderrCapture struct {
@@ -48,11 +55,12 @@ func (s *GenerationStderr) Write(p []byte) (int, error) {
 		rest = rest[piece:]
 	}
 	for len(p) > 0 {
-		end := bytes.IndexByte(p, '\n')
+		end := bytes.IndexAny(p, "\r\n")
 		piece := len(p)
 		if end >= 0 {
 			piece = end + 1
 		}
+		delimiter := p[piece-1]
 		if s.record == nil {
 			s.record = make([]byte, 0, generationStderrHalf)
 		}
@@ -63,11 +71,25 @@ func (s *GenerationStderr) Write(p []byte) (int, error) {
 		}
 		s.record = append(s.record, p[:min(piece, remaining)]...)
 		p = p[piece:]
-		if end >= 0 {
+		if end >= 0 && (delimiter == '\n' || s.progressRecordBoundary()) {
 			s.finishRecord()
 		}
 	}
 	return n, nil
+}
+
+func (s *GenerationStderr) progressRecordBoundary() bool {
+	if s.recordOverflow || len(s.record) == 0 {
+		return false
+	}
+	last := len(s.record) - 1
+	if !s.privateKey && (!s.metadata || s.recordInfo.indent <= s.metadataIndent) && generationProgressRecord.Match(s.record) {
+		// Normalize the progress control byte without changing byte accounting;
+		// retained records continue to have unambiguous newline boundaries.
+		s.record[last] = '\n'
+		return true
+	}
+	return false
 }
 
 // Apply contextual omissions before a head/tail cut can separate the block
