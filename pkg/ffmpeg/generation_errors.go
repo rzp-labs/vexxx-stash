@@ -20,8 +20,9 @@ type GenerationCommandError struct {
 	Stderr        GenerationStderrCapture
 }
 
-func (e *GenerationCommandError) Error() string { return e.Err.Error() }
-func (e *GenerationCommandError) Unwrap() error { return e.Err }
+func (e *GenerationCommandError) Error() string                  { return e.Err.Error() }
+func (e *GenerationCommandError) Unwrap() error                  { return e.Err }
+func (e *GenerationCommandError) DiagnosticCommandStarted() bool { return e.Started }
 
 // IntelGenerationError lets the task-level observer report the selected backend
 // and failing stage with targeted-redacted diagnostic context.

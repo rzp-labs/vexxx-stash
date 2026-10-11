@@ -69,6 +69,7 @@ func generationException(err, root error, cause string, info GenerationFailureCo
 		Set("failure_origin", "generation").Set("job_correlation", safeCorrelation(info.JobCorrelation)).
 		Set("generation_workload", safeWorkload(info.Workload)).Set("generation_budget_enabled", info.BudgetEnabled).
 		Set("generation_parallel_tasks", info.ParallelTasks)
+	addPreviewReplayProperties(properties, err)
 	for _, entry := range []struct {
 		prefix string
 		limits generationbudget.Settings
