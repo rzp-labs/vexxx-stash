@@ -96,6 +96,12 @@ func generationException(err, root error, cause string, info GenerationFailureCo
 			Set("generation_command_gpu_limit", command.Limits.MaxGPUProcesses).
 			Set("generation_command_threads", command.Limits.Threads)
 		private = append(private, command.PrivateValues...)
+		if command.Stderr.Total > 0 {
+			properties.Set("ffmpeg_stderr_bytes", command.Stderr.Total).
+				Set("ffmpeg_stderr_retained_bytes", command.Stderr.Retained).
+				Set("ffmpeg_stderr_capture_omitted_bytes", command.Stderr.Omitted).
+				Set("ffmpeg_stderr_capture_truncated", command.Stderr.Omitted > 0)
+		}
 		if intel == nil && selected == "software" && command.Started {
 			actual = "software"
 		}
@@ -119,6 +125,9 @@ func generationException(err, root error, cause string, info GenerationFailureCo
 		properties.Set("ffmpeg_exit_code", exitErr.ExitCode())
 		if len(exitErr.Stderr) > 0 {
 			output, omittedRecords := diagnosticStderrDetails(exitErr.Stderr)
+			if command != nil {
+				omittedRecords += command.Stderr.MetadataOmittedRecords
+			}
 			properties.Set("ffmpeg_metadata_omitted_records", omittedRecords)
 			for _, line := range strings.Split(string(exitErr.Stderr), "\n") {
 				for prefix, key := range map[string]string{"ffmpeg version": "ffmpeg_version", "built with": "ffmpeg_build", "configuration:": "ffmpeg_configuration"} {
@@ -128,7 +137,10 @@ func generationException(err, root error, cause string, info GenerationFailureCo
 				}
 			}
 			safeOutput := diagnostics.Sanitize(output, private, 8192)
-			properties.Set("ffmpeg_output", safeOutput.Value).Set("ffmpeg_output_omitted_bytes", safeOutput.OmittedBytes).Set("ffmpeg_stderr_bytes", len(exitErr.Stderr))
+			properties.Set("ffmpeg_output", safeOutput.Value).Set("ffmpeg_output_omitted_bytes", safeOutput.OmittedBytes)
+			if command == nil || command.Stderr.Total == 0 {
+				properties.Set("ffmpeg_stderr_bytes", len(exitErr.Stderr))
+			}
 			message += "\n" + safeOutput.Value
 		}
 	}

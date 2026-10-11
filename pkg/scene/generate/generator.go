@@ -219,7 +219,7 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 	cmd := g.Encoder.Command(execCtx, args)
 	executionError := ffmpeg.TrackGenerationExecutionCause(cmd, execCtx)
 
-	var stderr bytes.Buffer
+	var stderr ffmpeg.GenerationStderr
 	cmd.Stderr = &stderr
 	done := make(chan struct{})
 	defer close(done)
@@ -233,13 +233,16 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 	waitErr := cmd.Wait()
 	generationbudget.RecordProcessResult(ctx, cmd.Process.Pid, cmd.ProcessState)
 	if err := waitErr; err != nil {
+		captured, capture := stderr.Capture()
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			exitErr.Stderr = stderr.Bytes()
+			exitErr.Stderr = captured
 			err = exitErr
 		}
 		err = executionError(err)
-		return g.commandError(args, admitted, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
+		failure := g.commandError(args, admitted, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
+		failure.Stderr = capture
+		return failure
 	}
 
 	return nil
@@ -266,7 +269,7 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
-	var stderr bytes.Buffer
+	var stderr ffmpeg.GenerationStderr
 	cmd.Stderr = &stderr
 	done := make(chan struct{})
 	defer close(done)
@@ -277,13 +280,16 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 	}
 
 	if err := cmd.Wait(); err != nil {
+		captured, capture := stderr.Capture()
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			exitErr.Stderr = stderr.Bytes()
+			exitErr.Stderr = captured
 			err = exitErr
 		}
 		err = executionError(err)
-		return nil, g.commandError(args, 1, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
+		failure := g.commandError(args, 1, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
+		failure.Stderr = capture
+		return nil, failure
 	}
 
 	if stdout.Len() == 0 {
@@ -295,7 +301,7 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 
 // Admission metadata follows the returned error through existing task wrappers;
 // it never changes command construction, permit ownership or retry behavior.
-func (g Generator) commandError(args []string, admitted int, started bool, err error) error {
+func (g Generator) commandError(args []string, admitted int, started bool, err error) *ffmpeg.GenerationCommandError {
 	limits := generationbudget.Settings{}
 	if budget := g.generationBudget(); budget != nil {
 		limits = budget.Settings()

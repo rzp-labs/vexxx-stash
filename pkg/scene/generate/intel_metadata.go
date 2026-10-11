@@ -44,13 +44,7 @@ func (g Generator) intelSourceMetadata(ctx context.Context, lockCtx *fsutil.Lock
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			stderr := exitErr.Stderr
-			truncated := ""
-			if len(stderr) > 4096 {
-				stderr = stderr[:4096]
-				truncated = " [truncated]"
-			}
-			return source, fmt.Errorf("GPU first-frame metadata: %w: %s%s", err, strings.TrimSpace(string(stderr)), truncated)
+			return source, fmt.Errorf("GPU first-frame metadata: %w: %s", err, ffmpeg.GenerationStderrText(exitErr.Stderr, 4096))
 		}
 		return source, fmt.Errorf("GPU first-frame metadata: %w", err)
 	}

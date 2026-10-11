@@ -17,6 +17,7 @@ type GenerationCommandError struct {
 	Limits        generationbudget.Settings
 	PrivateValues []string
 	NativeStack   diagnostics.Stack
+	Stderr        GenerationStderrCapture
 }
 
 func (e *GenerationCommandError) Error() string { return e.Err.Error() }

@@ -101,15 +101,27 @@ func TestGenerationTimeoutDiagnosticRemainsFailure(t *testing.T) {
 	}
 }
 
-func TestGenerationExecutionDeadlineIsOneFailureWithOriginalExit(t *testing.T) {
-	exit := &exec.ExitError{Stderr: []byte("[Parsed_scale_vaapi] original filter diagnostic")}
-	err := ffmpeg.WithIntelGenerationDiagnostic(ffmpeg.WithGenerationExecutionCause(exit, context.DeadlineExceeded), ffmpeg.IntelGenerationDiagnostic{Selected: "vaapi", Actual: "none", Stage: "filter", ProbeTimeout: 10 * time.Second}, ffmpeg.IntelSource{})
-	if entries := diagnostics.Split(err); entries.Count != 1 {
-		t.Fatal("timeout duplicated the task failure", entries)
+func TestGenerationStderrCountsAndTerminalCauseRemainTruthful(t *testing.T) {
+	var capture ffmpeg.GenerationStderr
+	capture.Write([]byte("[h264_vaapi] initial driver reason\n  Metadata:\n    title: private-title\n"))
+	capture.Write([]byte(strings.Repeat("x", 12<<20)))
+	capture.Write([]byte("\n[h264_vaapi] VAAPI encode failed: 24; Input/output error\n"))
+	stderr, counts := capture.Capture()
+	exit := &exec.ExitError{Stderr: stderr}
+	err := &ffmpeg.GenerationCommandError{Err: exit, Stderr: counts}
+	event := GenerationException(err, GenerationFailureContext{SelectedBackend: "vaapi"})
+	for key, want := range map[string]any{"ffmpeg_stderr_bytes": counts.Total, "ffmpeg_stderr_retained_bytes": counts.Retained, "ffmpeg_stderr_capture_omitted_bytes": counts.Omitted, "ffmpeg_stderr_capture_truncated": true} {
+		if event.Properties[key] != want {
+			t.Errorf("%s=%v want %v", key, event.Properties[key], want)
+		}
 	}
-	event := GenerationException(err, GenerationFailureContext{})
-	if !strings.Contains(event.ExceptionList[0].Value, "context deadline exceeded") || !strings.Contains(event.ExceptionList[0].Value, "original filter diagnostic") || event.Properties["generation_probe_timeout_ms"] != int64(10000) {
-		t.Fatal("deadline provenance lost", event)
+	encoded, _ := json.Marshal(event.APIfy())
+	if strings.Contains(string(encoded), "private-title") {
+		t.Fatal("existing metadata redaction lost")
+	}
+	output, _ := event.Properties["ffmpeg_output"].(string)
+	if !strings.Contains(output, "VAAPI encode failed: 24; Input/output error") || !strings.Contains(output, "stderr bytes omitted") {
+		t.Fatal("terminal error or capture omission hidden", output)
 	}
 }
 
@@ -166,5 +178,17 @@ func TestSoftwareActualBackendRequiresSuccessfulProcessStart(t *testing.T) {
 				t.Fatalf("actual backend %v, want %s", actual, tc.actual)
 			}
 		})
+	}
+}
+
+func TestGenerationExecutionDeadlineIsOneFailureWithOriginalExit(t *testing.T) {
+	exit := &exec.ExitError{Stderr: []byte("[Parsed_scale_vaapi] original filter diagnostic")}
+	err := ffmpeg.WithIntelGenerationDiagnostic(ffmpeg.WithGenerationExecutionCause(exit, context.DeadlineExceeded), ffmpeg.IntelGenerationDiagnostic{Selected: "vaapi", Actual: "none", Stage: "filter", ProbeTimeout: 10 * time.Second}, ffmpeg.IntelSource{})
+	if entries := diagnostics.Split(err); entries.Count != 1 {
+		t.Fatal("timeout duplicated the task failure", entries)
+	}
+	event := GenerationException(err, GenerationFailureContext{})
+	if !strings.Contains(event.ExceptionList[0].Value, "context deadline exceeded") || !strings.Contains(event.ExceptionList[0].Value, "original filter diagnostic") || event.Properties["generation_probe_timeout_ms"] != int64(10000) {
+		t.Fatal("deadline provenance lost", event)
 	}
 }
