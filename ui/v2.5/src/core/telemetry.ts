@@ -111,8 +111,8 @@ function pluginJavascript(value: unknown): boolean {
   }
 }
 
-// Limits count retained diagnostics. Walk in source order and stop after fifty
-// accepted bundle frames, so private/foreign/malformed frames cannot hide them.
+// Bundle and plugin coordinates have independent retained-frame limits. Inspect
+// the bounded source window in order so either category can follow a full quota.
 function bundleFrames(
   value: unknown,
   accounting: IDiagnosticAccounting,
@@ -156,6 +156,10 @@ function bundleFrames(
       accounting.omitted += 1;
       continue;
     }
+    if (frames.length >= diagnosticLimits.frames) {
+      accounting.truncated += 1;
+      continue;
+    }
     const safe: Record<string, unknown> = {
       filename,
       platform: "web:javascript",
@@ -179,10 +183,6 @@ function bundleFrames(
     if (typeof frame.chunk_id === "string" && uuid.test(frame.chunk_id))
       safe.chunk_id = frame.chunk_id;
     frames.push(safe);
-    if (frames.length === diagnosticLimits.frames) {
-      if (index + 1 < value.length) accounting.truncated += 1;
-      break;
-    }
   }
   return frames;
 }
