@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/generationbudget"
 	"github.com/stashapp/stash/pkg/logger"
@@ -23,7 +24,13 @@ func (g Generator) runAdaptivePreviewChunks(ctx context.Context, chunks []previe
 		if err := run(ctx, i); err != nil {
 			return err
 		}
-		return g.validateIntelMarkerOutput(ctx, chunks[i].OutputPath)
+		command := diagnostics.PreviewCommand{}
+		if g.previewIntelPlan != nil && g.previewIntelPlan.PreviewReplay != nil {
+			command = *g.previewIntelPlan.PreviewReplay
+		}
+		// Attach the failing validation's own facts before runPreviewChunks
+		// joins leaves; a joined sibling cannot supply these facts later.
+		return g.validatePreviewOutput(ctx, chunks[i].OutputPath, command)
 	}
 	measure := func(first, count, workers int) (generationbudget.Sample, error) {
 		return b.Measure(ctx, w, func(ctx context.Context) error {

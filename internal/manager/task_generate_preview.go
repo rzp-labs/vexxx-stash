@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stashapp/stash/pkg/diagnostics"
+	"github.com/stashapp/stash/pkg/job"
+	"path/filepath"
 
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/logger"
@@ -42,8 +45,34 @@ func (t *GeneratePreviewTask) Start(ctx context.Context) error {
 			t.Options.LimitEnd = t.Scene.EndPoint
 		}
 
-		videoFile, err := instance.generationPreviewVideoFile(ctx, t.Scene.Path)
+		videoCtx := ctx
+		if t.generator != nil && t.generator.IntelPreviews != nil && t.generator.IntelPreviews.Enabled() {
+			fileID := 0
+			if t.Scene.PrimaryFileID != nil {
+				fileID = int(*t.Scene.PrimaryFileID)
+			}
+			if t.Scene.Files.Loaded() {
+				for _, file := range t.Scene.Files.List() {
+					if file != nil && file.Path == t.Scene.Path {
+						fileID = int(file.ID)
+						break
+					}
+				}
+			}
+			var retain func(diagnostics.PreviewReplayRecord) error
+			if instance.Config != nil && instance.Config.GetConfigFile() != "" {
+				dir := filepath.Join(instance.Config.GetConfigPathAbs(), "preview-replay")
+				retain = func(record diagnostics.PreviewReplayRecord) error { return diagnostics.QueuePreviewReplay(dir, record) }
+			}
+			request := generate.PreviewReplayRequest(t.Options, nil)
+			if t.Scene.VRMode != nil {
+				request.Projection = string(*t.Scene.VRMode)
+			}
+			videoCtx = diagnostics.WithPreviewRequest(diagnostics.WithPreviewSource(ctx, t.Scene.ID, fileID, job.Correlation(ctx), retain), request)
+		}
+		videoFile, err := instance.generationPreviewVideoFile(videoCtx, t.Scene.Path)
 		if err != nil {
+			err = diagnostics.WithPreviewFailure(videoCtx, err, diagnostics.PreviewCommand{Stage: "header"})
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -59,7 +88,7 @@ func (t *GeneratePreviewTask) Start(ctx context.Context) error {
 			duration = *t.Options.LimitEnd - *t.Options.LimitStart
 		}
 
-		if err := t.generateVideo(ctx, videoChecksum, duration, videoFile.FrameRate); err != nil {
+		if err := t.generateVideo(videoCtx, videoChecksum, duration, videoFile.FrameRate); err != nil {
 			logger.Errorf("error generating preview: %v", err)
 			logErrorOutput(err)
 			return fmt.Errorf("generating scene preview: %w", err)

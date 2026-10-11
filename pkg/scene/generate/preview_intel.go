@@ -3,6 +3,7 @@ package generate
 import (
 	"context"
 	"fmt"
+	"github.com/stashapp/stash/pkg/diagnostics"
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/ffmpeg/transcoder"
@@ -54,6 +55,7 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 			g.reportPreview(ffmpeg.IntelGenerationDiagnostic{Selected: "software", Actual: "software"})
 			return g.previewVideo(input, duration, options, vr, fallback, vsync2)(lockCtx, output)
 		}
+		var source ffmpeg.IntelSource
 		reject := func(stage string, reason error) error {
 			if err := lockCtx.Err(); err != nil {
 				return err
@@ -63,9 +65,16 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 				d.ProbeTimeout = intelMetadataProbeTimeout
 			}
 			g.reportPreview(d)
+			command := diagnostics.PreviewCommand{Stage: stage, InputPixels: ffmpeg.PreviewSourcePixels(source), RuntimeFingerprint: source.RuntimeFingerprint}
+			if stage == "eligibility" {
+				started := false
+				command.Started = &started
+			}
+			reason = diagnostics.WithPreviewFailure(lockCtx, reason, command)
 			return ffmpeg.WithIntelGenerationDiagnostic(fmt.Errorf("GPU scene preview %s: %w", stage, reason), d, ffmpeg.IntelSource{})
 		}
-		source, err := g.intelSourceMetadata(lockCtx, lockCtx, input, *g.IntelPreviews, true)
+		var err error
+		source, err = g.intelSourceMetadata(lockCtx, lockCtx, input, *g.IntelPreviews, true)
 		if err != nil {
 			return reject("metadata", err)
 		}
@@ -84,6 +93,8 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 		if err != nil {
 			return reject("eligibility", err)
 		}
+		command := ffmpeg.PreviewReplayCommand(plan, start, PreviewWidth, vr)
+		plan.PreviewReplay = &command
 		runner := func(ctx context.Context, args ffmpeg.Args) error { return g.generateWithContext(ctx, lockCtx, args) }
 		d, err := ffmpeg.RunIntelGenerationWork(lockCtx, plan, func(ctx context.Context) error {
 			step, offset := options.getStepSizeAndOffset(duration)
@@ -98,10 +109,20 @@ func (g Generator) scenePreviewVideo(input string, duration float64, options Pre
 				renderErr = err
 				return err
 			}
-			renderErr = hw.validateIntelMarkerOutput(ctx, output)
+			renderErr = hw.validatePreviewOutput(ctx, output, command)
 			return renderErr
 		}, nil, runner)
 		g.reportPreview(d)
 		return err
 	}
+}
+
+func (g Generator) validatePreviewOutput(ctx context.Context, output string, command diagnostics.PreviewCommand) error {
+	err := g.validateIntelMarkerOutput(ctx, output)
+	command.Stage = "output"
+	command.SeekSeconds = nil
+	command.FilterConfigured = false
+	command.StreamIndex = nil
+	command.VideoSelection = "first_video" // -select_streams v:0 is an ordinal
+	return diagnostics.WithPreviewFailure(ctx, err, command)
 }

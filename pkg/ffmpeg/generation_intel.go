@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"math"
 	"os"
 	"os/exec"
@@ -60,6 +61,8 @@ type IntelGenerationPlan struct {
 	// Preserve physical input geometry when HDR/VR plans change Source.
 	InputSource        IntelSource
 	RuntimeFingerprint string
+	// Set only by the scene MP4 preview producer.
+	PreviewReplay *diagnostics.PreviewCommand
 }
 
 func (c IntelGenerationConfig) Enabled() bool { return c.Backend != "" && c.Backend != "software" }
@@ -238,6 +241,15 @@ func runIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardw
 		return d, software(ctx)
 	}
 	if err := checkDevice(plan.Config.Device); err != nil {
+		if plan.PreviewReplay != nil {
+			command := *plan.PreviewReplay
+			command.Stage = "device"
+			started := false
+			command.Started = &started
+			command.SeekSeconds, command.StreamIndex = nil, nil
+			command.FilterConfigured = false
+			err = diagnostics.WithPreviewFailure(ctx, err, command)
+		}
 		return fallback("device", err)
 	}
 	for _, p := range plan.Probes {
@@ -247,6 +259,19 @@ func runIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardw
 		probeCtx := WithIntelProbeTimeout(ctx, plan.Config.timeout())
 		err := run(probeCtx, p.Args)
 		if err != nil {
+			if plan.PreviewReplay != nil {
+				command := *plan.PreviewReplay
+				command.Stage = p.Stage
+				frame := 1
+				command.FrameLimit = &frame
+				command.StreamIndex = &plan.Source.StreamIndex
+				command.VideoSelection = "mapped"
+				if p.Stage == "decode" {
+					command.FilterConfigured = false
+					command.TargetWidth, command.TargetHeight = nil, nil
+				}
+				err = diagnostics.WithPreviewFailure(probeCtx, err, command)
+			}
 			return fallback(p.Stage, err)
 		}
 	}

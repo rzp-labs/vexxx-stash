@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -82,6 +83,9 @@ func (g PreviewOptions) getStepSizeAndOffset(videoDuration float64) (stepSize fl
 }
 
 func (g Generator) PreviewVideo(ctx context.Context, input string, videoDuration float64, hash string, options PreviewOptions, vrMode string, fallback bool, useVsync2 bool) error {
+	request := PreviewReplayRequest(options, &videoDuration)
+	request.Projection = vrMode
+	ctx = diagnostics.WithPreviewRequest(ctx, request)
 	done := make(chan struct{})
 	lockCtx := g.LockManager.ReadLockWithCompletion(ctx, input, done)
 	defer lockCtx.Cancel()
@@ -100,7 +104,7 @@ func (g Generator) PreviewVideo(ctx context.Context, input string, videoDuration
 		g = g.WithIntelGenerationBudget()
 	}
 	if err := g.generateFile(lockCtx, g.ScenePaths, mp4Pattern, output, g.scenePreviewVideo(input, videoDuration, options, vrMode, fallback, useVsync2)); err != nil {
-		return err
+		return diagnostics.WithPreviewFailure(lockCtx, err, diagnostics.PreviewCommand{Stage: "generation"})
 	}
 
 	logger.Debug("created video preview: ", output)
@@ -262,7 +266,16 @@ func (g Generator) previewVideoChunk(lockCtx *fsutil.LockContext, ctx context.Co
 	}
 
 	if g.previewIntelPlan != nil {
-		return g.generateWithContext(ctx, lockCtx, previewIntelArgs(fn, options, *g.previewIntelPlan, useVsync2))
+		err := g.generateWithContext(ctx, lockCtx, previewIntelArgs(fn, options, *g.previewIntelPlan, useVsync2))
+		command := ffmpeg.PreviewReplayCommand(*g.previewIntelPlan, options.StartTime, PreviewWidth, vrMode)
+		command.Stage = "render"
+		command.VideoSelection = "automatic"
+		command.Audio = &options.Audio
+		command.Vsync2 = &useVsync2
+		if options.Duration > 0 {
+			command.DurationSeconds = &options.Duration
+		}
+		return diagnostics.WithPreviewFailure(ctx, err, command)
 	}
 	args := transcoder.Transcode(fn, trimOptions)
 
@@ -294,7 +307,19 @@ func (g Generator) previewVideoChunkCombine(lockCtx *fsutil.LockContext, concatF
 
 	args := transcoder.Splice(concatFilePath, spliceOptions)
 
-	return g.generate(lockCtx, args)
+	err := g.generate(lockCtx, args)
+	if g.previewIntelPlan != nil {
+		command := ffmpeg.PreviewReplayCommand(*g.previewIntelPlan, 0, PreviewWidth, "")
+		if g.previewIntelPlan.PreviewReplay != nil {
+			command = *g.previewIntelPlan.PreviewReplay
+		}
+		command.Stage = "concat"
+		command.VideoSelection = "automatic"
+		command.SeekSeconds = nil
+		command.FilterConfigured = false
+		return diagnostics.WithPreviewFailure(lockCtx, err, command)
+	}
+	return err
 }
 
 func removeFiles(list []string) {

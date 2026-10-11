@@ -342,10 +342,17 @@ func FailureException(err error, origin string, properties posthog.Properties, p
 	for key, value := range properties {
 		event.Properties.Set(key, value)
 	}
+	addPreviewReplayProperties(event.Properties, err)
 	handled, synthetic := true, false
 	event.ExceptionList[0].Mechanism = &posthog.ExceptionMechanism{Handled: &handled, Synthetic: &synthetic}
 	sanitizeStackImages(&event)
 	return event
+}
+
+func addPreviewReplayProperties(properties posthog.Properties, err error) {
+	if replay, ok := diagnostics.PreviewFailureSnapshot(err); ok {
+		properties.Set("preview_replay", replay)
+	}
 }
 func CaptureJobFailure(ctx context.Context, err error, correlation, kind string) {
 	if client == nil {

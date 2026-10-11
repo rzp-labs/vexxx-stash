@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"math/big"
 	"os/exec"
 	"strings"
@@ -29,7 +30,7 @@ func (g Generator) intelSourceMetadata(ctx context.Context, lockCtx *fsutil.Lock
 	source, err := g.Probe.IntelSourceMetadata(ctx, input, requireAudio)
 	release()
 	if err != nil {
-		return source, err
+		return source, diagnostics.WithPreviewFailure(ctx, err, diagnostics.PreviewCommand{Stage: "header"})
 	}
 	if config.Backend != "vaapi" && config.Backend != "qsv" {
 		return source, fmt.Errorf("GPU metadata requires an explicit Intel hardware backend")
@@ -40,8 +41,14 @@ func (g Generator) intelSourceMetadata(ctx context.Context, lockCtx *fsutil.Lock
 	args := ffmpeg.Args{"-v", "error", "-nostdin", "-abort_on", "empty_output"}
 	args = append(args, ffmpeg.IntelInputArgs(config, source)...)
 	args = append(args, "-noautorotate", "-display_rotation:v", "0", "-hwaccel_metadata", "1", "-i", input, "-frames:v", "1", "-an", "-c:v", "wrapped_avframe", "-f", "null", "-")
+	start, frame := 0.0, 1
+	command := diagnostics.PreviewCommand{Stage: "metadata", SeekSeconds: &start, FrameLimit: &frame, VideoSelection: "automatic"}
 	output, err := g.generateOutputWithContext(ffmpeg.WithIntelProbeTimeout(ctx, intelMetadataProbeTimeout), lockCtx, args)
 	if err != nil {
+		if diagnostics.HasPreviewSource(ctx) {
+			command.RuntimeFingerprint = ffmpeg.IntelRuntimeFingerprint(g.Encoder.Path(), config.Device)
+		}
+		err = diagnostics.WithPreviewFailure(ctx, err, command)
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
 			return source, fmt.Errorf("GPU first-frame metadata: %w: %s", err, ffmpeg.GenerationStderrText(exitErr.Stderr, 4096))
@@ -49,6 +56,10 @@ func (g Generator) intelSourceMetadata(ctx context.Context, lockCtx *fsutil.Lock
 		return source, fmt.Errorf("GPU first-frame metadata: %w", err)
 	}
 	source, err = mergeIntelFrameMetadata(source, output)
+	if err != nil && diagnostics.HasPreviewSource(ctx) {
+		command.RuntimeFingerprint = ffmpeg.IntelRuntimeFingerprint(g.Encoder.Path(), config.Device)
+	}
+	err = diagnostics.WithPreviewFailure(ctx, err, command)
 	if err == nil {
 		source.RuntimeFingerprint = ffmpeg.IntelRuntimeFingerprint(g.Encoder.Path(), config.Device)
 	}
