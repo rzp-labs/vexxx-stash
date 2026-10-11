@@ -217,6 +217,7 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(ctx)
 	defer cancel()
 	cmd := g.Encoder.Command(execCtx, args)
+	executionError := ffmpeg.TrackGenerationExecutionCause(cmd, execCtx)
 
 	var stderr ffmpeg.GenerationStderr
 	cmd.Stderr = &stderr
@@ -238,6 +239,7 @@ func (g Generator) generateAdmittedWithContext(ctx context.Context, lockCtx *fsu
 			exitErr.Stderr = captured
 			err = exitErr
 		}
+		err = executionError(err)
 		failure := g.commandError(args, admitted, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
 		failure.Stderr = capture
 		return failure
@@ -262,6 +264,7 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 	execCtx, cancel := ffmpeg.IntelProbeExecutionContext(ctx)
 	defer cancel()
 	cmd := g.Encoder.Command(execCtx, args)
+	executionError := ffmpeg.TrackGenerationExecutionCause(cmd, execCtx)
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -283,6 +286,7 @@ func (g Generator) generateOutputWithContext(ctx context.Context, lockCtx *fsuti
 			exitErr.Stderr = captured
 			err = exitErr
 		}
+		err = executionError(err)
 		failure := g.commandError(args, 1, true, fmt.Errorf("error running ffmpeg command <%s>: %w", strings.Join(args, " "), err))
 		failure.Stderr = capture
 		return nil, failure

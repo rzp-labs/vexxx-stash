@@ -8,9 +8,11 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/generationbudget"
 )
@@ -176,5 +178,17 @@ func TestSoftwareActualBackendRequiresSuccessfulProcessStart(t *testing.T) {
 				t.Fatalf("actual backend %v, want %s", actual, tc.actual)
 			}
 		})
+	}
+}
+
+func TestGenerationExecutionDeadlineIsOneFailureWithOriginalExit(t *testing.T) {
+	exit := &exec.ExitError{Stderr: []byte("[Parsed_scale_vaapi] original filter diagnostic")}
+	err := ffmpeg.WithIntelGenerationDiagnostic(ffmpeg.WithGenerationExecutionCause(exit, context.DeadlineExceeded), ffmpeg.IntelGenerationDiagnostic{Selected: "vaapi", Actual: "none", Stage: "filter", ProbeTimeout: 10 * time.Second}, ffmpeg.IntelSource{})
+	if entries := diagnostics.Split(err); entries.Count != 1 {
+		t.Fatal("timeout duplicated the task failure", entries)
+	}
+	event := GenerationException(err, GenerationFailureContext{})
+	if !strings.Contains(event.ExceptionList[0].Value, "context deadline exceeded") || !strings.Contains(event.ExceptionList[0].Value, "original filter diagnostic") || event.Properties["generation_probe_timeout_ms"] != int64(10000) {
+		t.Fatal("deadline provenance lost", event)
 	}
 }

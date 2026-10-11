@@ -334,6 +334,10 @@ func TestIntelMetadataRefusalDiagnosticPreservesBoundedStderrAndNoAssets(t *test
 			if len(diagnostics) != 1 || diagnostics[0].Stage != "metadata" || diagnostics[0].Actual != "none" || !strings.Contains(diagnostics[0].Reason, refusal) {
 				t.Fatal("FFmpeg refusal missing from strict metadata diagnostic", diagnostics)
 			}
+			var intelErr *ffmpeg.IntelGenerationError
+			if !errors.As(err, &intelErr) || intelErr.Diagnostic.ProbeTimeout != 10*time.Second || diagnostics[0].ProbeTimeout != 10*time.Second || intelErr.Diagnostic.Reason != diagnostics[0].Reason {
+				t.Fatal("metadata wrapper lost the actual probe bound or cause", intelErr, diagnostics)
+			}
 			reason := diagnostics[0].Reason
 			if long {
 				if !strings.Contains(reason, refusal) || (!strings.Contains(reason, "[truncated]") && !strings.Contains(reason, "stderr bytes omitted")) || !strings.Contains(reason, "BEYOND_DIAGNOSTIC_LIMIT") {
