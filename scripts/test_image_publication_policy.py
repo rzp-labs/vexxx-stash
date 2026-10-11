@@ -88,6 +88,22 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan(name="workflow_dispatch", event={"inputs": {"publish_test_image": "yes"}})
 
+    def test_arbitrary_stack_bases_preserve_validation_and_publication_policy(self):
+        for base in ("master", "codex/ct102-stack-01-webp", "fix/generation-telemetry-semver",
+                     "feat/v025-graphql-diagnostics", "release/v0.2.5"):
+            for path, tests, image in (("pkg/ffmpeg/options.go", True, False),
+                                       ("docker/build/x86_64/Dockerfile", True, True),
+                                       ("README.md", False, False)):
+                for draft in (True, False):
+                    with self.subTest(base=base, path=path, draft=draft):
+                        result = self.plan(name="pull_request", paths=[path],
+                                           event={"pull_request": {"base": {"ref": base}, "draft": draft}})
+                        self.assertEqual(result["deferred"], draft)
+                        self.assertEqual(result["run_tests"], tests and not draft)
+                        self.assertEqual(result["build_image"], image and not draft)
+                        self.assertFalse(result["publish"])
+                        self.assertEqual(result["image_ref"], "")
+
     def test_application_changes_do_not_package(self):
         for name in ('push', 'pull_request'):
             for path in ('pkg/ffmpeg/options.go', 'internal/api/server.go', 'go.mod', 'go.sum',
@@ -315,6 +331,14 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertEqual(document["permissions"], {"contents": "read"})
         self.assertFalse(document["on"]["workflow_dispatch"]["inputs"]["publish_test_image"]["default"])
         self.assertFalse(document['on']['workflow_dispatch']['inputs']['publish_latest']['default'])
+        # Base-branch filters suppress the entire required workflow for stacks.
+        pr = document["on"]["pull_request"]
+        self.assertNotIn("branches", pr)
+        self.assertNotIn("branches-ignore", pr)
+        self.assertTrue({"opened", "synchronize", "reopened", "ready_for_review",
+                         "converted_to_draft", "edited"} <= set(pr["types"]))
+        self.assertEqual(document["on"]["push"]["branches"], ["master"])
+        self.assertNotIn("pull_request_target", document["on"])
         jobs = document["jobs"]
         validator = jobs['ci-required']
         # runner is available in step contexts, not jobs.<job_id>.env. GitHub
