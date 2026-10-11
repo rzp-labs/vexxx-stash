@@ -72,17 +72,21 @@ export function createDiagnosticErrorLink(operationNames: ReadonlySet<string>) {
     // the same per-error contract as HTTP, never capture that aggregate wrapper.
     const apolloError =
       networkError instanceof ApolloError ? networkError : undefined;
+    const backendEventIDs = new Set<string>();
     for (const error of graphQLErrors ?? apolloError?.graphQLErrors ?? []) {
-      if (captured.has(error)) continue;
-      captured.add(error);
       const extensions = error.extensions ?? {};
       const eventID = extensions.telemetry_event_id;
       if (
         extensions.telemetry_captured === true &&
         typeof eventID === "string" &&
         uuid.test(eventID)
-      )
+      ) {
+        if (backendEventIDs.size < 50) backendEventIDs.add(eventID);
+        captured.add(error);
         continue;
+      }
+      if (captured.has(error)) continue;
+      captured.add(error);
       const code =
         typeof extensions.code === "string" && knownCodes.has(extensions.code)
           ? extensions.code
@@ -105,6 +109,13 @@ export function createDiagnosticErrorLink(operationNames: ReadonlySet<string>) {
       capture(transportError, {
         ...context,
         stage: "graphql.transport",
+        // HTTP validation errors can also carry accepted backend capture IDs.
+        // Keep the transport exception and link only markers from this response.
+        ...(backendEventIDs.size === 1
+          ? { backend_event_id: [...backendEventIDs][0] }
+          : backendEventIDs.size > 1
+          ? { backend_event_ids: [...backendEventIDs] }
+          : {}),
       });
     }
   });

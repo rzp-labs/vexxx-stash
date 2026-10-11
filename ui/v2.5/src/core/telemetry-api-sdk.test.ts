@@ -108,6 +108,51 @@ describe("installed Apollo producers through offline PostHog before_send", () =>
     ]);
     expect(safe.properties.$exception_list).toHaveLength(1);
   });
+  it("correlates an actual HTTP 400 with its accepted backend validation event without exporting the response", async () => {
+    const captured = sdkTransport();
+    const errors = [
+      {
+        message: "unknown field",
+        path: ["variable", "JaneSmithPrivateVariable", "JaneSmithPrivateKey"],
+        extensions: {
+          code: "GRAPHQL_VALIDATION_FAILED",
+          telemetry_captured: true,
+          telemetry_event_id: eventID,
+        },
+      },
+    ];
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ errors }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+    await expect(
+      run(
+        ApolloLink.from([
+          createDiagnosticErrorLink(new Set(["ScanProgress"])),
+          createUploadLink({ fetch }),
+        ])
+      )
+    ).rejects.toMatchObject({
+      name: "ServerError",
+      statusCode: 400,
+      result: { errors },
+    });
+    await vi.waitFor(() => expect(captured).toHaveLength(1));
+    expect(captured[0].properties).toMatchObject({
+      operation: "ScanProgress",
+      stage: "graphql.transport",
+      backend_event_id: eventID,
+    });
+    expect(captured[0].properties.$exception_list).toMatchObject([
+      { value: "Response not successful: Received status code 400" },
+    ]);
+    expect(JSON.stringify(captured)).not.toMatch(
+      /JaneSmithPrivate|privateAlias|variables/
+    );
+  });
+
   it.each([503, 200])(
     "protects actual HTTP response body at status %s",
     async (status) => {

@@ -28,22 +28,31 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
 
   constructor(player: VideoJsPlayer) {
     super(player);
+    this.on("dispose", () => {
+      this.clearMarkers();
+      this.markerTooltip?.remove();
+      this.markerTooltip = null;
+      this.defaultTooltip = null;
+    });
+
     player.ready(() => {
+      if (!this.player || player.isDisposed()) return;
+      const playerEl = player.el();
+      if (!playerEl) return;
+
       const tooltip = videojs.dom.createEl("div") as HTMLElement;
       tooltip.className = "vjs-marker-tooltip";
       tooltip.style.visibility = "hidden";
 
-      const parent = player
-        .el()
-        .querySelector(".vjs-progress-holder .vjs-mouse-display");
+      const parent = playerEl.querySelector(
+        ".vjs-progress-holder .vjs-mouse-display"
+      );
       if (parent) parent.appendChild(tooltip);
       this.markerTooltip = tooltip;
 
-      this.defaultTooltip = player
-        .el()
-        .querySelector<HTMLElement>(
-          ".vjs-progress-holder .vjs-mouse-display .vjs-time-tooltip"
-        );
+      this.defaultTooltip = playerEl.querySelector<HTMLElement>(
+        ".vjs-progress-holder .vjs-mouse-display .vjs-time-tooltip"
+      );
     });
   }
 
@@ -62,12 +71,15 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
   }
 
   addDotMarker(marker: IMarker) {
+    if (!this.player || this.player.isDisposed()) return;
+    const playerEl = this.player.el();
+    if (!playerEl) return;
     const duration = this.player.duration();
     const markerSet: {
       dot?: HTMLDivElement;
       range?: HTMLDivElement;
     } = {};
-    const seekBar = this.player.el().querySelector(".vjs-progress-holder");
+    const seekBar = playerEl.querySelector(".vjs-progress-holder");
 
     markerSet.dot = videojs.dom.createEl("div") as HTMLDivElement;
     markerSet.dot.className = "vjs-marker";
@@ -116,9 +128,12 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
   }
 
   private renderRangeMarkers(markers: IMarker[], layer: number) {
+    if (!this.player || this.player.isDisposed()) return;
+    const playerEl = this.player.el();
+    if (!playerEl) return;
     const duration = this.player.duration();
-    const parent = this.player.el().querySelector(".vjs-progress-control");
-    const seekBar = this.player.el().querySelector(".vjs-progress-holder");
+    const parent = playerEl.querySelector(".vjs-progress-control");
+    const seekBar = playerEl.querySelector(".vjs-progress-holder");
     if (!seekBar || !parent || !duration) return;
 
     markers.forEach((marker) => {
@@ -281,11 +296,8 @@ class MarkersPlugin extends videojs.getPlugin("plugin") {
   }
 
   clearMarkers() {
+    this.hideMarkerTooltip();
     for (const markerSet of this.markerDivs) {
-      if (markerSet.dot?.hasAttribute("marker-tooltip-shown")) {
-        this.hideMarkerTooltip();
-      }
-
       markerSet.dot?.remove();
       if (markerSet.range) markerSet.range.remove();
     }

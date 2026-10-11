@@ -20,6 +20,7 @@ import "./persist-volume";
 import "./autostart-button";
 import "./rating-button";
 import MarkersPlugin, { type IMarker } from "./markers";
+import { watchMarkerMetadata } from "./markerLifecycle";
 void MarkersPlugin;
 import "./vtt-thumbnails";
 import "./big-buttons";
@@ -987,10 +988,9 @@ export const ScenePlayer: React.FC<IScenePlayerProps> = PatchComponent(
         }
       }
 
-      requestAnimationFrame(() => {
-        markers.addDotMarkers(timestampMarkers);
-        markers.addRangeMarkers(rangeMarkers);
-      });
+      markers.clearMarkers();
+      markers.addDotMarkers(timestampMarkers);
+      markers.addRangeMarkers(rangeMarkers);
     }, [getPlayer, scene, uiConfig]);
 
     useEffect(() => {
@@ -1003,21 +1003,11 @@ export const ScenePlayer: React.FC<IScenePlayerProps> = PatchComponent(
         player.poster("");
       }
 
-      // Define the event handler outside the useEffect
-      const handleLoadMetadata = () => {
-        loadMarkers();
-      };
-
-      // Ensure markers are added after player is fully ready and sources are loaded
-      if (player.readyState() >= 1) {
-        loadMarkers();
-      } else {
-        player.on("loadedmetadata", handleLoadMetadata);
-      }
+      const markers = player.markers();
+      const stopWatching = watchMarkerMetadata(player, loadMarkers);
 
       return () => {
-        player.off("loadedmetadata", handleLoadMetadata);
-        const markers = player!.markers();
+        stopWatching();
         markers.clearMarkers();
       };
     }, [getPlayer, scene, loadMarkers]);

@@ -187,3 +187,85 @@ func graphQLRequestValues(query string) ([]string, bool) {
 	}
 	return values, true
 }
+
+// Variable coercion errors have no FieldContext. A validated operation can still
+// identify the schema field consuming the failed variable. Never export the
+// variable name, response alias, unknown input key, or variable values. Multiple
+// distinct field names remain unknown so attribution does not guess a field.
+func graphQLValidationField(ctx context.Context, err error) string {
+	gql, ok := err.(*gqlerror.Error)
+	if !ok || gql.Err != nil || gql.Extensions["code"] != errcode.ValidationFailed || len(gql.Path) < 2 || gql.Path[0] != ast.PathName("variable") || !graphql.HasOperationContext(ctx) {
+		return "unknown"
+	}
+	variable, ok := gql.Path[1].(ast.PathName)
+	op := graphql.GetOperationContext(ctx)
+	if !ok || op.Operation == nil || len(op.RawQuery) > 256*1024 {
+		return "unknown"
+	}
+	fields := make(map[string]bool)
+	seen := make(map[ast.Selection]bool)
+	visited := 0
+	complete := true
+	var usesVariable func(*ast.Value) bool
+	usesVariable = func(value *ast.Value) bool {
+		visited++
+		if visited > 4096 {
+			complete = false
+			return false
+		}
+		if value == nil {
+			return false
+		}
+		if value.Kind == ast.Variable {
+			return value.Raw == string(variable)
+		}
+		for _, child := range value.Children {
+			if usesVariable(child.Value) {
+				return true
+			}
+			if !complete {
+				return false
+			}
+		}
+		return false
+	}
+	var walk func(ast.SelectionSet)
+	walk = func(selections ast.SelectionSet) {
+		for _, selection := range selections {
+			visited++
+			if visited > 4096 {
+				complete = false
+				return
+			}
+			if seen[selection] {
+				continue
+			}
+			seen[selection] = true
+			switch field := selection.(type) {
+			case *ast.Field:
+				for _, argument := range field.Arguments {
+					if usesVariable(argument.Value) && field.Definition != nil {
+						fields[field.Definition.Name] = true
+					}
+				}
+				walk(field.SelectionSet)
+			case *ast.InlineFragment:
+				walk(field.SelectionSet)
+			case *ast.FragmentSpread:
+				if field.Definition != nil {
+					walk(field.Definition.SelectionSet)
+				}
+			}
+			if !complete {
+				return
+			}
+		}
+	}
+	walk(op.Operation.SelectionSet)
+	if complete && len(fields) == 1 {
+		for field := range fields {
+			return field
+		}
+	}
+	return "unknown"
+}

@@ -51,7 +51,7 @@ func (j *IdentifyJob) Execute(ctx context.Context, progress *job.Progress) error
 	}
 
 	// if scene ids provided, use those
-	// otherwise, batch query for all scenes - ordering by path
+	// otherwise, snapshot all eligible scene IDs - ordering by path
 	// don't use a transaction to query scenes
 	r := instance.Repository
 	if err := r.WithDB(ctx, func(ctx context.Context) error {
@@ -64,27 +64,7 @@ func (j *IdentifyJob) Execute(ctx context.Context, progress *job.Progress) error
 			return fmt.Errorf("invalid scene IDs: %w", err)
 		}
 
-		progress.SetTotal(len(sceneIDs))
-		for _, id := range sceneIDs {
-			if job.IsCancelled(ctx) {
-				break
-			}
-
-			// find the scene
-			var err error
-			scene, err := r.Scene.Find(ctx, id)
-			if err != nil {
-				return fmt.Errorf("finding scene id %d: %w", id, err)
-			}
-
-			if scene == nil {
-				return fmt.Errorf("scene with id %d not found", id)
-			}
-
-			j.identifyScene(ctx, scene, sources)
-		}
-
-		return nil
+		return j.identifyScenes(ctx, sceneIDs, sources)
 	}); err != nil {
 		return fmt.Errorf("error encountered while identifying scenes: %w", err)
 	}
@@ -107,30 +87,74 @@ func (j *IdentifyJob) identifyAllScenes(ctx context.Context, sources []identify.
 		Sort: &sort,
 	}
 
-	// get the count
-	pp := 0
+	// Snapshot IDs without Resolve's strict FindMany hydration. A scene can be
+	// deleted after this query, or leave the filter when identification marks it
+	// organized. Neither should discard the rest of the original selection.
+	pp := models.PerPageAll
 	findFilter.PerPage = &pp
-	countResult, err := r.Scene.Query(ctx, models.SceneQueryOptions{
-		QueryOptions: models.QueryOptions{
-			FindFilter: findFilter,
-			Count:      true,
-		},
-		SceneFilter: sceneFilter,
-	})
+	result, err := r.Scene.Query(ctx, scene.QueryOptions(sceneFilter, findFilter, false))
 	if err != nil {
-		return fmt.Errorf("error getting scene count: %w", err)
+		return fmt.Errorf("error querying for scenes: %w", err)
 	}
 
-	j.progress.SetTotal(countResult.Count)
+	return j.identifyQueriedScenes(ctx, result.IDs, sources)
+}
 
-	return scene.BatchProcess(ctx, r.Scene, sceneFilter, findFilter, func(scene *models.Scene) error {
+func (j *IdentifyJob) identifyScenes(ctx context.Context, sceneIDs []int, sources []identify.ScraperSource) error {
+	j.progress.SetTotal(len(sceneIDs))
+	for _, id := range sceneIDs {
+		if job.IsCancelled(ctx) {
+			break
+		}
+
+		// Look up each scene immediately before processing. Only a successful
+		// lookup with no row is skippable; database errors still fail the job.
+		s, err := instance.Repository.Scene.Find(ctx, id)
+		if err != nil {
+			return fmt.Errorf("finding scene id %d: %w", id, err)
+		}
+		j.identifyResolvedScene(ctx, id, s, sources)
+	}
+	return nil
+}
+
+// Hydrate queried IDs in bounded batches. FindByIDs tolerates rows deleted
+// since selection, unlike Resolve/FindMany, without one SQL query per scene.
+func (j *IdentifyJob) identifyQueriedScenes(ctx context.Context, ids []int, sources []identify.ScraperSource) error {
+	const batchSize = 1000
+	j.progress.SetTotal(len(ids))
+	for start := 0; start < len(ids); start += batchSize {
 		if job.IsCancelled(ctx) {
 			return nil
 		}
+		batchIDs := ids[start:min(start+batchSize, len(ids))]
+		scenes, err := instance.Repository.Scene.FindByIDs(ctx, batchIDs)
+		if err != nil {
+			return fmt.Errorf("loading scenes for Identify: %w", err)
+		}
+		byID := make(map[int]*models.Scene, len(scenes))
+		for _, s := range scenes {
+			byID[s.ID] = s
+		}
+		// FindByIDs does not guarantee order; retain the path-ordered selection.
+		for _, id := range batchIDs {
+			if job.IsCancelled(ctx) {
+				return nil
+			}
+			j.identifyResolvedScene(ctx, id, byID[id], sources)
+		}
+	}
+	return nil
+}
 
-		j.identifyScene(ctx, scene, sources)
-		return nil
-	})
+func (j *IdentifyJob) identifyResolvedScene(ctx context.Context, id int, s *models.Scene, sources []identify.ScraperSource) {
+	if s == nil {
+		logger.Warnf("Skipping scene %d during Identify: scene no longer exists", id)
+		// Progress counts checked selections, including reported skips.
+		j.progress.Increment()
+		return
+	}
+	j.identifyScene(ctx, s, sources)
 }
 
 func (j *IdentifyJob) identifyScene(ctx context.Context, s *models.Scene, sources []identify.ScraperSource) {
@@ -418,6 +442,10 @@ func (j *IdentifyJob) processRenames(ctx context.Context) {
 				s, err := r.Scene.Find(ctx, id)
 				if err != nil {
 					return fmt.Errorf("error reloading scene %d: %v", id, err)
+				}
+				if s == nil {
+					logger.Warnf("Skipping scene %d during Identify rename: scene no longer exists", id)
+					return nil
 				}
 
 				res, err := RenameSceneFile(ctx, r, s, template, false, nil, nil, nil)
