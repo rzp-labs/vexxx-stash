@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/99designs/gqlgen/graphql"
+	"github.com/99designs/gqlgen/graphql/errcode"
 	"github.com/stashapp/stash/internal/analytics"
 	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/stashapp/stash/pkg/logger"
@@ -70,6 +71,13 @@ func isInternalError(err error) bool {
 // in GraphQL error extensions. Clients can use these codes for programmatic
 // error handling.
 func errorCode(err error) string {
+	// Framework parse/validation failures happen before a resolver. Preserve
+	// their stable classification rather than replacing it with UNKNOWN.
+	if gql, ok := err.(*gqlerror.Error); ok && gql.Err == nil {
+		if code, _ := gql.Extensions["code"].(string); code == errcode.ParseFailed || code == errcode.ValidationFailed {
+			return code
+		}
+	}
 	if errors.Is(err, ErrNotAuthenticated) {
 		return "UNAUTHENTICATED"
 	}
@@ -154,6 +162,9 @@ func gqlErrorHandler(ctx context.Context, e error) *gqlerror.Error {
 		eventID = recovered.eventID
 	} else {
 		field, operation := graphQLDiagnosticContext(ctx)
+		if field == "unknown" {
+			field = graphQLValidationField(ctx, e)
+		}
 		eventID = analytics.CaptureAPIFailure(ctx, diagnostic, field, operation, code)
 	}
 	if eventID != "" {
