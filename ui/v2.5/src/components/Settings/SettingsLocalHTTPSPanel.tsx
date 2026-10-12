@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import posthogClient from "posthog-js/no-external";
 import {
   Alert,
   Box,
@@ -33,6 +34,128 @@ interface ITLSStatus {
 function errMessage(e: unknown, fallback: string): string {
   return e instanceof Error ? e.message : fallback;
 }
+
+// Each keyed URL owns its request/feedback, so removed URLs cannot report stale
+// success when HTTPS is disabled, refreshed or the settings panel is closed.
+const LocalHTTPSURL: React.FC<{ url: string }> = ({ url }) => {
+  const input = useRef<HTMLInputElement>(null);
+  const active = useRef(true);
+  const pending = useRef(false);
+  const [copying, setCopying] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
+
+  const selectURL = () => {
+    input.current?.focus();
+    input.current?.select();
+  };
+
+  const copyURL = async () => {
+    if (pending.current) return;
+    setCopied(false);
+    setCopyError(null);
+    try {
+      if (typeof navigator.clipboard?.writeText !== "function") {
+        setCopyError(
+          "Automatic copying is unavailable in this browser or connection. Select the URL and copy it manually."
+        );
+        selectURL();
+        return;
+      }
+      pending.current = true;
+      setCopying(true);
+      // Invoke directly from the click, preserving the browser's user activation.
+      await navigator.clipboard.writeText(url);
+      if (active.current) setCopied(true);
+    } catch (error) {
+      const denied =
+        error instanceof DOMException && error.name === "NotAllowedError";
+      if (!denied) {
+        console.error("Local HTTPS URL copy failed", error);
+        try {
+          posthogClient.captureException(error, {
+            operation: "clipboard.write_text",
+            component: "SettingsLocalHTTPSPanel",
+          });
+        } catch (captureError) {
+          console.error("Could not report clipboard error", captureError);
+        }
+      }
+      if (active.current) {
+        setCopyError(
+          denied
+            ? "Clipboard access was denied. Select the URL and copy it manually."
+            : `Could not copy the URL: ${errMessage(
+                error,
+                "Unknown error"
+              )}. Select the URL and copy it manually.`
+        );
+      }
+    } finally {
+      pending.current = false;
+      if (active.current) setCopying(false);
+    }
+  };
+
+  return (
+    <Box>
+      <Box
+        sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}
+      >
+        <Icon icon={faGlobe} />
+        <TextField
+          size="small"
+          label="Headset URL"
+          value={url}
+          inputRef={input}
+          InputProps={{ readOnly: true }}
+          inputProps={{
+            onFocus: (event: React.FocusEvent<HTMLInputElement>) =>
+              event.currentTarget.select(),
+          }}
+          sx={{ flexGrow: 1, minWidth: 200 }}
+        />
+        <Button
+          size="small"
+          variant="contained"
+          color="info"
+          startIcon={<Icon icon={faCopy} />}
+          onClick={copyURL}
+          disabled={copying}
+          aria-label={`Copy URL ${url}`}
+        >
+          {copying ? "Copying…" : "Copy"}
+        </Button>
+        <Button
+          size="small"
+          onClick={selectURL}
+          aria-label={`Select URL ${url}`}
+        >
+          Select URL
+        </Button>
+      </Box>
+      <Typography variant="caption" component="p" sx={{ mt: 1 }}>
+        To copy manually, select the URL and press Ctrl+C or ⌘C, or touch and
+        hold it and choose Copy.
+      </Typography>
+      <Typography role="status" aria-live="polite" variant="body2">
+        {copied ? "URL copied to clipboard." : copying ? "Copying URL…" : ""}
+      </Typography>
+      {copyError && (
+        <Alert severity="warning" sx={{ mt: 1 }}>
+          {copyError}
+        </Alert>
+      )}
+    </Box>
+  );
+};
 
 async function fetchTLSStatus(): Promise<ITLSStatus> {
   const res = await fetch("/tls/status");
@@ -181,33 +304,7 @@ export const SettingsLocalHTTPSPanel: React.FC = () => {
           </Typography>
           <Box sx={{ display: "flex", flexDirection: "column", gap: 1, mt: 1 }}>
             {status.urls.map((u) => (
-              <Box
-                key={u}
-                sx={{ display: "flex", alignItems: "center", gap: 1 }}
-              >
-                <Icon icon={faGlobe} />
-                <Typography
-                  variant="body1"
-                  component="code"
-                  sx={{
-                    fontFamily: "monospace",
-                    color: "#fff",
-                    wordBreak: "break-all",
-                    userSelect: "all",
-                  }}
-                >
-                  {u}
-                </Typography>
-                <Button
-                  size="small"
-                  variant="contained"
-                  color="info"
-                  sx={{ minWidth: 40, px: 1 }}
-                  onClick={() => navigator.clipboard.writeText(u)}
-                >
-                  <Icon icon={faCopy} />
-                </Button>
-              </Box>
+              <LocalHTTPSURL key={u} url={u} />
             ))}
           </Box>
           <Button
