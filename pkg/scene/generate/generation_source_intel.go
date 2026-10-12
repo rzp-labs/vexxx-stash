@@ -26,7 +26,7 @@ func (g Generator) IntelSourceMetadata(ctx context.Context, input string, config
 	}
 	if err != nil {
 		return source, ffmpeg.WithIntelGenerationDiagnostic(err,
-			ffmpeg.IntelGenerationDiagnostic{Selected: config.Backend, Actual: "none", Stage: "metadata"}, source)
+			ffmpeg.IntelGenerationDiagnostic{Selected: config.Backend, Actual: "none", Stage: "metadata", Reason: err.Error(), Device: config.Device, ProbeTimeout: intelMetadataProbeTimeout}, source)
 	}
 	return source, err
 }
