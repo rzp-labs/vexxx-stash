@@ -3,6 +3,7 @@ import posthogClient from "posthog-js/no-external";
 
 // MediaSession belongs to the document, not to an individual video.js player.
 const owners = new WeakMap<MediaSession, MediaSessionPlugin>();
+const plugins = new WeakMap<MediaSession, MediaSessionPlugin[]>();
 
 function reportError(error: unknown, operation: string): void {
   videojs.log.error(`Media session ${operation} failed`, error);
@@ -20,7 +21,7 @@ class MediaSessionPlugin extends videojs.getPlugin("plugin") {
   private session?: MediaSession;
   private disposed = false;
   private ready = false;
-  private pendingMetadata?: [string, string, string];
+  private metadata?: [string, string, string];
   private playRequest = 0;
   private playbackFeedback?: ReturnType<VideoJsPlayer["createModal"]>;
   private registeredActions = new Set<MediaSessionAction>();
@@ -28,30 +29,32 @@ class MediaSessionPlugin extends videojs.getPlugin("plugin") {
   constructor(player: VideoJsPlayer) {
     super(player);
     this.session = navigator.mediaSession;
+    if (this.session) {
+      const live = plugins.get(this.session) ?? [];
+      live.push(this);
+      plugins.set(this.session, live);
+    }
 
     this.on("dispose", () => {
       this.disposed = true;
       this.playRequest += 1;
-      this.pendingMetadata = undefined;
+      this.metadata = undefined;
       this.clearFeedback();
-      this.releaseActionHandlers();
+      if (this.session) {
+        const live = plugins
+          .get(this.session)
+          ?.filter((plugin) => plugin !== this);
+        if (live?.length) plugins.set(this.session, live);
+        else plugins.delete(this.session);
+        this.updateOwner();
+      }
     });
 
     player.ready(() => {
       if (this.ready || this.disposed || player.isDisposed() || !this.session)
         return;
       this.ready = true;
-      // Keep the current player's controls until this replacement can register.
-      this.registeredActions = new Set(
-        owners.get(this.session)?.registeredActions
-      );
-      owners.set(this.session, this);
-      player.addClass("vjs-media-session");
-      this.setActionHandlers();
-      this.updatePlaybackState();
-      const metadata = this.pendingMetadata;
-      this.pendingMetadata = undefined;
-      if (metadata) this.setMetadata(...metadata);
+      this.updateOwner();
     });
 
     player.on("play", () => {
@@ -75,10 +78,8 @@ class MediaSessionPlugin extends videojs.getPlugin("plugin") {
 
   // manually set poster since it's only set on useEffect
   public setMetadata(title: string, artist: string, poster: string): void {
-    if (!this.ready && !this.disposed) {
-      this.pendingMetadata = [title, artist, poster];
-      return;
-    }
+    if (this.disposed) return;
+    this.metadata = [title, artist, poster];
     if (!this.isActive() || typeof MediaMetadata !== "function") return;
     try {
       this.session!.metadata = new MediaMetadata({
@@ -114,6 +115,37 @@ class MediaSessionPlugin extends videojs.getPlugin("plugin") {
       !!this.session &&
       owners.get(this.session) === this
     );
+  }
+
+  private updateOwner(): void {
+    const { session } = this;
+    if (!session) return;
+    // Creation order chooses the newest usable player, regardless of ready order.
+    // Pending replacements leave existing controls active; disposal allows the
+    // newest surviving ready player to resume ownership.
+    const next = plugins
+      .get(session)
+      ?.slice()
+      .reverse()
+      .find(
+        (plugin) =>
+          plugin.ready &&
+          !plugin.disposed &&
+          !!plugin.player &&
+          !plugin.player.isDisposed()
+      );
+    const current = owners.get(session);
+    if (next === current) return;
+    if (!next) {
+      current?.releaseActionHandlers();
+      return;
+    }
+    next.registeredActions = new Set(current?.registeredActions);
+    owners.set(session, next);
+    next.player.addClass("vjs-media-session");
+    next.setActionHandlers();
+    next.updatePlaybackState();
+    if (next.metadata) next.setMetadata(...next.metadata);
   }
 
   private async play(): Promise<void> {

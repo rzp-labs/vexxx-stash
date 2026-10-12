@@ -324,6 +324,62 @@ describe("optional media session controls", () => {
     expect(api.metadata).toMatchObject({ data: { title: "replacement" } });
   });
 
+  it("does not let an older late-ready player replace a newer owner's controls or metadata", () => {
+    const { api, handlers } = session();
+    vi.stubGlobal(
+      "MediaMetadata",
+      class {
+        constructor(public data: unknown) {}
+      }
+    );
+    const older = createPlayer();
+    older.plugin.setMetadata("older", "artist", "poster");
+    const newer = createPlayer();
+    newer.plugin.setMetadata("newer", "artist", "poster");
+    newer.ready();
+    older.ready();
+    handlers.get("pause")?.();
+    expect(newer.mock.pause).toHaveBeenCalledOnce();
+    expect(older.mock.pause).not.toHaveBeenCalled();
+    expect(api.metadata).toMatchObject({ data: { title: "newer" } });
+  });
+
+  it("activates the surviving ready player after a newer pending replacement is disposed", () => {
+    const { handlers } = session();
+    const older = createPlayer();
+    const newer = createPlayer();
+    older.ready();
+    newer.dispose();
+    newer.ready();
+    handlers.get("pause")?.();
+    expect(older.mock.pause).toHaveBeenCalledOnce();
+    expect(newer.mock.pause).not.toHaveBeenCalled();
+  });
+
+  it("restores the surviving ready player's controls and metadata when its newer owner is disposed", () => {
+    const { api, handlers } = session();
+    vi.stubGlobal(
+      "MediaMetadata",
+      class {
+        constructor(public data: unknown) {}
+      }
+    );
+    const older = createPlayer();
+    older.plugin.setMetadata("older", "artist", "poster");
+    older.ready();
+    const newer = createPlayer();
+    newer.plugin.setMetadata("newer", "artist", "poster");
+    newer.ready();
+    older.plugin.setMetadata("updated older", "artist", "poster");
+    expect(api.metadata).toMatchObject({ data: { title: "newer" } });
+    newer.dispose();
+    handlers.get("pause")?.();
+    expect(older.mock.pause).toHaveBeenCalledOnce();
+    expect(api.metadata).toMatchObject({ data: { title: "updated older" } });
+    older.dispose();
+    expect([...handlers.values()]).toEqual([null, null, null, null]);
+  });
+
   it.each(["loadstart", "play", "plugin dispose", "player dispose"])(
     "closes already-open failure feedback on %s",
     async (transition) => {
