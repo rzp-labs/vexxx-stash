@@ -36,6 +36,10 @@ fragment ConfigGeneralData on ConfigGeneralResult {
   generationThreads
   generationRestartRequired
   generationConfigurationError
+  generationTuning {
+    sprite { automaticConcurrency measurementState }
+    preview { automaticConcurrency measurementState }
+  }
   activeGeneration {
     markerBackend
     previewBackend

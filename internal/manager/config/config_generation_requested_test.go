@@ -443,3 +443,66 @@ func TestAutoEffectiveLimitsDoNotRewriteSavedRequestOrRequireRestart(t *testing.
 		t.Fatal("Auto total rejected explicit GPU limit", err)
 	}
 }
+
+func TestIndependentAutoPreservesSavedConfigurationWithoutMigrationWrites(t *testing.T) {
+	for _, total := range []int{0, 6} {
+		for _, gpu := range []int{0, 6} {
+			c := InitializeEmpty()
+			c.filePath = filepath.Join(t.TempDir(), "config.yml")
+			c.SetString(SpriteGenerationBackend, "vaapi")
+			c.SetString(PreviewGenerationBackend, "vaapi")
+			c.SetInt(GenerationMaxProcesses, total)
+			c.SetInt(GenerationMaxGPUProcesses, gpu)
+			c.SetInt(GenerationThreads, 3)
+			if err := c.Write(); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(c.filePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted := InitializeEmpty()
+			if err := restarted.load(c.filePath); err != nil {
+				t.Fatal(err)
+			}
+			requested, err := restarted.GetRequestedGenerationConfiguration()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if requested.MaxProcesses != total || requested.MaxGPUProcesses != gpu || requested.Threads != 3 {
+				t.Fatal("legacy requests changed", requested)
+			}
+			b := restarted.GetIntelGenerationBudget()
+			for _, kind := range []generationbudget.WorkloadKind{generationbudget.SpriteWorkload, generationbudget.PreviewWorkload} {
+				if !b.AutoWorkload(generationbudget.Workload{Kind: kind}) {
+					t.Fatal("manual shared ceiling disabled Auto")
+				}
+				if got := restarted.GetGenerationWorkloadTuning(kind); got.AutomaticConcurrency != nil || got.MeasurementState != generationbudget.NotMeasured {
+					t.Fatal("restart reused evidence")
+				}
+			}
+			after, _ := os.ReadFile(c.filePath)
+			if !bytes.Equal(before, after) {
+				t.Fatal("reading new runtime rewrote existing YAML")
+			}
+			for _, key := range []string{"generation.sprites.max_gpu_lanes", "generation.previews.max_gpu_lanes"} {
+				if restarted.main.Exists(key) {
+					t.Fatal("new override key introduced")
+				}
+			}
+			if err := restarted.Write(); err != nil {
+				t.Fatal(err)
+			}
+			after, _ = os.ReadFile(c.filePath)
+			if !bytes.Equal(before, after) {
+				t.Fatal("ordinary save introduced migration keys")
+			}
+			if err := restarted.ApplyGenerationConfigurationPatch(GenerationConfigurationPatch{MaxProcesses: ptr(4), MaxGPUProcesses: ptr(4)}); err != nil {
+				t.Fatal(err)
+			}
+			if restarted.GetIntelGenerationBudget() != b || !restarted.GenerationRestartRequired() {
+				t.Fatal("saved edits replaced live scheduler")
+			}
+		}
+	}
+}

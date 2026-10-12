@@ -39,6 +39,13 @@ func TestIntelBudgetDoesNotImplicitlyEnableCPUGeneration(t *testing.T) {
 					c.SetInt(GenerationThreads, limits.Threads)
 					intel := c.GetIntelGenerationBudget()
 					want := limits.Resolve(generationbudget.DetectResources("/dev/dri/renderD128"))
+					if backend != MarkerGenerationBackend {
+						expected, err := generationbudget.NewIndependentAutoForDevice(limits, "/dev/dri/renderD128")
+						if err != nil {
+							t.Fatal(err)
+						}
+						want = expected.Settings()
+					}
 					if intel == nil || intel.Settings() != want || intel != c.GetIntelGenerationBudget() {
 						t.Fatal("Intel limits or frozen scheduler lost")
 					}

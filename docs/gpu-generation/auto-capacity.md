@@ -46,7 +46,7 @@ When more tiles are needed, the best tested count is remeasured on that expanded
 subset before comparing a new count; that baseline consumes the trial/time budget.
 Faster validated trials grow; rejected larger trials can refine between that
 count and the faster tested count. Small/one-row sheets, frame-mode sheets,
-fixed total one, manual GPU limits and a complete-output baseline skip partial
+a shared total or GPU ceiling of one and a complete-output baseline skip partial
 calibration. Partial trials are never published. Cancellation drains children and
 removes temporary seek lists and output.
 
@@ -106,3 +106,33 @@ candidate/file/window against that file's working manual baseline under realisti
 production-equivalent limits. Count calibration in end-to-end time. Record cold
 and warm results, actual lanes/child overlap, memory, all output cells/frames,
 timing/audio and zero software generation.
+
+
+## Independent sprite and preview Auto selections (VEX-71)
+
+Sprite and preview GPU concurrency now tunes independently inside the same
+scheduler. Existing positive total and GPU requests remain shared hard ceilings;
+they no longer disable sprite/preview Auto learning. Other rendering families
+retain their existing Auto/manual behavior. FIFO admission, per-plan limits,
+resource reservations, cancellation and strict GPU rendering still apply.
+
+The read-only `generationTuning` response exposes two workload-type selections,
+without filenames or overrides. `automaticConcurrency` is nullable and
+`measurementState` is `NOT_MEASURED`, `ADAPTING` or `MEASURED`. A number is present
+only when a validated complete render supports the currently selected type-wide
+ceiling. Seeds, partial trials and pending untested counts never qualify a number.
+Unknown allocation counters do not invent costs or justify growth; an isolated
+complete-output timing can still qualify its actual count. Contended or failed
+outputs cannot establish evidence. Measurement requests do not start media work.
+Single-segment previews measure their ordinary rendering command and qualify the
+count only after the existing final validation succeeds.
+
+The type-wide ceiling is the maximum of its current in-memory plan selections,
+subject to shared ceilings. A later smaller file cannot replace it with a
+last-file number. Each job still receives its own potentially smaller grant,
+subject to source/plan evidence and shared resource availability. If a larger
+untested plan changes that aggregate selection, the displayed number is withheld
+until complete-output evidence supports it. Scoped cleanup retains only valid
+current evidence; revision checks prevent an older overlapping cleanup from
+erasing or replacing newer results. Restart discards observations. These counts
+are not universal hardware capability limits and do not repair renderer errors.

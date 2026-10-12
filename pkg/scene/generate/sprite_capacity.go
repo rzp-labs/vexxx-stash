@@ -85,7 +85,7 @@ func (g Generator) tuneSprite(ctx context.Context, lockCtx *fsutil.LockContext, 
 		}
 		renderErr = ffmpeg.GenerationPressure(renderErr)
 		grow := budget.RecordSample(w, sample, lanes, n, demand, renderErr)
-		logger.Infof("[generator] Auto sprite trial=%d lanes=%d tiles=%d elapsed=%s rate=%.3f memory_peak=%d gpu_peak=%d memory_known=%t gpu_known=%t isolated=%t next=%d error=%v", trial+1, lanes, n, sample.Elapsed, float64(n)/sample.Elapsed.Seconds(), sample.MemoryPeak, sample.GPUPeak, sample.MemoryKnown, sample.GPUKnown, sample.Isolated, budget.Settings().MaxGPUProcesses, renderErr)
+		logger.Infof("[generator] Auto sprite trial=%d lanes=%d tiles=%d elapsed=%s rate=%.3f memory_peak=%d gpu_peak=%d memory_known=%t gpu_known=%t isolated=%t next=%d error=%v", trial+1, lanes, n, sample.Elapsed, float64(n)/sample.Elapsed.Seconds(), sample.MemoryPeak, sample.GPUPeak, sample.MemoryKnown, sample.GPUKnown, sample.Isolated, budget.PrepareWorkload(w), renderErr)
 		if renderErr != nil {
 			if generationbudget.IsPressure(renderErr) && !pressureRetry && lanes > 1 {
 				pressureRetry = true

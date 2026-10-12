@@ -31,12 +31,17 @@ import {
   validateGenerationSettings,
 } from "./generationSettingsValidation";
 import { NumberField } from "src/utils/form";
+import { useGenerationTuningRefresh } from "./useGenerationTuningRefresh";
 
 // Save generation requests together, so coupled GPU/total limits are validated
 // as a complete proposal. Running values come only from the server snapshot.
 export const IntelGenerationSettings: React.FC = () => {
   const intl = useIntl();
-  const { data, client } = GQL.useConfigurationQuery();
+  const { data, client, refetch, loading, error } = GQL.useConfigurationQuery({
+    fetchPolicy: "cache-and-network",
+    notifyOnNetworkStatusChange: true,
+  });
+  const tuningStale = useGenerationTuningRefresh(refetch, loading);
   const persisted = data?.configuration.general;
   const [draft, setDraft] = useState<GQL.ConfigGeneralInput>({});
   const [saveError, setSaveError] = useState<string>();
@@ -106,6 +111,18 @@ export const IntelGenerationSettings: React.FC = () => {
 
   if (!persisted) return null;
   const active = persisted.activeGeneration;
+  const concurrencyValue = (kind: "sprite" | "preview") => {
+    const tuning = persisted.generationTuning?.[kind];
+    const value = tuning?.automaticConcurrency;
+    return !tuningStale &&
+      !loading &&
+      !error &&
+      tuning?.measurementState === GQL.GenerationMeasurementState.Measured &&
+      value != null &&
+      value > 0
+      ? value
+      : intl.formatMessage({ id: "config.general.generation.adapting" });
+  };
   const validation = validateGenerationSettings(draft);
   const changed = Object.entries(draft).some(
     ([key, value]) => persisted[key as keyof typeof persisted] !== value
@@ -217,6 +234,25 @@ export const IntelGenerationSettings: React.FC = () => {
         <Typography variant="body2" sx={{ mb: 1 }}>
           <FormattedMessage id="config.general.generation.diagnostics" />
         </Typography>
+        {(["sprite", "preview"] as const).map((kind) => (
+          <Setting
+            key={kind}
+            id={`generation-${kind}-concurrency`}
+            headingID={`config.general.generation.${kind}_gpu_concurrency`}
+            subHeading={
+              <Box
+                component="span"
+                sx={{
+                  fontFamily: '"Courier New", Courier, monospace',
+                  fontSize: "1rem",
+                  color: "text.primary",
+                }}
+              >
+                {concurrencyValue(kind)}
+              </Box>
+            }
+          />
+        ))}
         {(
           [
             "generationMarkerBackend",

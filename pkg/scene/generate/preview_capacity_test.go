@@ -301,3 +301,135 @@ func TestContendedWholePreviewDoesNotRefineUncomparedTrial(t *testing.T) {
 		t.Fatal("contended window refined an uncompared trial")
 	}
 }
+
+func TestIndependentAutoPreviewValidatesEvidenceUnderManualSharedCeiling(t *testing.T) {
+	for _, sharedGPU := range []int{1, 4} {
+		for _, single := range []bool{false, true} {
+			for _, validPackets := range []bool{true, false} {
+				t.Run(strconv.Itoa(sharedGPU)+"/"+strconv.FormatBool(single)+"/"+strconv.FormatBool(validPackets), func(t *testing.T) {
+					paths := previewTestPaths{markerTestPaths{t.TempDir()}}
+					binary := filepath.Join(t.TempDir(), "ffmpeg")
+					script := `#!/bin/sh
+if [ "$1" = '-version' ];then echo 'ffmpeg version 8.1';exit 0;fi
+seek=0;mode=;input=;prev=
+for arg do
+ if [ "$prev" = '-ss' ];then seek="$arg";fi
+ if [ "$prev" = '-f' ];then mode="$arg";fi
+ if [ "$prev" = '-i' ];then input="$arg";fi
+ prev="$arg"
+done
+output="$prev"
+if [ "$mode" = 'concat' ];then
+ : > "$output"
+ while read label chunk;do
+  chunk=$(printf '%s' "$chunk" | tr -d "'")
+  cat "$(dirname "$input")/$chunk" >> "$output"
+ done < "$input"
+else
+ case " $* " in *'-hwaccel vaapi'*'-hwaccel_strict 1'*'-c:v h264_vaapi'*) ;; *) exit 44;; esac
+ sleep 0.12
+ printf '%s\n' "$seek" > "$output"
+fi
+`
+					if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+						t.Fatal(err)
+					}
+					probe := filepath.Join(t.TempDir(), "ffprobe")
+					packets := "1"
+					if !validPackets {
+						packets = "0"
+					}
+					probeScript := "#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffprobe version 8.1';exit 0;fi\nprintf '%s' '{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"nb_read_packets\":\"" + packets + "\"}]}'\n"
+					if err := os.WriteFile(probe, []byte(probeScript), 0700); err != nil {
+						t.Fatal(err)
+					}
+					budget, err := generationbudget.NewIndependentAutoWithResources(generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: sharedGPU}, func() generationbudget.Resources {
+						return generationbudget.Resources{CPUs: 4, MemoryAvailable: 6 << 30, GPUAvailable: -1}
+					}, func(int) generationbudget.ProcessResources {
+						return generationbudget.ProcessResources{Memory: 32 << 20, GPU: 64 << 20}
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					source := ffmpeg.IntelSource{Codec: "hevc", Profile: "Main 10", BitDepth: 10, PixelFormat: "p010le", Width: 8192, Height: 4096, StreamIndex: 0, SampleAspectRatio: "1:1", ColorSpace: "bt709", ColorRange: "tv", RuntimeFingerprint: "fixture-runtime"}
+					plan, err := ffmpeg.NewIntelPreviewPlan(ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}, source, "input", 0, 640)
+					if err != nil {
+						t.Fatal(err)
+					}
+					g := Generator{Encoder: ffmpeg.NewEncoder(binary), Probe: ffmpeg.NewFFProbe(probe), LockManager: fsutil.NewReadLockManager(), ScenePaths: paths, Budget: budget, previewIntelPlan: &plan}
+					g = g.withGenerationWorkload(plan, "scene-preview", "input")
+					if budget.PrepareWorkload(*g.capacityWorkload) != 1 {
+						t.Fatal("fixture did not start with oversized estimate")
+					}
+					done := make(chan struct{})
+					lock := g.LockManager.ReadLockWithCompletion(context.Background(), "input", done)
+					defer lock.Cancel()
+					defer close(done)
+					output := paths.GetVideoPreviewPath("")
+					if err := os.WriteFile(output, []byte("existing"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					duration := 150.0
+					if single {
+						duration = 0.5
+					}
+					err = g.previewVideo("input", duration, PreviewOptions{Segments: 15, SegmentDuration: 0.75}, "", false, false)(lock, output)
+					if err == nil {
+						err = g.validateIntelMarkerOutput(lock, output)
+					}
+					g.finishCapacityWork(lock, err)
+					data, _ := os.ReadFile(output)
+					if validPackets {
+						if err != nil {
+							t.Fatal(err)
+						}
+						var expected strings.Builder
+						count := 15
+						if single {
+							count = 1
+						}
+						for i := 0; i < count; i++ {
+							expected.WriteString(strconv.Itoa(i*10) + "\n")
+						}
+						if string(data) != expected.String() {
+							t.Fatal("adaptation omitted/reordered requested chunks", string(data))
+						}
+						want := min(2, sharedGPU)
+						if single {
+							want = 1
+						}
+						if budget.PrepareWorkload(*g.capacityWorkload) != want || !budget.HasMeasuredCapacity(*g.capacityWorkload) || !single && budget.HasCanonicalSample(*g.capacityWorkload, 15) {
+							t.Fatalf("cold preview did not retain its exercised count: settings=%+v observation=%+v", budget.Settings(), g.capacityObservation)
+						}
+					} else {
+						if err == nil || !single && string(data) != "existing" || budget.PrepareWorkload(*g.capacityWorkload) != 1 {
+							t.Fatal("invalid chunk published or taught capacity", err, string(data), budget.Settings())
+						}
+					}
+					expected := min(2, sharedGPU)
+					if single {
+						expected = 1
+					}
+					current := budget.WorkloadTuning(generationbudget.PreviewWorkload)
+					if validPackets && (current.MeasurementState != generationbudget.Measured || current.AutomaticConcurrency == nil || *current.AutomaticConcurrency != expected) {
+						t.Fatal("complete preview did not qualify selected count", current)
+					}
+					if !validPackets && (current.AutomaticConcurrency != nil || current.MeasurementState != generationbudget.NotMeasured) {
+						t.Fatal("failed preview qualified measurement", current)
+					}
+					if budget.Settings().MaxGPUProcesses != sharedGPU {
+						t.Fatal("Auto replaced positive shared ceiling")
+					}
+					if sprite := budget.WorkloadTuning(generationbudget.SpriteWorkload); sprite.AutomaticConcurrency != nil || sprite.MeasurementState != generationbudget.NotMeasured {
+						t.Fatal("preview populated sprite value", sprite)
+					}
+					if entries, _ := os.ReadDir(paths.dir); len(entries) != 1 {
+						t.Fatal("chunk/concat temporaries leaked", entries)
+					}
+				})
+			}
+		}
+
+	}
+
+}

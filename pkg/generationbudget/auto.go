@@ -7,10 +7,20 @@ import (
 	"time"
 )
 
+// WorkloadKind identifies rendering families for independent Auto tuning.
+type WorkloadKind uint8
+
+const (
+	OtherWorkload WorkloadKind = iota
+	SpriteWorkload
+	PreviewWorkload
+)
+
 // Workload describes a capability-checked rendering plan. Key must include the
 // device/runtime, source format/dimensions and output filter/encoder operation.
 // Costs are estimates used for admission; successful execution proves capacity.
 type Workload struct {
+	Kind                      WorkloadKind
 	Key                       string
 	MemoryPerSlot, GPUPerSlot int64
 	// Missing runtime identity permits a resource-based trial but no reuse of
@@ -18,6 +28,8 @@ type Workload struct {
 	RuntimeUnidentified bool
 }
 type capacity struct {
+	kind                        WorkloadKind
+	canonicalLimit              int
 	limit, ceiling              int
 	successes                   int
 	measured                    bool
@@ -64,7 +76,9 @@ func newAdaptive(requested Settings, resources func() Resources) *Budget {
 	if cpuLimit == 0 {
 		cpuLimit = (Settings{}).Resolve(r).MaxProcesses
 	}
-	return &Budget{settings: effective, requested: requested, cpuLimit: cpuLimit, sharedGPULimit: effective.MaxGPUProcesses, resources: resources, processResources: DetectProcessResources, learning: make(map[string]*capacity), learningRevisions: make(map[string]uint64), gpuByWorkload: make(map[string]int), memoryLimit: r.MemoryAvailable / 2, gpuMemoryLimit: r.GPUAvailable / 2}
+	b := &Budget{settings: effective, requested: requested, cpuLimit: cpuLimit, sharedGPULimit: effective.MaxGPUProcesses, resources: resources, processResources: DetectProcessResources, learning: make(map[string]*capacity), learningRevisions: make(map[string]uint64), gpuByWorkload: make(map[string]int), gpuByKind: make(map[WorkloadKind]int), memoryLimit: r.MemoryAvailable / 2, gpuMemoryLimit: r.GPUAvailable / 2}
+
+	return b
 }
 
 func (b *Budget) AutoGPU() bool    { return b != nil && b.requested.MaxGPUProcesses == 0 }
@@ -88,8 +102,8 @@ func (b *Budget) PrepareWorkload(w Workload) int {
 }
 
 func (b *Budget) selectCapacity(w Workload) int {
-	if !b.AutoGPU() || w.Key == "" {
-		return b.settings.MaxGPUProcesses
+	if !b.AutoWorkload(w) || w.Key == "" {
+		return b.workloadLimit(w.Kind)
 	}
 	r := b.resources()
 	c := b.learning[w.Key]
@@ -130,6 +144,9 @@ func (b *Budget) selectCapacity(w Workload) int {
 			ceiling = min(ceiling, gpuCeiling)
 		}
 	}
+	if b.requested.MaxGPUProcesses > 0 {
+		ceiling = min(ceiling, b.requested.MaxGPUProcesses)
+	}
 	if w.RuntimeUnidentified {
 		c = nil
 	}
@@ -137,22 +154,22 @@ func (b *Budget) selectCapacity(w Workload) int {
 		// Capability probes have exercised one actual decoder/filter/encoder. The
 		// initial trial also consumes detected headroom and estimated surface costs;
 		// it is not a claim that VRAM capacity implies safe decoder concurrency.
-		c = &capacity{limit: max(1, int(math.Sqrt(float64(ceiling)))), ceiling: ceiling}
+		c = &capacity{kind: w.Kind, limit: max(1, int(math.Sqrt(float64(ceiling)))), ceiling: ceiling}
 		if !w.RuntimeUnidentified {
 			b.learning[w.Key] = c
 		}
 	}
 	c.ceiling = ceiling
 	c.limit = min(c.limit, ceiling)
-	b.updateCapacity(c.limit)
-	return b.settings.MaxGPUProcesses
+	b.updateWorkloadCapacity(w, c.limit)
+	return c.limit
 }
 
 // Observe records actual rendering (never a probe or cancelled job). Resource
 // pressure reduces the workload's trial capacity. Successful validated renders
 // cautiously grow within resource limits.
 func (b *Budget) Observe(w Workload, lanes int, elapsed time.Duration, units int, err error) {
-	if !b.AutoGPU() || w.Key == "" || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if !b.AutoWorkload(w) || w.Key == "" || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	b.mu.Lock()
@@ -164,7 +181,7 @@ func (b *Budget) Observe(w Workload, lanes int, elapsed time.Duration, units int
 			if IsPressure(err) {
 				lanes = max(1, lanes/2)
 			}
-			b.updateCapacity(lanes)
+			b.updateWorkloadCapacity(w, lanes)
 			b.dispatch()
 		}
 		return
@@ -192,7 +209,7 @@ func (b *Budget) Observe(w Workload, lanes int, elapsed time.Duration, units int
 	} else if err != nil {
 		c.successes = 0
 	}
-	b.updateCapacity(c.limit)
+	b.updateWorkloadCapacity(w, c.limit)
 	b.dispatch()
 }
 
@@ -231,10 +248,16 @@ func (e *PressureError) Unwrap() error { return e.Err }
 func IsPressure(err error) bool        { var p *PressureError; return errors.As(err, &p) }
 
 func (b *Budget) memorySlots(w *waiter, slots int) (int, bool) {
-	if !b.AutoGPU() || w.workload.MemoryPerSlot <= 0 && w.workload.GPUPerSlot <= 0 {
+	if !b.resourceProtected() || w.workload.MemoryPerSlot <= 0 && w.workload.GPUPerSlot <= 0 {
 		return slots, false
 	}
 	r := b.resources()
+	if r.MemoryAvailable > 0 {
+		b.memoryLimit = max(b.memoryLimit, r.MemoryAvailable/2)
+	}
+	if r.GPUAvailable > 0 {
+		b.gpuMemoryLimit = max(b.gpuMemoryLimit, r.GPUAvailable/2)
+	}
 	// Costs are estimates, not measured minimum allocations. Once capability
 	// probes have passed, let an otherwise idle budget exercise one lane even
 	// when the estimate exceeds half-headroom. Its full estimated reservation
@@ -259,14 +282,14 @@ func (b *Budget) memorySlots(w *waiter, slots int) (int, bool) {
 	return slots, false
 }
 func (b *Budget) reserve(w *waiter) {
-	if !b.AutoGPU() {
+	if !b.resourceProtected() {
 		return
 	}
 	b.reservedMemory += int64(w.slots) * w.workload.MemoryPerSlot
 	b.reservedGPU += int64(w.slots) * w.workload.GPUPerSlot
 }
 func (b *Budget) unreserve(w *waiter) {
-	if !b.AutoGPU() {
+	if !b.resourceProtected() {
 		return
 	}
 	b.reservedMemory -= int64(w.slots) * w.workload.MemoryPerSlot

@@ -662,3 +662,43 @@ func TestResidentSpriteEntrySelectsMixedAutoManualCapacity(t *testing.T) {
 		})
 	}
 }
+
+func TestResidentSpriteAutoUnderSharedCeilingWithPreviewAdmission(t *testing.T) {
+	g, dir := residentSpriteTestGenerator(t, generationbudget.Settings{})
+	var err error
+	g.Budget, err = generationbudget.NewIndependentAutoWithResources(generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: 4}, func() generationbudget.Resources {
+		return generationbudget.Resources{CPUs: 4, MemoryAvailable: 16 << 30, GPUAvailable: -1}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, rp, err := g.Budget.AcquireWorkload(ctx, generationbudget.Workload{Kind: generationbudget.PreviewWorkload, Key: "other-preview"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rp()
+	output := residentSpriteOutput(t, dir, "sheet")
+	residentSpriteRelease(t, dir, "sheet")
+	if _, err = g.IntelSpriteSheet(ctx, "synthetic.mp4", fullSpriteTimes(), 9, 9, output); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range spriteHistory(t, dir) {
+		if len(command.Seeks) < 1 || len(command.Seeks) > 3 {
+			t.Fatal("sprite bypassed simultaneous preview's shared reservation", len(command.Seeks))
+		}
+	}
+	if g.Budget.Settings().MaxGPUProcesses != 4 {
+		t.Fatal("independent Auto changed shared ceiling")
+	}
+	if snapshot := g.Budget.WorkloadTuning(generationbudget.SpriteWorkload); snapshot.AutomaticConcurrency != nil {
+		t.Fatal("contended render qualified isolated evidence", snapshot)
+	}
+	rp()
+	release, err := g.Budget.AcquireN(ctx, generationbudget.GPU, 4)
+	if err != nil {
+		t.Fatal("render leaked shared permits", err)
+	}
+	release()
+}

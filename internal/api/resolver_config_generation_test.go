@@ -89,3 +89,43 @@ func TestConfigGeneralScenePreviewRequestAndSchema(t *testing.T) {
 		t.Fatal("scene schema fields unavailable", err)
 	}
 }
+
+func TestGenerationTuningIsReadOnlyAndInitiallyUnmeasured(t *testing.T) {
+	c := config.InitializeEmpty()
+	c.SetString(config.SpriteGenerationBackend, "vaapi")
+	c.SetString(config.PreviewGenerationBackend, "vaapi")
+	c.SetInt(config.GenerationMaxProcesses, 6)
+	c.SetInt(config.GenerationMaxGPUProcesses, 6)
+	before, err := c.GetRequestedGenerationConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		got := makeConfigGeneralResult()
+		if got.GenerationTuning == nil {
+			t.Fatal("tuning absent")
+		}
+		for _, state := range []*GenerationWorkloadTuning{got.GenerationTuning.Sprite, got.GenerationTuning.Preview} {
+			if state.AutomaticConcurrency != nil || state.MeasurementState != GenerationMeasurementStateNotMeasured {
+				t.Fatal("query promoted seed or started rendering", state)
+			}
+		}
+	}
+	after, err := c.GetRequestedGenerationConfiguration()
+	if err != nil || after != before {
+		t.Fatal("query rewrote requests")
+	}
+	schema := NewExecutableSchema(Config{}).Schema()
+	query := `query { configuration { general { generationTuning { sprite { automaticConcurrency measurementState } preview { automaticConcurrency measurementState } } } } }`
+	if _, err := gqlparser.LoadQuery(schema, query); err != nil {
+		t.Fatal(err)
+	}
+	for _, rejected := range []string{
+		`mutation { configureGeneral(input: { generationMaxSpriteProcesses: 2 }) { generationThreads } }`,
+		`query { configuration { general { generationTuning { sprite { activeOverride savedOverride } } } } }`,
+	} {
+		if _, err := gqlparser.LoadQuery(schema, rejected); err == nil {
+			t.Fatal("unused override surface exposed")
+		}
+	}
+}

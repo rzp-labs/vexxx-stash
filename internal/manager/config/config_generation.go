@@ -37,7 +37,11 @@ func (i *Config) readGenerationSettings() (generationSettings, error) {
 	// Intel stages always have bounded admission. Ordinary CPU generation shares
 	// this scheduler only when the caller explicitly enables the shared budget.
 	if requested.BudgetEnabled || s.marker != "software" || s.sprite != "software" || s.preview != "software" {
-		s.budget, err = generationbudget.NewForDevice(requested.Limits(), s.device)
+		if s.sprite != "software" || s.preview != "software" {
+			s.budget, err = generationbudget.NewIndependentAutoForDevice(requested.Limits(), s.device)
+		} else {
+			s.budget, err = generationbudget.NewForDevice(requested.Limits(), s.device)
+		}
 		if err != nil {
 			return s, err
 		}
@@ -104,4 +108,9 @@ func (i *Config) GetIntelPreviewGeneration() *ffmpeg.IntelGenerationConfig {
 		return nil
 	}
 	return &ffmpeg.IntelGenerationConfig{Backend: s.preview, Device: s.device, ProbeTimeout: 10 * time.Second}
+}
+
+// GetGenerationWorkloadTuning reports in-memory evidence without starting media work.
+func (i *Config) GetGenerationWorkloadTuning(kind generationbudget.WorkloadKind) generationbudget.TuningSnapshot {
+	return i.generation().budget.WorkloadTuning(kind)
 }

@@ -151,7 +151,7 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	maxLanes := 1
 	if frames == nil {
 		maxLanes = g.spriteWorkers(generationbudget.GPU, count)
-		if budget := g.generationBudget(); budget.AutoGPU() {
+		if budget := g.generationBudget(); budget.AutoWorkload(generationbudget.Workload{Kind: generationbudget.SpriteWorkload}) {
 			maxLanes = count
 		}
 	}
@@ -193,7 +193,7 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	}
 	render := func(ctx context.Context) error {
 		budget := g.generationBudget()
-		if budget.CanTuneGPU() && frames == nil && count > columns && rows > 1 {
+		if budget.CanTuneWorkload(workload) && frames == nil && count > columns && rows > 1 {
 			if err := g.tuneSprite(ctx, lockCtx, budget, workload, plan, times, columns, rows, maxLanes, filepath.Dir(output), renderSheet); err != nil {
 				return err
 			}
@@ -237,7 +237,7 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 			if original == nil {
 				original = attemptErr
 			}
-			if attempt != 0 || !budget.AutoGPU() || ctx.Err() != nil || !speculative && (!generationbudget.IsPressure(attemptErr) || lanes <= 1) {
+			if attempt != 0 || !budget.AutoWorkload(generationbudget.Workload{Kind: generationbudget.SpriteWorkload}) || ctx.Err() != nil || !speculative && (!generationbudget.IsPressure(attemptErr) || lanes <= 1) {
 				return fmt.Errorf("GPU sprite render: %w", attemptErr)
 			}
 			if speculative {
@@ -298,9 +298,9 @@ func (g Generator) intelSpriteSheet(ctx context.Context, input string, times []f
 	if err = os.Rename(tmp.Name(), output); err != nil {
 		return fail("output", err)
 	}
-	if g.generationBudget().AutoGPU() {
+	if g.generationBudget().AutoWorkload(workload) {
 		demand := count
-		if frames != nil || renderedRetry || !g.generationBudget().CanTuneGPU() {
+		if frames != nil || renderedRetry || !g.generationBudget().CanTuneWorkload(workload) {
 			demand = renderedLanes
 		}
 		grew := g.generationBudget().RecordCanonicalSample(workload, renderedSample, renderedLanes, count, demand)

@@ -24,8 +24,18 @@ Scene and marker MP4 use `scale_vaapi` and `h264_vaapi`. JPEG sprite sheets use 
 
 Intel probes and execution always share the configured total/GPU process limits. Enabling the shared budget also applies them to explicitly selected CPU generation and canonical CPU pHash. Missing, zero and `auto` numeric limits request [runtime Auto sizing](auto-capacity.md). Explicit nonnegative integer limits are preserved; an explicit GPU limit cannot exceed an explicit total limit. There is no fixed 64-setting ceiling. No backend introduces a separate fixed concurrency cap. These are process/thread limits, not OS CPU or RAM quotas. Capability probe execution deadlines begin after admission; failures and cancellation release permits and drain children before cleanup. Coordinators do not hold nested permits. Intel selection bypasses the separate native device pools.
 
+VEX-71 adds independent Auto tuning for sprite and preview GPU rendering with two
+read-only measured values. It adds no saved setting, manual override, or per-file
+control. Existing YAML is read unchanged; ordinary saves add no migration keys.
+Existing positive shared total/GPU limits and thread requests retain their
+meaning and values. After restart, positive shared GPU limits bound each Auto
+selection instead of forcing each rendering type to that exact count. The active
+scheduler remains frozen when saved requests change. Software defaults and
+marker-only configuration keep their previous scheduling behavior.
+
 The Settings controls are drafts until Save generation settings succeeds. The UI shows server-confirmed saved requests separately from the running snapshot and flags pending restart changes. The complete proposal is validated before any field is persisted, including coupled process limits. Command-line overrides cannot be overwritten. Invalid startup configuration is rejected; correct it before restarting. A render device must be an explicit `/dev/dri/renderD<number>` path. Direct YAML edits require an authorized restart. These controls do not authorize production configuration changes or restart/deployment.
 
-`ConfigGeneralInput` accepts `generationMarkerBackend`, `generationSpriteBackend`, `generationPreviewBackend`, `generationDevice`, `generationBudgetEnabled`, `generationMaxProcesses`, `generationMaxGPUProcesses` and `generationThreads`. Partial API proposals merge with saved requests for atomic validation. `ConfigGeneralResult` returns saved requests, frozen `activeGeneration`, `generationRestartRequired` and `generationConfigurationError`. Backend names describe requests; runtime diagnostics identify actual execution and failure stages.
+`ConfigGeneralInput` accepts `generationMarkerBackend`, `generationSpriteBackend`, `generationPreviewBackend`, `generationDevice`, `generationBudgetEnabled`, `generationMaxProcesses`, `generationMaxGPUProcesses` and `generationThreads`. Partial API proposals merge with saved requests for atomic validation. `ConfigGeneralResult` returns saved requests, frozen `activeGeneration`, `generationRestartRequired` and `generationConfigurationError`, plus read-only `generationTuning` sprite/preview
+measurement states and nullable Auto selections. Backend names describe requests; runtime diagnostics identify actual execution and failure stages.
 
 Select software rollback, save and restart when authorized to restore CPU rendering and legacy scheduling. Stored pHashes remain unchanged; Intel GPU pHash stays unavailable until its independent exact-parity gate is satisfied. Use the [existing benchmark tools](benchmark.md) and [B580 runbook](b580-acceptance.md) for isolated authorized tests. Historical [Stage A evidence](ct102-stage-a.md) describes the former hybrid implementation and does not establish acceptance of the resident pipeline.

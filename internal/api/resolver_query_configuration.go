@@ -12,6 +12,7 @@ import (
 	"github.com/stashapp/stash/internal/manager"
 	"github.com/stashapp/stash/internal/manager/config"
 	"github.com/stashapp/stash/pkg/fsutil"
+	"github.com/stashapp/stash/pkg/generationbudget"
 	"github.com/stashapp/stash/pkg/models"
 	"golang.org/x/text/collate"
 )
@@ -301,6 +302,10 @@ func makeConfigGeneralResult() *ConfigGeneralResult {
 		ActiveGeneration: &GenerationConfiguration{
 			PreviewBackend: activeGeneration.PreviewBackend, MarkerBackend: activeGeneration.MarkerBackend, SpriteBackend: activeGeneration.SpriteBackend, Device: activeGeneration.Device,
 			BudgetEnabled: activeGeneration.BudgetEnabled, MaxProcesses: activeGeneration.MaxProcesses, MaxGPUProcesses: activeGeneration.MaxGPUProcesses, Threads: activeGeneration.Threads,
+		},
+		GenerationTuning: &GenerationTuning{
+			Sprite:  generationWorkloadTuningResult(config.GetGenerationWorkloadTuning(generationbudget.SpriteWorkload)),
+			Preview: generationWorkloadTuningResult(config.GetGenerationWorkloadTuning(generationbudget.PreviewWorkload)),
 		},
 		PreviewAudio:                  config.GetPreviewAudio(),
 		PreviewSegments:               config.GetPreviewSegments(),
@@ -718,4 +723,8 @@ func getAvailableContainerPaths() []string {
 	}
 
 	return paths
+}
+
+func generationWorkloadTuningResult(active generationbudget.TuningSnapshot) *GenerationWorkloadTuning {
+	return &GenerationWorkloadTuning{AutomaticConcurrency: active.AutomaticConcurrency, MeasurementState: GenerationMeasurementState(active.MeasurementState)}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,12 @@ import (
 // learned as throughput samples and never bypassed by a cached capacity value.
 func generationFileWorkload(plan ffmpeg.IntelGenerationPlan, operation, input string) generationbudget.Workload {
 	w := plan.GenerationWorkload(operation)
+	if strings.HasPrefix(operation, "sprite/") {
+		w.Kind = generationbudget.SpriteWorkload
+	}
+	if strings.HasPrefix(operation, "scene-preview") {
+		w.Kind = generationbudget.PreviewWorkload
+	}
 	identity := input
 	if info, err := os.Stat(input); err == nil {
 		identity += fmt.Sprintf("/%d/%d", info.Size(), info.ModTime().UnixNano())
