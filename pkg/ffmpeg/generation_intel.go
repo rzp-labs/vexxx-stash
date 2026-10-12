@@ -214,11 +214,12 @@ func runIntelGenerationWork(ctx context.Context, plan IntelGenerationPlan, hardw
 	fallback := func(stage string, err error) (IntelGenerationDiagnostic, error) {
 		d.Stage = stage
 		d.Reason = intelFailureReason(err)
-		if ctx.Err() != nil {
-			return d, ctx.Err()
-		}
-		if errors.Is(err, context.Canceled) {
-			return d, err
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			// Caller cancellation prevents fallback, but the runner owns the
+			// command's cause. It may have exited independently before the
+			// caller ended; retain its stderr, execution facts and replay ref.
+			d.Actual = "none"
+			return d, WithIntelGenerationDiagnostic(err, d, plan.Source)
 		}
 		if software == nil {
 			d.Actual = "none"
