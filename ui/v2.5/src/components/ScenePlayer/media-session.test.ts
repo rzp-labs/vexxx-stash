@@ -380,6 +380,34 @@ describe("optional media session controls", () => {
     expect([...handlers.values()]).toEqual([null, null, null, null]);
   });
 
+  it("clears disposed-owner metadata when a survivor has none and clears the final session state", () => {
+    const { api, handlers } = session();
+    vi.stubGlobal(
+      "MediaMetadata",
+      class {
+        constructor(public data: unknown) {}
+      }
+    );
+    const older = createPlayer();
+    older.ready();
+    const newer = createPlayer();
+    newer.ready();
+    newer.plugin.setMetadata("newer", "artist", "poster");
+    newer.dispose();
+    handlers.get("pause")?.();
+    expect(older.mock.pause).toHaveBeenCalledOnce();
+    expect(api.metadata).toBeNull();
+    older.plugin.setMetadata("older", "artist", "poster");
+    expect(api.metadata).toMatchObject({ data: { title: "older" } });
+    older.mock.paused.mockReturnValue(false);
+    older.emit("play");
+    expect(api.playbackState).toBe("playing");
+    older.dispose();
+    expect(api.metadata).toBeNull();
+    expect(api.playbackState).toBe("none");
+    expect([...handlers.values()]).toEqual([null, null, null, null]);
+  });
+
   it.each(["loadstart", "play", "plugin dispose", "player dispose"])(
     "closes already-open failure feedback on %s",
     async (transition) => {

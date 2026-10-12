@@ -145,7 +145,17 @@ class MediaSessionPlugin extends videojs.getPlugin("plugin") {
     next.player.addClass("vjs-media-session");
     next.setActionHandlers();
     next.updatePlaybackState();
+    next.clearMetadata();
     if (next.metadata) next.setMetadata(...next.metadata);
+  }
+
+  private clearMetadata(): void {
+    if (!this.session) return;
+    try {
+      this.session.metadata = null;
+    } catch (error) {
+      reportError(error, "metadata");
+    }
   }
 
   private async play(): Promise<void> {
@@ -264,6 +274,12 @@ class MediaSessionPlugin extends videojs.getPlugin("plugin") {
       }
     });
     this.registeredActions.clear();
+    this.clearMetadata();
+    try {
+      session.playbackState = "none";
+    } catch (error) {
+      reportError(error, "playback_state");
+    }
   }
 }
 
