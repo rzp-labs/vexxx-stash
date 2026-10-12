@@ -13,6 +13,7 @@ import { IntelGenerationSettings } from "./SettingsSystemPanel";
 
 const mocks = vi.hoisted(() => ({
   save: vi.fn(),
+  refetch: vi.fn(),
   readQuery: vi.fn(),
   persisted: {} as Record<string, unknown>,
 }));
@@ -21,7 +22,9 @@ vi.mock("src/core/generated-graphql", async (importOriginal) => ({
   useConfigurationQuery: () => ({
     data: { configuration: { general: mocks.persisted } },
     client: { readQuery: mocks.readQuery },
+    refetch: mocks.refetch,
   }),
+  useJobsSubscribeSubscription: () => ({ data: undefined }),
   useConfigureGeneralMutation: () => [mocks.save, { loading: false }],
 }));
 vi.mock("./context", () => ({
@@ -54,6 +57,7 @@ function edit(id: string, value: string) {
 }
 beforeEach(() => {
   mocks.save.mockReset();
+  mocks.refetch.mockReset();
   mocks.readQuery.mockReset();
   mocks.readQuery.mockImplementation(() => ({
     configuration: { general: mocks.persisted },
@@ -566,4 +570,94 @@ it("saves the scene backend independently and rolls it back with generation sett
     screen.getByRole("button", { name: "Select software rollback" })
   );
   expect(scene).toHaveValue("software");
+});
+
+describe("read-only independent Auto concurrency", () => {
+  function row(kind: "sprite" | "preview") {
+    return within(document.getElementById(`generation-${kind}-concurrency`)!);
+  }
+
+  it("renders only measured numbers underneath the existing-style headers", () => {
+    mocks.persisted.generationTuning = {
+      sprite: { automaticConcurrency: 2, measurementState: "MEASURED" },
+      preview: { automaticConcurrency: 3, measurementState: "MEASURED" },
+    };
+    render(panel());
+    expect(
+      row("sprite").getByRole("heading", { name: "Sprite GPU concurrency" })
+    ).toBeInTheDocument();
+    expect(
+      row("preview").getByRole("heading", { name: "Preview GPU concurrency" })
+    ).toBeInTheDocument();
+    expect(row("sprite").getByText("2")).toBeInTheDocument();
+    expect(row("preview").getByText("3")).toBeInTheDocument();
+    for (const kind of ["sprite", "preview"] as const) {
+      expect(row(kind).queryByRole("button")).not.toBeInTheDocument();
+      expect(row(kind).queryByRole("textbox")).not.toBeInTheDocument();
+    }
+    expect(
+      screen.queryByText(/Current Auto value|Not measured yet/)
+    ).not.toBeInTheDocument();
+    expect(mocks.save).not.toHaveBeenCalled();
+  });
+
+  it.each(["NOT_MEASURED", "ADAPTING"])(
+    "uses Adapting when backend state is %s",
+    (measurementState) => {
+      mocks.persisted.generationTuning = {
+        sprite: { automaticConcurrency: null, measurementState },
+        preview: { automaticConcurrency: 3, measurementState: "MEASURED" },
+      };
+      render(panel());
+      expect(row("sprite").getByText("Adapting")).toBeInTheDocument();
+      expect(row("preview").getByText("3")).toBeInTheDocument();
+    }
+  );
+
+  it("does not substitute shared saved or active limits when values are absent", () => {
+    mocks.persisted.generationMaxGPUProcesses = 64;
+    mocks.persisted.activeGeneration = {
+      ...(mocks.persisted.activeGeneration as object),
+      maxGPUProcesses: 64,
+    };
+    render(panel());
+    expect(row("sprite").getByText("Adapting")).toBeInTheDocument();
+    expect(row("preview").getByText("Adapting")).toBeInTheDocument();
+    expect(row("sprite").queryByText("64")).not.toBeInTheDocument();
+    expect(row("preview").queryByText("64")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { automaticConcurrency: 5, measurementState: "ADAPTING" },
+    { automaticConcurrency: null, measurementState: "MEASURED" },
+    { automaticConcurrency: 0, measurementState: "MEASURED" },
+  ])("withholds an unqualified or missing count: %j", (sprite) => {
+    mocks.persisted.generationTuning = { sprite, preview: sprite };
+    render(panel());
+    expect(row("sprite").getByText("Adapting")).toBeInTheDocument();
+    expect(row("preview").getByText("Adapting")).toBeInTheDocument();
+  });
+
+  it("updates each value from the running response without editing or saving requests", () => {
+    mocks.persisted.generationTuning = {
+      sprite: { automaticConcurrency: null, measurementState: "NOT_MEASURED" },
+      preview: { automaticConcurrency: 3, measurementState: "MEASURED" },
+    };
+    const view = render(panel());
+    expect(row("sprite").getByText("Adapting")).toBeInTheDocument();
+    mocks.persisted = {
+      ...mocks.persisted,
+      generationTuning: {
+        sprite: { automaticConcurrency: 2, measurementState: "MEASURED" },
+        preview: { automaticConcurrency: null, measurementState: "ADAPTING" },
+      },
+    };
+    view.rerender(panel());
+    expect(row("sprite").getByText("2")).toBeInTheDocument();
+    expect(row("preview").getByText("Adapting")).toBeInTheDocument();
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Save generation settings" })
+    ).toBeDisabled();
+  });
 });

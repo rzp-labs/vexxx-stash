@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/ffmpeg/transcoder"
@@ -155,13 +156,16 @@ func (g *Generator) previewVideo(input string, videoDuration float64, options Pr
 			workers = budget.Settings().MaxProcesses
 			if g.previewIntelPlan != nil {
 				workers = budget.Settings().MaxGPUProcesses
+				if g.capacityWorkload != nil {
+					workers = budget.PrepareWorkload(*g.capacityWorkload)
+				}
 			}
 		}
 		run := func(ctx context.Context, i int) error {
 			return g.previewVideoChunk(lockCtx, ctx, input, chunks[i], vrMode, fallback, useVsync2)
 		}
 		var err error
-		if budget := g.generationBudget(); budget.CanTuneGPU() && g.previewIntelPlan != nil && g.capacityWorkload != nil {
+		if budget := g.generationBudget(); g.previewIntelPlan != nil && g.capacityWorkload != nil && budget.AutoWorkload(*g.capacityWorkload) {
 			err = g.runAdaptivePreviewChunks(lockCtx, chunks, run)
 		} else {
 			err = runPreviewChunks(lockCtx, len(chunks), workers, run)
@@ -199,7 +203,22 @@ func (g *Generator) previewVideoSingle(input string, videoDuration float64, opti
 			Preset:     options.Preset,
 		}
 
-		return g.previewVideoChunk(lockCtx, lockCtx, input, chunkOptions, vrMode, fallback, useVsync2)
+		run := func(ctx context.Context) error {
+			return g.previewVideoChunk(lockCtx, ctx, input, chunkOptions, vrMode, fallback, useVsync2)
+		}
+		b := g.generationBudget()
+		if g.previewIntelPlan == nil || g.capacityWorkload == nil || !b.AutoWorkload(*g.capacityWorkload) {
+			return run(lockCtx)
+		}
+		state := g.capacityObservation
+		state.mu.Lock()
+		state.started = time.Now()
+		state.mu.Unlock()
+		sample, err := b.Measure(lockCtx, *g.capacityWorkload, run)
+		state.mu.Lock()
+		state.canonicalUnits, state.resourceSample = 1, sample
+		state.mu.Unlock()
+		return err
 	}
 }
 

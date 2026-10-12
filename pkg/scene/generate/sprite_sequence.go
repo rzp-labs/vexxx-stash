@@ -20,7 +20,8 @@ func (g Generator) spriteWorkers(class generationbudget.Class, count int) int {
 		settings := budget.Settings()
 		workers = settings.MaxProcesses
 		if class == generationbudget.GPU {
-			workers = min(workers, settings.MaxGPUProcesses)
+			limit := budget.PrepareWorkload(generationbudget.Workload{Kind: generationbudget.SpriteWorkload})
+			workers = min(workers, limit)
 		}
 	}
 	return min(workers, count)

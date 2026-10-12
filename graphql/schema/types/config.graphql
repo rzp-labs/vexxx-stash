@@ -119,11 +119,11 @@ input ConfigGeneralInput {
   generationDevice: String
   "Enable shared CPU generation limits; hardware selection always enables limits"
   generationBudgetEnabled: Boolean
-  "Total generation process limit, 0 = conservative auto (1)"
+  "Shared total generation process ceiling. Zero selects resource-based Auto sizing; positive values remain hard ceilings."
   generationMaxProcesses: Int
-  "GPU generation process limit, 0 = conservative auto (1)"
+  "Shared GPU lane ceiling across generation workloads. Zero selects adaptive Auto sizing. Sprites and previews tune independently within a positive ceiling."
   generationMaxGPUProcesses: Int
-  "FFmpeg generation threads, 0 = conservative auto (1)"
+  "Threads per budgeted FFmpeg command. Zero derives the thread count from CPU resources and the active total limit."
   generationThreads: Int
   "Include audio stream in previews"
   previewAudio: Boolean
@@ -279,14 +279,16 @@ type ConfigGeneralResult {
   generationDevice: String!
   "Enable shared CPU generation limits; hardware selection always enables limits"
   generationBudgetEnabled: Boolean!
-  "Total generation process limit, 0 = conservative auto (1)"
+  "Shared total generation process ceiling. Zero selects resource-based Auto sizing; positive values remain hard ceilings."
   generationMaxProcesses: Int!
-  "GPU generation process limit, 0 = conservative auto (1)"
+  "Shared GPU lane ceiling across generation workloads. Zero selects adaptive Auto sizing. Sprites and previews tune independently within a positive ceiling."
   generationMaxGPUProcesses: Int!
-  "FFmpeg generation threads, 0 = conservative auto (1)"
+  "Threads per budgeted FFmpeg command. Zero derives the thread count from CPU resources and the active total limit."
   generationThreads: Int!
   "Running configuration snapshot, not a claim of GPU use"
   activeGeneration: GenerationConfiguration!
+  """Read-only independent Auto selections qualified by complete validated renders."""
+  generationTuning: GenerationTuning!
   generationRestartRequired: Boolean!
   "Invalid persisted generation configuration, if present"
   generationConfigurationError: String
@@ -707,4 +709,21 @@ type GenerationConfiguration {
   maxProcesses: Int!
   maxGPUProcesses: Int!
   threads: Int!
+}
+
+enum GenerationMeasurementState {
+ NOT_MEASURED
+ ADAPTING
+ MEASURED
+}
+
+type GenerationWorkloadTuning {
+ """Current workload-type selection, present only when validated by a complete render. Individual grants still obey shared limits and resource admission."""
+ automaticConcurrency: Int
+ measurementState: GenerationMeasurementState!
+}
+
+type GenerationTuning {
+ sprite: GenerationWorkloadTuning!
+ preview: GenerationWorkloadTuning!
 }

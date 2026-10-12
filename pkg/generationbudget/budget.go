@@ -72,6 +72,9 @@ type Budget struct {
 	learning                    map[string]*capacity
 	learningRevisions           map[string]uint64
 	gpuByWorkload               map[string]int
+	gpuByKind                   map[WorkloadKind]int
+	independentAuto             bool
+	spriteLimit, previewLimit   int
 	reservedMemory, reservedGPU int64
 	memoryLimit, gpuMemoryLimit int64
 	mu                          sync.Mutex
@@ -131,14 +134,14 @@ func (b *Budget) acquireWorkload(ctx context.Context, class Class, slots int, up
 		return slots, func() {}, nil
 	}
 	limits := b.Settings()
-	adaptiveWork := class == GPU && workload.Key != "" && b.AutoGPU() && upTo
+	adaptiveWork := class == GPU && workload.Key != "" && b.AutoWorkload(workload) && upTo
 	if !adaptiveWork && (slots > limits.MaxProcesses || class == GPU && slots > limits.MaxGPUProcesses) {
 		return 0, nil, errors.New("generation budget reservation exceeds configured limits")
 	}
 	if ctx.Value(scopeKey{}) == b {
 		return 0, nil, errors.New("nested generation budget acquisition; acquire only at leaf stages")
 	}
-	w := &waiter{class: class, slots: slots, upTo: upTo, ready: make(chan struct{})}
+	w := &waiter{class: class, slots: slots, upTo: upTo, workload: workload, ready: make(chan struct{})}
 	if observer, ok := ctx.Value(processObservationKey{}).(*processObservation); ok && observer.budget == b {
 		w.observer = observer
 	}
@@ -159,7 +162,7 @@ func (b *Budget) acquireWorkload(ctx context.Context, class Class, slots int, up
 	b.dispatch()
 	b.mu.Unlock()
 	var tick <-chan time.Time
-	if b.AutoGPU() && workload.Key != "" {
+	if b.resourceProtected(workload) && workload.Key != "" {
 		timer := time.NewTicker(time.Second)
 		defer timer.Stop()
 		tick = timer.C
@@ -227,6 +230,7 @@ func (b *Budget) finish(w *waiter) {
 	}
 	if w.class == GPU {
 		b.gpuActive -= w.slots
+		b.gpuByKind[w.workload.Kind] -= w.slots
 		if key := w.workload.Key; key != "" {
 			b.gpuByWorkload[key] -= w.slots
 			if b.gpuByWorkload[key] == 0 {
@@ -248,6 +252,9 @@ func (b *Budget) dispatch() {
 		}
 		if w.class == GPU {
 			available = min(available, b.sharedGPULimit-b.gpuActive)
+			if b.independentAuto && w.workload.Kind != OtherWorkload {
+				available = min(available, b.workloadLimit(w.workload.Kind)-b.gpuByKind[w.workload.Kind])
+			}
 			if learned := b.learning[w.workload.Key]; learned != nil {
 				w.gpuLimit = learned.limit
 				if learned.measured {
@@ -283,6 +290,7 @@ func (b *Budget) dispatch() {
 		b.exclusiveActive = w.exclusive
 		if w.class == GPU {
 			b.gpuActive += w.slots
+			b.gpuByKind[w.workload.Kind] += w.slots
 			if w.workload.Key != "" {
 				b.gpuByWorkload[w.workload.Key] += w.slots
 			}

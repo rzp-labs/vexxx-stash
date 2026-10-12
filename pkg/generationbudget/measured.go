@@ -26,7 +26,7 @@ type Sample struct {
 // Its observations disappear after all leaf children have drained. Identified
 // workloads retain process-local evidence under the caller's file/plan key.
 func (b *Budget) ScopeWorkload(w Workload) (Workload, func(bool)) {
-	if !b.AutoGPU() {
+	if !b.AutoWorkload(w) {
 		return w, func(bool) {}
 	}
 	base, identified := w.Key, !w.RuntimeUnidentified
@@ -48,7 +48,7 @@ func (b *Budget) ScopeWorkload(w Workload) (Workload, func(bool)) {
 		// the base since this scope copied it. Stale cleanup only drops its own
 		// controller; revisions also distinguish absent -> published -> absent.
 		if identified && b.learningRevisions[base] == revision {
-			if learned := b.learning[w.Key]; validated && learned != nil && learned.measured {
+			if learned := b.learning[w.Key]; validated && learned != nil && (learned.measured || b.independentAuto && learned.canonicalLimit > 0) {
 				copy := *learned
 				b.learning[base] = &copy
 				b.learningRevisions[base]++
@@ -58,13 +58,17 @@ func (b *Budget) ScopeWorkload(w Workload) (Workload, func(bool)) {
 			}
 		}
 		delete(b.learning, w.Key)
+		if b.independentAuto {
+			b.updateWorkloadCapacity(Workload{}, 1)
+			b.dispatch()
+		}
 	}
 }
 
 // Measure samples while the render owns its ordinary leaf permits. It acquires
 // no permits itself, and waits for the sampler before returning or cancellation.
 func (b *Budget) Measure(ctx context.Context, w Workload, run func(context.Context) error) (Sample, error) {
-	if !b.AutoGPU() {
+	if !b.AutoWorkload(w) {
 		start := time.Now()
 		err := run(ctx)
 		return Sample{Elapsed: time.Since(start)}, err
@@ -214,7 +218,7 @@ func RecordProcessResult(ctx context.Context, pid int, state *os.ProcessState) {
 // StartTuning compares batches within this generation. A prior file-local best
 // is a starting point, never a throughput reference for different source seeks.
 func (b *Budget) StartTuning(w Workload) {
-	if !b.AutoGPU() {
+	if !b.AutoWorkload(w) {
 		return
 	}
 	b.mu.Lock()
@@ -231,7 +235,7 @@ func (b *Budget) StartTuning(w Workload) {
 // partial calibration. Later generations can tune using the full work they must
 // render anyway, without repeatedly paying for expanded partial baselines.
 func (b *Budget) HasCanonicalSample(w Workload, units int) bool {
-	if !b.AutoGPU() {
+	if !b.AutoWorkload(w) {
 		return false
 	}
 	b.mu.Lock()
@@ -244,7 +248,7 @@ func (b *Budget) HasCanonicalSample(w Workload, units int) bool {
 // The returned previous count is a strict-GPU retry target; the deadline bounds
 // a speculative attempt to 125% of its validated equal-work baseline's duration.
 func (b *Budget) PrepareCanonicalTrial(w Workload, units, demand int) (int, time.Duration) {
-	if !b.CanTuneGPU() {
+	if !b.CanTuneWorkload(w) {
 		return 0, 0
 	}
 	b.mu.Lock()
@@ -253,7 +257,7 @@ func (b *Budget) PrepareCanonicalTrial(w Workload, units, demand int) (int, time
 	if c := b.learning[w.Key]; c != nil {
 		if c.unfinished && c.measured && c.bestRate > 0 && c.comparisonUnits == units && min(c.nextLimit, c.ceiling, demand) > c.bestLimit {
 			c.limit = min(c.nextLimit, c.ceiling, demand)
-			b.updateCapacity(c.limit)
+			b.updateWorkloadCapacity(w, c.limit)
 			return c.bestLimit, time.Duration(saturatingAdd(int64(c.bestElapsed), int64(c.bestElapsed/4)))
 		}
 	}
@@ -264,7 +268,7 @@ func (b *Budget) PrepareCanonicalTrial(w Workload, units, demand int) (int, time
 // trials to the complete output. Only callers that validated and published the
 // canonical output may record it. Subsequent complete outputs use that baseline.
 func (b *Budget) RecordCanonicalSample(w Workload, sample Sample, lanes, units, demand int) bool {
-	if !b.AutoGPU() || !sample.Isolated {
+	if !b.AutoWorkload(w) || !sample.Isolated {
 		return false
 	}
 	b.mu.Lock()
@@ -274,14 +278,20 @@ func (b *Budget) RecordCanonicalSample(w Workload, sample Sample, lanes, units, 
 		c.unfinished = true
 	}
 	b.mu.Unlock()
-	return b.RecordSample(w, sample, lanes, units, demand, nil)
+	grew := b.RecordSample(w, sample, lanes, units, demand, nil)
+	b.mu.Lock()
+	if c := b.learning[w.Key]; c != nil && c.bestLimit == lanes && c.comparisonUnits == units && sample.Elapsed > 0 && lanes > 0 && units > 0 && demand > 0 {
+		c.canonicalLimit = c.bestLimit
+	}
+	b.mu.Unlock()
+	return grew
 }
 
 // RetainTestedCapacity keeps a validated cold plan's observed count and costs,
 // without treating a changing-concurrency pass as a steady throughput reference.
 // Its next complete pass at that count establishes the equal-work baseline.
 func (b *Budget) RetainTestedCapacity(w Workload, sample Sample, lanes, units int) {
-	if !b.AutoGPU() || !sample.Isolated {
+	if !b.AutoWorkload(w) || !sample.Isolated {
 		return
 	}
 	b.StartTuning(w)
@@ -299,7 +309,7 @@ func (b *Budget) RetainTestedCapacity(w Workload, sample Sample, lanes, units in
 // HasMeasuredCapacity skips calibration only after exploration actually
 // settles. Exhausting the per-generation trial/time allowance is not a ceiling.
 func (b *Budget) HasMeasuredCapacity(w Workload) bool {
-	if !b.AutoGPU() {
+	if !b.AutoWorkload(w) {
 		return false
 	}
 	b.mu.Lock()
@@ -311,7 +321,7 @@ func (b *Budget) HasMeasuredCapacity(w Workload) bool {
 // RefineCapacity tries between the faster validated count and a rejected
 // speculative count. Rejection is not automatically an allocation diagnosis.
 func (b *Budget) RefineCapacity(w Workload, rejected int) bool {
-	if !b.AutoGPU() {
+	if !b.AutoWorkload(w) {
 		return false
 	}
 	b.mu.Lock()
@@ -322,7 +332,7 @@ func (b *Budget) RefineCapacity(w Workload, rejected int) bool {
 	}
 	c.limit = min(c.ceiling, c.bestLimit+(rejected-c.bestLimit)/2)
 	c.unfinished = c.limit > c.bestLimit
-	b.updateCapacity(c.limit)
+	b.updateWorkloadCapacity(w, c.limit)
 	b.dispatch()
 	return c.limit > c.bestLimit
 }
@@ -333,7 +343,7 @@ func (b *Budget) RefineCapacity(w Workload, rejected int) bool {
 // The available work and positive manual total bound exploration; resource
 // headroom and explicit allocation pressure still bound every leaf admission.
 func (b *Budget) RecordSample(w Workload, sample Sample, lanes, units, demand int, err error) bool {
-	if !b.AutoGPU() || w.Key == "" || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if !b.AutoWorkload(w) || w.Key == "" || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	b.mu.Lock()
@@ -352,7 +362,7 @@ func (b *Budget) RecordSample(w Workload, sample Sample, lanes, units, demand in
 			// The final complete render must still validate and retain its own errors.
 			c.limit = c.bestLimit
 		}
-		b.updateCapacity(c.limit)
+		b.updateWorkloadCapacity(w, c.limit)
 		b.dispatch()
 		return false
 	}
@@ -394,7 +404,7 @@ func (b *Budget) RecordSample(w Workload, sample Sample, lanes, units, demand in
 		// Contention cannot replace a same-subset comparison that a later
 		// generation may resume, or establish that exploration has settled.
 		c.unfinished = true
-		b.updateCapacity(c.limit)
+		b.updateWorkloadCapacity(w, c.limit)
 		return false
 	}
 	if demand < c.bestLimit {
@@ -410,7 +420,7 @@ func (b *Budget) RecordSample(w Workload, sample Sample, lanes, units, demand in
 		if sample.Processes == 1 && units > 1 {
 			c.memoryCost, c.gpuCost = c.bestMemoryCost, c.bestGPUCost
 		}
-		b.updateCapacity(c.limit)
+		b.updateWorkloadCapacity(w, c.limit)
 		b.dispatch()
 		return false
 	}
@@ -420,7 +430,7 @@ func (b *Budget) RecordSample(w Workload, sample Sample, lanes, units, demand in
 	c.bestMemoryCost, c.bestGPUCost = c.memoryCost, c.gpuCost
 	// Contention or unknown/contaminated measurements cannot justify growth.
 	if !c.measured || lanes < c.limit {
-		b.updateCapacity(c.limit)
+		b.updateWorkloadCapacity(w, c.limit)
 		return false
 	}
 	b.selectCapacity(w)
@@ -430,15 +440,15 @@ func (b *Budget) RecordSample(w Workload, sample Sample, lanes, units, demand in
 	}
 	c.limit = min(c.ceiling, demand, next)
 	c.unfinished = c.limit > lanes
-	b.updateCapacity(c.limit)
+	b.updateWorkloadCapacity(w, c.limit)
 	b.dispatch()
 	return c.limit > lanes
 }
 
 // FinishTuning uses the fastest validated trial, not the unexercised next trial.
 func (b *Budget) FinishTuning(w Workload) int {
-	if !b.AutoGPU() {
-		return b.Settings().MaxGPUProcesses
+	if !b.AutoWorkload(w) {
+		return b.PrepareWorkload(w)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -448,8 +458,14 @@ func (b *Budget) FinishTuning(w Workload) int {
 		}
 		c.limit = min(c.ceiling, c.bestLimit)
 		c.memoryCost, c.gpuCost = c.bestMemoryCost, c.bestGPUCost
-		b.updateCapacity(c.limit)
+		b.updateWorkloadCapacity(w, c.limit)
 		b.dispatch()
 	}
-	return b.settings.MaxGPUProcesses
+	if !b.independentAuto {
+		return b.settings.MaxGPUProcesses
+	}
+	if c := b.learning[w.Key]; c != nil {
+		return c.limit
+	}
+	return b.workloadLimit(w.Kind)
 }
