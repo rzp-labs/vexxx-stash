@@ -275,13 +275,53 @@ describe("optional media session controls", () => {
     expect([...handlers.values()]).toEqual([null, null, null, null]);
   });
 
-  it("releases inherited handlers when a replacement is disposed before ready", () => {
+  it("keeps the current owner's controls while a replacement waits for ready", () => {
+    const { api, handlers } = session();
+    const current = createPlayer();
+    current.ready();
+    current.mock.paused.mockReturnValue(false);
+    current.emit("play");
+    const replacement = createPlayer();
+    expect(api.playbackState).toBe("playing");
+    handlers.get("pause")?.();
+    expect(current.mock.pause).toHaveBeenCalledOnce();
+    expect(replacement.mock.pause).not.toHaveBeenCalled();
+    replacement.ready();
+    handlers.get("pause")?.();
+    expect(replacement.mock.pause).toHaveBeenCalledOnce();
+    expect(current.mock.pause).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the current handlers when a pending replacement is disposed", () => {
     const { handlers } = session();
-    createPlayer().ready();
+    const current = createPlayer();
+    current.ready();
     const replacement = createPlayer();
     replacement.dispose();
     replacement.ready();
+    handlers.get("pause")?.();
+    expect(current.mock.pause).toHaveBeenCalledOnce();
+    expect(replacement.mock.pause).not.toHaveBeenCalled();
+    current.dispose();
     expect([...handlers.values()]).toEqual([null, null, null, null]);
+  });
+
+  it("publishes metadata supplied before ready when ownership transfers", () => {
+    const { api } = session();
+    vi.stubGlobal(
+      "MediaMetadata",
+      class {
+        constructor(public data: unknown) {}
+      }
+    );
+    const current = createPlayer();
+    current.ready();
+    current.plugin.setMetadata("current", "artist", "poster");
+    const replacement = createPlayer();
+    replacement.plugin.setMetadata("replacement", "artist", "poster");
+    expect(api.metadata).toMatchObject({ data: { title: "current" } });
+    replacement.ready();
+    expect(api.metadata).toMatchObject({ data: { title: "replacement" } });
   });
 
   it.each(["loadstart", "play", "plugin dispose", "player dispose"])(

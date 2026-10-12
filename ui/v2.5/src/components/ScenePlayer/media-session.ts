@@ -19,6 +19,8 @@ function reportError(error: unknown, operation: string): void {
 class MediaSessionPlugin extends videojs.getPlugin("plugin") {
   private session?: MediaSession;
   private disposed = false;
+  private ready = false;
+  private pendingMetadata?: [string, string, string];
   private playRequest = 0;
   private playbackFeedback?: ReturnType<VideoJsPlayer["createModal"]>;
   private registeredActions = new Set<MediaSessionAction>();
@@ -26,25 +28,30 @@ class MediaSessionPlugin extends videojs.getPlugin("plugin") {
   constructor(player: VideoJsPlayer) {
     super(player);
     this.session = navigator.mediaSession;
-    if (this.session) {
-      // Also release inherited handlers if a replacement is disposed before ready.
-      this.registeredActions = new Set(
-        owners.get(this.session)?.registeredActions
-      );
-      owners.set(this.session, this);
-    }
 
     this.on("dispose", () => {
       this.disposed = true;
       this.playRequest += 1;
+      this.pendingMetadata = undefined;
       this.clearFeedback();
       this.releaseActionHandlers();
     });
 
     player.ready(() => {
-      if (!this.isActive()) return;
+      if (this.ready || this.disposed || player.isDisposed() || !this.session)
+        return;
+      this.ready = true;
+      // Keep the current player's controls until this replacement can register.
+      this.registeredActions = new Set(
+        owners.get(this.session)?.registeredActions
+      );
+      owners.set(this.session, this);
       player.addClass("vjs-media-session");
       this.setActionHandlers();
+      this.updatePlaybackState();
+      const metadata = this.pendingMetadata;
+      this.pendingMetadata = undefined;
+      if (metadata) this.setMetadata(...metadata);
     });
 
     player.on("play", () => {
@@ -68,6 +75,10 @@ class MediaSessionPlugin extends videojs.getPlugin("plugin") {
 
   // manually set poster since it's only set on useEffect
   public setMetadata(title: string, artist: string, poster: string): void {
+    if (!this.ready && !this.disposed) {
+      this.pendingMetadata = [title, artist, poster];
+      return;
+    }
     if (!this.isActive() || typeof MediaMetadata !== "function") return;
     try {
       this.session!.metadata = new MediaMetadata({
