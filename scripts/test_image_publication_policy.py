@@ -351,7 +351,18 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertNotIn('needs', validator)  # Required check starts immediately.
         self.assertNotIn('if', validator)  # It must never be skipped for a draft.
         self.assertFalse(any('login-action' in step.get('uses', '') for step in validator['steps']))
-        self.assertEqual(sum('checkout' in step.get('uses', '') for step in validator['steps']), 1)
+        checkouts = [step for step in validator['steps'] if 'checkout' in step.get('uses', '')]
+        self.assertEqual(len(checkouts), 2)
+        self.assertNotIn('path', checkouts[0].get('with', {}))  # Validation checkout stays intact.
+        source_checkout = checkouts[1]
+        self.assertEqual(source_checkout['name'], 'Checkout exact source for Sonar')
+        self.assertEqual(source_checkout['with']['path'], '.sonar-source')
+        self.assertFalse(source_checkout['with']['persist-credentials'])
+        self.assertEqual(source_checkout['with']['fetch-depth'], 0)
+        self.assertIn('github.event.pull_request.head.sha', source_checkout['with']['ref'])
+        self.assertIn("steps.required_gate.outcome == 'success'", source_checkout['if'])
+        self.assertLess(next(i for i, step in enumerate(validator['steps'])
+                             if step.get('id') == 'required_gate'), validator['steps'].index(source_checkout))
         checks = next(step['run'] for step in validator['steps'] if step.get('id') == 'policy_tests')
         self.assertIn('test_image_publication_policy.py', checks)
         self.assertIn('test_check_intel_runtime.py', checks)

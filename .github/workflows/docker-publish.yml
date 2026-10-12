@@ -101,26 +101,26 @@ jobs:
           REQUIRED_PYTHON: ${{ steps.plan.outputs.python }}
         run: python3 scripts/reuse_master_validation.py
 
-      - if: steps.reuse.outputs.execute_backend == 'true'
+      - if: steps.reuse.outputs.execute_backend == 'true' || steps.plan.outputs.sonar_coverage_backend == 'true'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-      - if: steps.reuse.outputs.execute_frontend == 'true'
+      - if: steps.reuse.outputs.execute_frontend == 'true' || steps.plan.outputs.sonar_coverage_frontend == 'true'
         uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 10.34.4
       - name: Configure pnpm store before restoring cache
-        if: steps.reuse.outputs.execute_frontend == 'true'
+        if: steps.reuse.outputs.execute_frontend == 'true' || steps.plan.outputs.sonar_coverage_frontend == 'true'
         # Keep setup-node's cache path aligned with make pre-ui in CI.
         run: pnpm config set store-dir ~/.pnpm-store
-      - if: steps.reuse.outputs.execute_frontend == 'true'
+      - if: steps.reuse.outputs.execute_frontend == 'true' || steps.plan.outputs.sonar_coverage_frontend == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: ui/v2.5/pnpm-lock.yaml
       - name: Install media tools
-        if: steps.reuse.outputs.execute_backend == 'true'
+        if: steps.reuse.outputs.execute_backend == 'true' || steps.plan.outputs.sonar_coverage_backend == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg libvips-tools
@@ -142,8 +142,21 @@ jobs:
           go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-integration.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
           test -s dist/coverage/go-unit.out
           test -s dist/coverage/go-integration.out
+      - name: Generate inputs for backend coverage only
+        id: backend_coverage_generate
+        if: steps.plan.outputs.sonar_coverage_backend == 'true'
+        run: make generate-backend generate-login-locale
+      - name: Go coverage only for unchanged backend
+        id: backend_coverage_test
+        if: steps.plan.outputs.sonar_coverage_backend == 'true'
+        run: |
+          mkdir -p dist/coverage
+          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-unit.out ./...
+          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-integration.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
+          test -s dist/coverage/go-unit.out
+          test -s dist/coverage/go-integration.out
       - name: Retain Go coverage from this validation
-        if: steps.backend_test.outcome == 'success'
+        if: steps.backend_test.outcome == 'success' || steps.backend_coverage_test.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: go-coverage
@@ -158,8 +171,19 @@ jobs:
           pnpm run test:coverage
           test -s ../../dist/coverage/frontend/lcov.info
           pnpm run check
+      - name: Generate inputs for frontend coverage only
+        id: frontend_coverage_generate
+        if: steps.plan.outputs.sonar_coverage_frontend == 'true'
+        run: make pre-ui generate-ui
+      - name: Frontend coverage only for unchanged frontend
+        id: frontend_coverage_test
+        if: steps.plan.outputs.sonar_coverage_frontend == 'true'
+        working-directory: ui/v2.5
+        run: |
+          pnpm exec vitest run --coverage
+          test -s ../../dist/coverage/frontend/lcov.info
       - name: Retain frontend coverage from this validation
-        if: steps.frontend_test.outcome == 'success'
+        if: steps.frontend_test.outcome == 'success' || steps.frontend_coverage_test.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: frontend-coverage
@@ -406,6 +430,61 @@ jobs:
           path: ${{ env.PACKAGING_EVIDENCE_PATH }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Explain Sonar scope and imported coverage
+        if: steps.plan.outcome == 'success'
+        env:
+          SCAN: ${{ steps.plan.outputs.sonar_scan }}
+          STATUS: ${{ steps.plan.outputs.sonar_status }}
+          ADDED_DOMAINS: ${{ steps.plan.outputs.sonar_added_domains }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as f:
+              f.write('\nSonar scan: ' + os.environ['SCAN'] + '; policy: ' + os.environ['STATUS'] +
+                      '; added test domains: ' + (os.environ['ADDED_DOMAINS'] or 'none') + '\n')
+          PY
+      - name: Checkout exact source for Sonar
+        if: steps.plan.outputs.sonar_scan == 'true' && steps.required_gate.outcome == 'success'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          path: .sonar-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source identity and reuse this run's coverage
+        id: sonar_reports
+        if: steps.plan.outputs.sonar_scan == 'true' && steps.required_gate.outcome == 'success'
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          ANALYSIS_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          GO_REPORTS: ${{ steps.plan.outputs.sonar_go_paths }}
+          LCOV_REPORTS: ${{ steps.plan.outputs.sonar_lcov_paths }}
+        run: python3 scripts/sonar_scan_policy.py
+      - name: Cache Sonar analyzer downloads
+        if: steps.plan.outputs.sonar_scan == 'true' && steps.sonar_reports.outcome == 'success'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+      - name: Submit analysis to the existing Sonar project
+        if: >-
+          steps.plan.outputs.sonar_scan == 'true' && steps.sonar_reports.outcome == 'success' &&
+          ((github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master') ||
+           (github.event_name == 'pull_request' && !github.event.pull_request.draft &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.event.pull_request.base.repo.full_name == github.repository &&
+            github.event.pull_request.base.ref != ''))
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          projectBaseDir: .sonar-source
+          args: >-
+            -Dsonar.go.coverage.reportPaths=${{ steps.plan.outputs.sonar_go_paths }}
+            -Dsonar.javascript.lcov.reportPaths=${{ steps.plan.outputs.sonar_lcov_paths }}
 
   publish:
     needs: ci-required

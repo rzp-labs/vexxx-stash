@@ -61,45 +61,57 @@ unselected or reused domains do not produce new reports. Never scan a partial
 run as though it contains full-project coverage. All reports live under `dist/coverage/`, which is already ignored by Git and
 Docker packaging. No ignore-file or image-planner change is needed.
 
-## Activation prerequisite and acceptance
+## CI analysis and acceptance
 
-There is currently no repository scanner invocation. The existing master check
-confirms project key `rzp-labs_vexxx-stash`, the EU host `sonarcloud.io`, and the
-`SonarCloud Code Analysis` context from app `sonarqubecloud` (ID 12526). At base
-`d791f6154d367ca97a4945847cbaf57fecc980f9`, it succeeded and reported 0.0% coverage
-on new code. A separate read-only setup inspection confirmed the organization
-key `rzp-labs` and public project. The public UI shows no coverage and warns that
-`sonar.tests` is not configured. Analysis Method remains unverified because its
-page requires login; automatic analysis is plausible, not established.
+The user confirmed `SONAR_TOKEN` is configured in GitHub and Automatic Analysis
+is disabled. Project `rzp-labs_vexxx-stash`, organization `rzp-labs`, and host
+`https://sonarcloud.io` are configured. No token value is stored in the repository
+or exposed to validation. The official pinned scanner runs only on the existing
+GitHub-hosted runner, after validation; no Sonar CLI administration or scanner
+installation is required on the Mini.
 
-Names-only GitHub metadata inspection found one repository secret, three
-organization secrets, zero environments, and no names matching `SONAR`.
-Unusually named credentials remain possible. No secret values were read; names
-alone do not prove token validity or Execute Analysis permission. The remaining
-administrator handoff is the authenticated Analysis Method check and identifying
-an existing suitable CI credential or resolving its absence separately. No
-credential creation or server change is authorized by this candidate.
-If the project uses automatic
-analysis, stop for a separately authorized server-side change: automatic analysis
-does not ingest coverage and ignores `sonar-project.properties`. CI analysis and
-automatic analysis must not run together.
+Same-repository non-draft PRs retain their actual target branch, including stacks.
+Full history is fetched, and the scanner uses a separate actual-HEAD checkout;
+existing validation continues against the merge tree. The real Sonar service must
+have a suitable target-branch baseline; there is no override to master or synthetic
+successful check. Forks/missing trust metadata fail fresh `ci-required` validation
+without receiving the token. Fork contribution routing needs a maintainer-approved
+policy before activation; the local candidate does not introduce a privileged
+fork-code execution route. Drafts defer substantive validation and scanning;
+ready-for-review and retarget events start a fresh required run at the same SHA.
+Tags and publication dispatches retain their existing publication/validation policy
+and do not run Sonar.
 
-After those prerequisites are resolved, wire the scanner **after existing test
-execution**, on representative PR and default-branch runs that produce both Go
-profiles and LCOV. The affected-domain planner and exact-master reuse must be
-accounted for: either obtain complete reports from the exact analyzed revision
-with proven provenance or select both existing test domains before scanning.
-Do not add an independent duplicate suite, silently skip the required check,
-consume stale reports, or modify protection rules. Keep the current required
-check name and verify its successful publication by the existing Sonar app.
+PR scans import only the Go/UI reports produced by their selected domains. Static
+PR scans with no such reports verify the scan checkout but do not require merge/head
+equivalence. Any copied reports require identical analyzed/test/build inputs between
+tested merge and source HEAD; missing or empty selected reports fail. No partial PR
+import is presented as full-project coverage. Same-run dependencies and generated
+GraphQL types are reused when available after input equality, without another install.
+Sonar-specific precision when frontend types are absent remains a live-pilot question.
 
-Before marking VEX-119 complete, inspect scanner logs for successful Go/LCOV
-imports and unresolved paths; compare source/test inventory to this scope;
-compare representative covered and uncovered files and line/branch totals
-against the actual reports in both PR and master analyses. Go tooling reports
-statement coverage, while Sonar reports line coverage; a numeric equality of
-those percentages is not an acceptance requirement. Local report generation
-alone does not establish server ingestion or coverage visibility.
+A master push changing analyzed inputs imports both Go profiles and frontend LCOV.
+Separate coverage-only flags add missing report producers without changing affected
+validation obligations: backend-only changes add Vitest coverage with setup/generation;
+frontend-only changes add the two Go report runs with setup/generation; Python-only
+analyzed changes add both. These additions perform no standalone TypeScript check,
+Node build-config tests, production compile or image build. Genuine affected validation
+retains those checks. Documentation-only master changes and CI inputs outside the
+analysis scope add no producer work or scan; workflow changes already select both
+normal domains. There is no cross-revision report-cache machinery.
+
+The snippet's analyzer cache is used once at `~/.sonar/cache`. It is separate from
+the action's scanner-binary tool cache. Existing checkout pins, full history, draft
+behavior, required `SonarCloud Code Analysis` identity, and merge protections are
+preserved. The commented placeholder build/test job is not introduced.
+
+Before marking VEX-119 complete, inspect real PR and master scanner logs for Go/LCOV
+imports and unresolved paths, compare representative covered/uncovered files and
+line/branch totals with reports, and verify the existing Sonar app publishes the
+required context for the actual head and target. Go statement coverage is not
+numerically identical to Sonar line coverage. Local checks do not establish live
+coverage visibility. With Automatic Analysis off, new/updated PRs rely on this CI
+integration for fresh Sonar results; an existing same-SHA result may remain visible.
 
 Official references:
 

@@ -1,0 +1,128 @@
+"""Offline scanner selection; no network, credentials, or image obligations."""
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+
+
+def properties(root):
+    return dict(line.split('=', 1) for line in
+                (root / 'sonar-project.properties').read_text().splitlines()
+                if line and not line.startswith('#'))
+
+
+def analyzed_input(path, config):
+    # Documentation-only changes do not replace the master coverage snapshot.
+    if path.endswith('.md') or path.startswith('docs/'):
+        return False
+    roots = (config['sonar.sources'] + ',' + config['sonar.tests']).split(',')
+    return (any(path == p or path.startswith(p.rstrip('/') + '/') for p in roots)
+            or path in ('sonar-project.properties', 'go.mod', 'go.sum',
+                        'gqlgen.yml', '.gqlgenc.yml', 'Makefile'))
+
+
+def scanner_plan(name, kind, ref, repository, event, paths, groups, config,
+                 enabled=False):
+    groups = dict(groups)
+    result = {'sonar_scan': False, 'sonar_status': 'disabled',
+              'sonar_added_domains': '', 'sonar_go_paths': '',
+              'sonar_lcov_paths': '', 'sonar_coverage_backend': False,
+              'sonar_coverage_frontend': False}
+    if not enabled:
+        return groups, result
+    if event.get('deleted'):
+        result['sonar_status'] = 'deleted'
+        return groups, result
+    if name == 'pull_request':
+        pr = event.get('pull_request', {})
+        if pr.get('draft'):
+            result['sonar_status'] = 'draft'
+            return groups, result
+        if (pr.get('head', {}).get('repo', {}).get('full_name') != repository
+                or pr.get('base', {}).get('repo', {}).get('full_name') != repository):
+            result['sonar_status'] = 'fork_or_missing_trust_metadata'
+            return groups, result
+        if not pr.get('base', {}).get('ref'):
+            result['sonar_status'] = 'missing_target_branch'
+            return groups, result
+        # PR quality gates use new-code metrics; keep affected-domain validation.
+    elif name == 'push' and kind == 'branch' and ref == 'master':
+        if not any(analyzed_input(p, config) for p in paths):
+            result['sonar_status'] = 'analyzed_inputs_unchanged'
+            return groups, result
+        # A full master snapshot cannot carry forward omitted coverage reports.
+        added = [d for d in ('backend', 'frontend') if not groups[d]]
+        result['sonar_added_domains'] = ','.join(added)
+        for domain in added:
+            result['sonar_coverage_' + domain] = True
+    else:
+        result['sonar_status'] = 'event_outside_scanner_scope'
+        return groups, result
+    result['sonar_scan'] = True
+    selected = [d for d in ('backend', 'frontend')
+                if groups[d] or result['sonar_coverage_' + d]]
+    result['sonar_status'] = 'import_' + ('_and_'.join(selected) or 'no_coverage')
+    if groups['backend'] or result['sonar_coverage_backend']:
+        result['sonar_go_paths'] = config['sonar.go.coverage.reportPaths']
+    if groups['frontend'] or result['sonar_coverage_frontend']:
+        result['sonar_lcov_paths'] = config['sonar.javascript.lcov.reportPaths']
+    return groups, result
+
+
+def verify_source_snapshot(root, tested_sha, analysis_sha, config):
+    if any(not re.fullmatch(r'[0-9a-f]{40}', sha)
+           for sha in (tested_sha, analysis_sha)):
+        raise ValueError('invalid source revision')
+    # Existing tests validate the PR merge. Sonar scans actual PR HEAD. Reuse its
+    # reports only when all analyzed/test/build inputs match, not just filenames.
+    paths = sorted(set((config['sonar.sources'] + ',' + config['sonar.tests']).split(','))
+                   | {'sonar-project.properties', 'go.mod', 'go.sum', 'Makefile',
+                      'gqlgen.yml', '.gqlgenc.yml', 'VERSION'})
+    result = subprocess.run(['git', 'diff', '--quiet', tested_sha, analysis_sha,
+                             '--', *paths], cwd=root)
+    if result.returncode:
+        raise ValueError('tested merge and analysis HEAD inputs differ; refresh the PR before scanning')
+
+
+def prepare_source_reports(root, source_root, tested_sha, analysis_sha,
+                           go_paths, lcov_paths):
+    config = properties(root)
+    if not re.fullmatch(r'[0-9a-f]{40}', analysis_sha):
+        raise ValueError('invalid analysis revision')
+    checked_out = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+                                          cwd=source_root, text=True).strip()
+    if checked_out != analysis_sha:
+        raise ValueError('scanner checkout does not match the analysis revision')
+    allowed = set(config['sonar.go.coverage.reportPaths'].split(',')) | {
+        config['sonar.javascript.lcov.reportPaths']}
+    reports = list(filter(None, (go_paths + ',' + lcov_paths).split(',')))
+    if reports:
+        verify_source_snapshot(root, tested_sha, analysis_sha, config)
+    for report in reports:
+        if report not in allowed:
+            raise ValueError('unexpected coverage report path')
+        source = root / report
+        if not source.is_file() or not source.stat().st_size:
+            raise ValueError('selected domain coverage report missing or empty')
+        destination = source_root / report
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    if reports:
+        # No extra install/generation. Only reuse artifacts after input equality.
+        dependencies = root / 'ui/v2.5/node_modules'
+        destination = source_root / 'ui/v2.5/node_modules'
+        if dependencies.is_dir() and not destination.exists():
+            destination.symlink_to(dependencies.resolve(), target_is_directory=True)
+        generated = root / 'ui/v2.5/src/core/generated-graphql.ts'
+        if generated.is_file():
+            destination = source_root / 'ui/v2.5/src/core/generated-graphql.ts'
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(generated, destination)
+
+
+if __name__ == '__main__':
+    root = Path.cwd()
+    prepare_source_reports(root, root / '.sonar-source', os.environ['TESTED_SHA'],
+                           os.environ['ANALYSIS_SHA'], os.environ['GO_REPORTS'],
+                           os.environ['LCOV_REPORTS'])
