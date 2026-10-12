@@ -162,7 +162,7 @@ func (b *Budget) acquireWorkload(ctx context.Context, class Class, slots int, up
 	b.dispatch()
 	b.mu.Unlock()
 	var tick <-chan time.Time
-	if b.resourceProtected() && workload.Key != "" {
+	if b.resourceProtected(workload) && workload.Key != "" {
 		timer := time.NewTicker(time.Second)
 		defer timer.Stop()
 		tick = timer.C

@@ -7,6 +7,84 @@ import (
 	"time"
 )
 
+func TestIndependentAutoPreservesManualOtherWorkloadAdmission(t *testing.T) {
+	for _, resources := range []Resources{
+		{CPUs: 4, MemoryAvailable: 0, GPUAvailable: 1 << 30},
+		{CPUs: 4, MemoryAvailable: 1 << 30, GPUAvailable: 0},
+		{CPUs: 4, MemoryAvailable: 0, GPUAvailable: 0},
+	} {
+		for _, independent := range []bool{false, true} {
+			probe := func() Resources { return resources }
+			settings := Settings{MaxProcesses: 2, MaxGPUProcesses: 2}
+			var b *Budget
+			var err error
+			if independent {
+				b, err = NewIndependentAutoWithResources(settings, probe)
+			} else {
+				b, err = NewWithResources(settings, probe)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			w := Workload{Kind: OtherWorkload, Key: "manual-marker", MemoryPerSlot: 8 << 20, GPUPerSlot: 8 << 20}
+			n, release, err := b.AcquireWorkload(ctx, w, 2)
+			cancel()
+			if err != nil || n != 2 {
+				t.Fatalf("manual marker admission changed (independent=%v, resources=%+v): %d %v", independent, resources, n, err)
+			}
+			if b.reservedMemory != 0 || b.reservedGPU != 0 {
+				t.Fatal("manual marker unexpectedly reserved Auto headroom")
+			}
+			release()
+			if b.active != 0 || b.gpuActive != 0 || b.reservedMemory != 0 || b.reservedGPU != 0 {
+				t.Fatal("manual marker release leaked accounting")
+			}
+			if independent {
+				for _, kind := range []WorkloadKind{SpriteWorkload, PreviewWorkload} {
+					w.Kind = kind
+					_, _, err := b.AcquireWorkload(context.Background(), w, 2)
+					if !IsPressure(err) {
+						t.Fatalf("Auto family bypassed exhausted headroom: kind=%v err=%v", kind, err)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestManualOtherReleasePreservesAutoReservations(t *testing.T) {
+	b, err := NewIndependentAutoWithResources(Settings{MaxProcesses: 2, MaxGPUProcesses: 2}, func() Resources {
+		return Resources{CPUs: 4, MemoryAvailable: 1 << 30, GPUAvailable: 1 << 30}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sprite := Workload{Key: "sprite", Kind: SpriteWorkload, MemoryPerSlot: 8 << 20, GPUPerSlot: 8 << 20}
+	_, rs, err := b.AcquireWorkload(context.Background(), sprite, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, gpu := b.reservedMemory, b.reservedGPU
+	marker := sprite
+	marker.Key, marker.Kind = "marker", OtherWorkload
+	_, rm, err := b.AcquireWorkload(context.Background(), marker, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.reservedMemory != host || b.reservedGPU != gpu || host == 0 || gpu == 0 {
+		t.Fatal("manual marker changed protected workload reservations")
+	}
+	rm()
+	if b.reservedMemory != host || b.reservedGPU != gpu {
+		t.Fatal("manual marker release removed Auto reservations")
+	}
+	rs()
+	if b.reservedMemory != 0 || b.reservedGPU != 0 || b.active != 0 || b.gpuActive != 0 {
+		t.Fatal("mixed release leaked accounting")
+	}
+}
+
 func TestWorkloadAggregateAcrossPlansAndCancellation(t *testing.T) {
 	b, _ := NewIndependentAutoWithResources(Settings{MaxProcesses: 8, MaxGPUProcesses: 8}, func() Resources { return Resources{CPUs: 8, MemoryAvailable: -1, GPUAvailable: -1} })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

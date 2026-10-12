@@ -99,8 +99,10 @@ export function useGenerationTuningRefresh(
   }, [loading]);
 
   useEffect(() => {
-    const job = data?.jobsSubscribe.job;
+    const event = data?.jobsSubscribe;
+    const job = event?.job;
     if (
+      event?.type === GQL.JobStatusUpdateType.Remove &&
       job &&
       (/^(Generating|Scanning)(?:\.{3}|\s)/.test(job.description) ||
         job.subTasks?.some((task) =>

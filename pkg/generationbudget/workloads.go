@@ -14,7 +14,10 @@ func (b *Budget) AutoWorkload(w Workload) bool {
 func (b *Budget) CanTuneWorkload(w Workload) bool {
 	return b.AutoWorkload(w) && b.requested.MaxProcesses != 1 && b.requested.MaxGPUProcesses != 1
 }
-func (b *Budget) resourceProtected() bool { return b.AutoGPU() || b.independentAuto }
+
+// Independent Auto protects only its workload families. Positive manual limits
+// for other rendering types retain their existing admission and accounting.
+func (b *Budget) resourceProtected(w Workload) bool { return b.AutoWorkload(w) }
 
 // Caller holds mu. Family ceilings count lanes across files and scoped plans.
 func (b *Budget) workloadLimit(kind WorkloadKind) int {

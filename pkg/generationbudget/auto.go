@@ -248,7 +248,7 @@ func (e *PressureError) Unwrap() error { return e.Err }
 func IsPressure(err error) bool        { var p *PressureError; return errors.As(err, &p) }
 
 func (b *Budget) memorySlots(w *waiter, slots int) (int, bool) {
-	if !b.resourceProtected() || w.workload.MemoryPerSlot <= 0 && w.workload.GPUPerSlot <= 0 {
+	if !b.resourceProtected(w.workload) || w.workload.MemoryPerSlot <= 0 && w.workload.GPUPerSlot <= 0 {
 		return slots, false
 	}
 	r := b.resources()
@@ -282,14 +282,14 @@ func (b *Budget) memorySlots(w *waiter, slots int) (int, bool) {
 	return slots, false
 }
 func (b *Budget) reserve(w *waiter) {
-	if !b.resourceProtected() {
+	if !b.resourceProtected(w.workload) {
 		return
 	}
 	b.reservedMemory += int64(w.slots) * w.workload.MemoryPerSlot
 	b.reservedGPU += int64(w.slots) * w.workload.GPUPerSlot
 }
 func (b *Budget) unreserve(w *waiter) {
-	if !b.resourceProtected() {
+	if !b.resourceProtected(w.workload) {
 		return
 	}
 	b.reservedMemory -= int64(w.slots) * w.workload.MemoryPerSlot

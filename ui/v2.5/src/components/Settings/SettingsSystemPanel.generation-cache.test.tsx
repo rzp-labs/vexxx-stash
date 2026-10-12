@@ -225,7 +225,9 @@ function fixture() {
   const event = (
     description = "Generating...",
     status = "RUNNING",
-    type = "UPDATE"
+    type = "UPDATE",
+    id = "generation-1",
+    progress = 0.5
   ) => {
     events?.next({
       data: {
@@ -234,11 +236,11 @@ function fixture() {
           type,
           job: {
             __typename: "Job",
-            id: "generation-1",
+            id,
             description,
             status,
             subTasks: [],
-            progress: 0.5,
+            progress,
             processed: 1,
             total: 2,
             error: null,
@@ -294,6 +296,36 @@ afterEach(() => {
 });
 
 describe("real Apollo generation tuning refresh", () => {
+  it("keeps a measured number stable through spaced progress updates and refreshes only at completion", async () => {
+    const f = fixture();
+    f.setValue(2);
+    const view = render(f.element());
+    await flush();
+    f.setValue(3);
+    for (let i = 0; i < 10; i++) {
+      act(() =>
+        f.event(
+          "Generating...",
+          "RUNNING",
+          "UPDATE",
+          "generation-1",
+          (i + 1) / 11
+        )
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(f.queries()).toBe(1);
+      expect(row("sprite").getByText("2")).toBeInTheDocument();
+      expect(row("sprite").queryByText("Adapting")).not.toBeInTheDocument();
+    }
+    act(() => f.event("Generating...", "FINISHED", "REMOVE"));
+    await advance();
+    expect(f.queries()).toBe(2);
+    expect(row("sprite").getByText("3")).toBeInTheDocument();
+    view.unmount();
+    f.client.stop();
+  });
   it.each(["http", "graphql", "incomplete"] as const)(
     "withholds cached numbers after a failed final-event refetch (%s) and recovers without reconnecting",
     async (kind) => {
@@ -349,6 +381,21 @@ describe("real Apollo generation tuning refresh", () => {
     });
     expect(f.queries()).toBe(4); // Entry plus three attempts in the recovery cycle.
     expect(f.peak()).toBe(1);
+    for (let i = 0; i < 10; i++) {
+      act(() =>
+        f.event(
+          "Generating...",
+          "RUNNING",
+          "UPDATE",
+          "generation-1",
+          (i + 1) / 11
+        )
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(f.queries()).toBe(4);
+    }
     for (const kind of ["sprite", "preview"] as const) {
       expect(row(kind).queryByText("2")).not.toBeInTheDocument();
       expect(row(kind).getByText("Adapting")).toBeInTheDocument();
@@ -494,10 +541,10 @@ describe("real Apollo generation tuning refresh", () => {
     await flush();
     f.setValue(2);
     f.hold(true);
-    act(() => f.event());
+    act(() => f.event("Generating...", "FINISHED", "REMOVE"));
     await advance();
     f.setValue(3);
-    act(() => f.event("Generating...", "FINISHED", "REMOVE"));
+    act(() => f.event("Generating...", "FINISHED", "REMOVE", "generation-2"));
     await advance();
     expect(f.queries()).toBe(2);
     expect(f.peak()).toBe(1);
@@ -542,7 +589,7 @@ describe("real Apollo generation tuning refresh", () => {
       value: true,
     });
     f.setValue(2);
-    act(() => f.event());
+    act(() => f.event("Generating...", "FINISHED", "REMOVE"));
     await advance();
     expect(f.queries()).toBe(1);
     Object.defineProperty(document, "hidden", {
@@ -558,7 +605,7 @@ describe("real Apollo generation tuning refresh", () => {
     act(() => ws.connected?.());
     await advance();
     expect(row("sprite").getByText("3")).toBeInTheDocument();
-    act(() => f.event());
+    act(() => f.event("Generating...", "FINISHED", "REMOVE", "generation-2"));
     view.unmount();
     await advance();
     expect(f.queries()).toBe(3);
