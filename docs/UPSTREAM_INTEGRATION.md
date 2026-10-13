@@ -333,7 +333,7 @@ Backend features requiring no (or minimal) schema changes.
 
 ---
 
-## Wave 2 — Phase 8: Schema Extensions (Custom Fields, Career Dates) � IN PROGRESS
+## Wave 2 — Phase 8: Schema Extensions (Custom Fields, Career Dates) 🔄 IN PROGRESS
 
 **⚠ Schema Note:** Vexxx uses 76-86 for its own features. Upstream schemas 76-85 map to Vexxx 87-95. Upstream 84 (folder_basename) was already applied as Vexxx 86 in Phase 7.
 
