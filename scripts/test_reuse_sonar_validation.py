@@ -21,7 +21,7 @@ ENTRIES = [dict(path='app.go', mode='100644', type='blob', sha='2' * 40),
            dict(path=reuse.WORKFLOW, mode='100644', type='blob', sha='3' * 40),
            dict(path='sonar-project.properties', mode='100644', type='blob', sha='4' * 40)]
 INPUTS = reuse.fingerprint(ENTRIES, VARIABLES)
-PLAN = dict(checkout=M, head=H, base=B, tree=T, pr=65, target='master', action='synchronize',
+PLAN = dict(checkout=M, head=H, base=B, tree=T, pr=65, target='master', action='synchronize', build_image=False,
             sonar_go_paths='dist/coverage/go-unit.out,dist/coverage/go-integration.out',
             sonar_lcov_paths='dist/coverage/frontend/lcov.info')
 IDENTITY = dict(head=H, base=B, tree=T, merge=M, target='master')
@@ -63,7 +63,7 @@ class Fixture:
                           tree=self.tree, head=self.head, base=B, pr=65, input_digest=INPUTS,
                           workflow_digest=reuse.digest(WORKFLOW),
                           variables_digest=reuse.digest(reuse.canonical(VARIABLES)),
-                          domains={d: not inherited for d in reuse.DOMAINS})
+                          build_image=False, domains={d: not inherited for d in reuse.DOMAINS})
         if inherited:
             for step in self.job['steps']:
                 if any(step['name'] in names for names in reuse.DOMAINS.values()):
@@ -214,6 +214,69 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(set(source['reports']), {'dist/coverage/go-unit.out',
                          'dist/coverage/go-integration.out', 'dist/coverage/frontend/lcov.info'})
         self.assertEqual(source['check_id'], '')  # Other events never reuse scan clearance.
+
+    def test_draft_scan_with_only_final_packaging_guard_failure_clears_readiness(self):
+        fixture = Fixture()
+        fixture.run['conclusion'] = fixture.job['conclusion'] = 'failure'
+        fixture.job['steps'].append(dict(name='Require selected packaging validation',
+                                         status='completed', conclusion='failure'))
+        self.assertEqual(fixture.find(ready=True)['check_id'], 999)
+        # A failure/cancellation outside the deliberately pending guard is fatal.
+        for name in ('other failed step', 'Submit analysis to the existing Sonar project',
+                     'Record current native Sonar clearance', 'Save current Sonar clearance'):
+            for outcome in ('failure', 'cancelled'):
+                changed = copy.deepcopy(fixture)
+                matches = [s for s in changed.job['steps'] if s['name'] == name]
+                if matches:
+                    matches[0]['conclusion'] = outcome
+                else:
+                    changed.job['steps'].append(dict(name=name, status='completed', conclusion=outcome))
+                self.assertIsNone(changed.find(ready=True))
+
+    def image_fixture(self):
+        fixture = Fixture()
+        fixture.proof['build_image'] = True
+        for domain in ('backend', 'frontend'):
+            host = next(s for s in fixture.job['steps'] if s['name'] == reuse.DOMAINS[domain][-1])
+            host['conclusion'] = 'skipped'
+        fixture.job['steps'] += [dict(name=name, status='completed', conclusion='success')
+                                for name in ('Build Linux amd64 image locally', 'Smoke test container')]
+        fixture.refresh()
+        return fixture
+
+    def test_image_donor_compile_requires_actual_build_and_smoke_with_skipped_host(self):
+        fixture = self.image_fixture()
+        self.assertEqual(fixture.find()['covered'], set(reuse.DOMAINS))
+        self.assertEqual(fixture.find(ready=True)['check_id'], 999)
+        for name in ('Build Linux amd64 image locally', 'Smoke test container'):
+            for outcome in ('failure', 'skipped', 'missing'):
+                changed = copy.deepcopy(fixture)
+                if outcome == 'missing':
+                    changed.job['steps'] = [s for s in changed.job['steps'] if s['name'] != name]
+                else:
+                    next(s for s in changed.job['steps'] if s['name'] == name)['conclusion'] = outcome
+                self.assertEqual(changed.find()['covered'], {'python'})
+                self.assertIsNone(changed.find(ready=True))
+        for domain in ('backend', 'frontend'):
+            for outcome in ('success', 'failure', 'missing'):
+                changed = copy.deepcopy(fixture)
+                host_name = reuse.DOMAINS[domain][-1]
+                if outcome == 'missing':
+                    changed.job['steps'] = [s for s in changed.job['steps'] if s['name'] != host_name]
+                else:
+                    next(s for s in changed.job['steps'] if s['name'] == host_name)['conclusion'] = outcome
+                self.assertNotIn(domain, changed.find()['covered'])
+
+    def test_build_provenance_flag_requires_actual_boolean(self):
+        for value in ('true', 1, None):
+            fixture = self.image_fixture()
+            fixture.proof['build_image'] = value
+            fixture.refresh()
+            self.assertIsNone(fixture.find())
+        fixture = self.image_fixture()
+        del fixture.proof['build_image']
+        fixture.refresh()
+        self.assertIsNone(fixture.find())
 
     def test_failed_sonar_donor_can_prove_native_tests_but_not_clearance(self):
         fixture = Fixture()
@@ -389,6 +452,20 @@ class RecordTests(unittest.TestCase):
             proof = json.loads(target.read_bytes())
             self.assertEqual(proof['domains'], dict(backend=True, frontend=False, python=True))
             self.assertEqual(proof['tree'], T)
+            self.assertIs(proof['build_image'], False)
+
+    def test_record_image_provenance_requires_boolean_and_preserves_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(GITHUB_REPOSITORY=REPO, GITHUB_RUN_ID='124', GITHUB_RUN_ATTEMPT='2',
+                       EXECUTED_BACKEND='true', EXECUTED_FRONTEND='true', EXECUTED_PYTHON='false',
+                       SONAR_VALIDATION_EVIDENCE_PATH=str(Path(directory) / 'validation-evidence.json'))
+            with patch.dict(reuse.os.environ, env):
+                reuse.record_validation({**PLAN, 'build_image': True}, WORKFLOW, VARIABLES, INPUTS)
+                proof = json.loads(Path(env['SONAR_VALIDATION_EVIDENCE_PATH']).read_bytes())
+                self.assertIs(proof['build_image'], True)
+                for value in ('true', 1, None):
+                    with self.assertRaisesRegex(ValueError, 'image-build selection'):
+                        reuse.record_validation({**PLAN, 'build_image': value}, WORKFLOW, VARIABLES, INPUTS)
 
     def clearance_environment(self, directory):
         return dict(GITHUB_REPOSITORY=REPO, GITHUB_RUN_ID='124', GITHUB_RUN_ATTEMPT='2',

@@ -84,7 +84,8 @@ their existing validation/publication policy and do not run Sonar.
 
 PR scans import only their selected Go/UI reports. A prior completed native run
 may supply those reports when independent Git input/workflow/variable comparison,
-actual generation/test/production-compile results, fresh attempts and artifact
+actual generation/test/production-compile results (or a real image build/smoke
+with skipped host compiles), fresh attempts and artifact
 digests prove equivalence. Only `sonar.exclusions` may differ for that validation
 reuse; a changed exclusion list always scans again. Reused reports retain their
 original provenance and are not uploaded as newly produced coverage.
@@ -93,7 +94,11 @@ The scanner waits for its actual quality gate. After it succeeds, CI records its
 real analysis task and a fresh successful `SonarCloud Code Analysis` result from
 app ID 12526 for the actual head and PR. Ready events require that completed scan's
 exact head/base/target/full tree/configuration and independently verified native
-validation, then reuse clearance. Other PR events scan again. Current GitHub PR
+validation, then reuse clearance. A draft packaging change may record valid native/Sonar clearance before its final
+packaging guard fails the required job. Only that sole, expected guard failure can
+qualify a scan donor; the ready run must complete the existing image build/smoke.
+Other PR events scan again. Pending mergeability receives bounded retries while
+head/base/target identities are rechecked. Current GitHub PR
 metadata is checked before work, before scan and after clearance. This cannot
 atomically prevent a base change during merge; server-side strict up-to-date
 protection or checks on a merge-queue group SHA remain necessary.

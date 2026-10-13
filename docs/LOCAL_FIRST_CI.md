@@ -25,14 +25,16 @@ selected groups. Unknown paths select all test domains, not an image.
 Drafts run affected validation and Sonar automatically under `ci-required`, before
 peer review. The job starts immediately and verifies planner success, valid domain
 coverage, generation, selected tests and compilation. Draft packaging changes
-remain pending separate build authorization; the gate cannot represent missing
-packaging as passed. Superseded PR runs alone are cancelled. Master protection and
+remain pending separate build authorization. Native validation and Sonar can clear
+first; a final packaging guard keeps `ci-required` unsuccessful until the existing
+ready build and smoke test complete. Missing packaging is never reported as passed. Superseded PR runs alone are cancelled. Master protection and
 the native required `SonarCloud Code Analysis` app check are unchanged.
 
 For same-repository PRs, native tests and reports can be reused from a completed
 run only after independently verifying the complete tracked input inventory,
 workflow bytes, declared variables, current run attempt, artifact digests and actual
-successful generation/test/production-compile steps. Only a `sonar.exclusions`
+successful generation/test/production-compile steps. An image donor must instead
+prove its real successful Docker build and smoke test with skipped host compiles. Only a `sonar.exclusions`
 configuration change can differ between validation inputs; it always needs a new
 scan. Missing or malformed test evidence executes selected checks normally. An
 artifact assertion alone cannot authorize reuse.
@@ -40,10 +42,15 @@ artifact assertion alone cannot authorize reuse.
 Marking ready requires a completed successful pre-review scan and the native
 Sonar app result for the current head, base, target and complete merge-result Git
 tree. A ready event verifies those identities again and reuses clearance rather
-than scanning twice. Other PR events scan again, including any change after review.
+than scanning twice. A draft packaging donor may have a failed final packaging
+guard, but its native validation, scan and recorded clearance must all pass, and
+that guard must be its sole failed step. Other PR events scan again, including any change after review.
 A base advance or retarget requires new validation; equal head SHAs or diff summaries
 alone are insufficient. Sonar's supported HEAD checkout must have exactly the
 same Git tree as the tested merge. Branches with merge-only changes must be updated.
+
+Pending GitHub mergeability is retried briefly with identities checked each time;
+settled conflicts, changed identities and exhausted retries still fail.
 
 The workflow checks current GitHub PR metadata before validation, before scanning
 and after native clearance. These checks cannot atomically lock the base at merge.

@@ -353,7 +353,7 @@ class CurrentPRIdentityTests(unittest.TestCase):
             self.pr = self.copy(original)
             self.pr['mergeable'] = value
             with self.assertRaises(ValueError):
-                verify_current_pr(self.api, self.plan, REPO)
+                verify_current_pr(self.api, self.plan, REPO, sleeper=lambda _: None)
         self.pr = self.copy(original)
         for record in (self.head, self.merge):
             record['tree']['sha'] = 'e' * 40
@@ -363,6 +363,38 @@ class CurrentPRIdentityTests(unittest.TestCase):
         self.merge['parents'].reverse()
         with self.assertRaisesRegex(ValueError, 'parents changed'):
             verify_current_pr(self.api, self.plan, REPO)
+
+
+    def test_pending_mergeability_retries_until_exact_identity_is_available(self):
+        from unittest.mock import Mock
+        settled = self.copy(self.pr)
+        pending = self.copy(settled)
+        pending['mergeable'] = None
+        responses = iter([pending, pending, settled])
+        def api(path):
+            return next(responses) if '/pulls/' in path else self.api(path)
+        pause = Mock()
+        result = verify_current_pr(api, self.plan, REPO, sleeper=pause)
+        self.assertEqual(result['tree'], self.plan['tree'])
+        self.assertEqual(pause.call_count, 2)
+        pause.assert_called_with(2)
+
+    def test_pending_retry_still_rejects_changed_identity_and_times_out(self):
+        from unittest.mock import Mock
+        self.pr['mergeable'] = None
+        pause = Mock()
+        with self.assertRaisesRegex(ValueError, 'unavailable'):
+            verify_current_pr(self.api, self.plan, REPO, sleeper=pause)
+        self.assertEqual(pause.call_count, 5)
+        pending = self.copy(self.pr)
+        changed = self.copy(self.pr)
+        changed['base']['sha'] = 'e' * 40
+        responses = iter([pending, changed])
+        def api(path):
+            self.assertIn('/pulls/', path)
+            return next(responses)
+        with self.assertRaisesRegex(ValueError, 'base changed'):
+            verify_current_pr(api, self.plan, REPO, sleeper=lambda _: None)
 
 
 if __name__ == '__main__':

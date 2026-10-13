@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 
 
 def properties(root):
@@ -82,20 +83,26 @@ def verify_source_snapshot(root, tested_sha, analysis_sha, config):
         raise ValueError('tested merge and analysis HEAD trees differ; update the branch before scanning')
 
 
-def verify_current_pr(api, plan, repository):
+def verify_current_pr(api, plan, repository, sleeper=time.sleep):
     """Bind current GitHub PR metadata and both complete Git trees to the plan."""
     number = plan.get('pr')
     if isinstance(number, bool) or not re.fullmatch(r'[1-9][0-9]*', str(number)):
         raise ValueError('invalid PR number')
     prefix = '/repos/' + repository
-    pr = api(prefix + '/pulls/' + str(number))
-    for side in ('head', 'base'):
-        if pr.get(side, {}).get('repo', {}).get('full_name') != repository:
-            raise ValueError('PR repository changed')
-        if pr[side].get('sha') != plan.get(side):
-            raise ValueError('PR ' + side + ' changed; run validation again')
-    if pr.get('state') != 'open' or pr['base'].get('ref') != plan.get('target'):
-        raise ValueError('PR target or state changed')
+    # GitHub computes mergeability asynchronously after PR updates. Retry only
+    # that pending state; reject changed identities and settled conflicts now.
+    for attempt in range(6):
+        pr = api(prefix + '/pulls/' + str(number))
+        for side in ('head', 'base'):
+            if pr.get(side, {}).get('repo', {}).get('full_name') != repository:
+                raise ValueError('PR repository changed')
+            if pr[side].get('sha') != plan.get(side):
+                raise ValueError('PR ' + side + ' changed; run validation again')
+        if pr.get('state') != 'open' or pr['base'].get('ref') != plan.get('target'):
+            raise ValueError('PR target or state changed')
+        if pr.get('mergeable') is not None or attempt == 5:
+            break
+        sleeper(2)
     merge = pr.get('merge_commit_sha', '')
     if pr.get('mergeable') is not True or not re.fullmatch(r'[0-9a-f]{40}', merge):
         raise ValueError('current PR merge result is unavailable')

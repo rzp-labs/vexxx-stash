@@ -217,7 +217,12 @@ class RequiredContextTests(unittest.TestCase):
                           BACKEND='true', RUN_TESTS='true', TEST_RESULT=result)
             self.gate(True, DRAFT_EVENT=draft, REQUIRED_BACKEND='true', REQUIRED_TESTS='true',
                       BACKEND='true', RUN_TESTS='true', TEST_RESULT='success')
-        self.gate(False, DRAFT_EVENT='true', PACKAGING_PENDING='true')
+        self.gate(True, DRAFT_EVENT='true', PACKAGING_PENDING='true')
+        guard = next(s for s in self.jobs['ci-required']['steps'] if s.get('name') == 'Require selected packaging validation')
+        self.assertEqual(guard['if'], "steps.plan.outputs.packaging_pending == 'true'")
+        self.assertNotEqual(subprocess.run(['bash'], input=guard['run'], text=True, capture_output=True).returncode, 0)
+        steps = self.jobs['ci-required']['steps']
+        self.assertGreater(steps.index(guard), next(i for i,s in enumerate(steps) if s.get('name') == 'Save current Sonar clearance'))
 
     def test_pr_native_reuse_requires_independently_verified_inputs(self):
         proven = dict(PR_EVENT='true', REUSE_ALLOWED='false', PR_REUSE_VALIDATED='true',

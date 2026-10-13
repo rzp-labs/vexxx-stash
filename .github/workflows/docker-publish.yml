@@ -356,8 +356,6 @@ jobs:
           draft = e['DRAFT_EVENT'] == 'true'
           if e['DRAFT_EVENT'] not in ('true', 'false') or e['DEFERRED'] != 'false':
               errors.append('Automatic validation must not be deferred')
-          if e.get('PACKAGING_PENDING') == 'true':
-              errors.append('Packaging validation requires separate authorization')
           reused = False
           for domain in ('BACKEND', 'FRONTEND', 'PYTHON'):
               values = [e[domain], e['REQUIRED_' + domain], e['REUSED_' + domain]]
@@ -427,7 +425,9 @@ jobs:
           with Path(e['GITHUB_STEP_SUMMARY']).open('a') as summary:
               summary.write('\n\n' + (
               '\n'.join(errors) if errors else (
-                  'All selected validation obligations passed (executed or verified equivalent native results).')))
+                  'All selected native validation obligations passed (executed or verified equivalent native results).' +
+                  (' Packaging remains unverified; the final required job will fail until authorized validation.'
+                   if e.get('PACKAGING_PENDING') == 'true' else ''))))
           if errors:
               raise SystemExit('\n'.join(errors))
           PYCODE
@@ -546,6 +546,14 @@ jobs:
           path: ${{ env.SONAR_CLEARANCE_PATH }}
           if-no-files-found: error
           retention-days: 7
+
+      # Draft packaging must not prevent native validation or pre-review Sonar.
+      # Keep ci-required unsuccessful until the existing ready build/smoke runs.
+      - name: Require selected packaging validation
+        if: steps.plan.outputs.packaging_pending == 'true'
+        run: |
+          echo 'Packaging remains unverified; authorize the existing ready build and smoke test before merge.'
+          exit 1
 
   publish:
     needs: ci-required

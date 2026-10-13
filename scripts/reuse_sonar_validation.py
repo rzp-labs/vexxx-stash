@@ -186,6 +186,37 @@ def source_job(api, run):
     return job
 
 
+def eligible_scan_donor(run, job):
+    """Accept the deliberately pending draft packaging guard, never other failures."""
+    if run.get('conclusion') == 'success' and job.get('conclusion') == 'success':
+        return all(step.get('status') == 'completed' and step.get('conclusion') in ('success', 'skipped')
+                   for step in job.get('steps', []))
+    if run.get('conclusion') != 'failure' or job.get('conclusion') != 'failure':
+        return False
+    steps = job.get('steps', [])
+    failed = [step for step in steps if step.get('conclusion') not in ('success', 'skipped')]
+    return (len(failed) == 1 and failed[0].get('name') == 'Require selected packaging validation'
+            and failed[0].get('status') == 'completed' and failed[0].get('conclusion') == 'failure'
+            and all(step.get('status') == 'completed' for step in steps))
+
+
+def domain_covered(job, domain, build_image):
+    if type(build_image) is not bool:
+        return False
+    names = DOMAINS[domain]
+    if domain == 'python':
+        return all(step_passed(job, name) for name in names)
+    if not all(step_passed(job, name) for name in names[:-1]):
+        return False
+    if not build_image:
+        return step_passed(job, names[-1])
+    host = [step for step in job.get('steps', []) if step.get('name') == names[-1]]
+    return (len(host) == 1 and host[0].get('status') == 'completed'
+            and host[0].get('conclusion') == 'skipped'
+            and step_passed(job, 'Build Linux amd64 image locally')
+            and step_passed(job, 'Smoke test container'))
+
+
 def sonar_check_link(value, pr_number, project_key=PROJECT_KEY):
     """The native app's project/PR URL binds checks with no GitHub association."""
     try:
@@ -301,12 +332,14 @@ def find_source(api, download, plan, identity, repository, current_run, workflow
                     continue
             elif candidate != run['head_sha']:
                 continue
+            if type(proof.get('build_image')) is not bool:
+                continue
             proven = {d for d in DOMAINS if proof.get('domains', {}).get(d) is True
-                      and all(step_passed(job, name) for name in DOMAINS[d])}
+                      and domain_covered(job, d, proof['build_image'])}
             covered = proven & required
             report_domains = proven & needed_reports
             pending_clearance = None
-            if ready and run.get('conclusion') == 'success' and run['head_sha'] == identity['head']:
+            if ready and eligible_scan_donor(run, job) and run['head_sha'] == identity['head']:
                 try:
                     checked = exact_clearance(api, download, run, job, identity, plan,
                                                digest(workflow), digest(properties))
@@ -326,7 +359,7 @@ def find_source(api, download, plan, identity, repository, current_run, workflow
             if not trusted_run(fresh, repository, workflow_data['id'], plan['pr']) or (
                     fresh['run_attempt'] != run['run_attempt'] or fresh['head_sha'] != run['head_sha']):
                 continue
-            if pending_clearance and fresh.get('conclusion') == 'success':
+            if pending_clearance and eligible_scan_donor(fresh, job):
                 clearance = pending_clearance
             result = dict(run=run['id'], attempt=run['run_attempt'], revision=candidate, head=run['head_sha'],
                           tree=donor_tree, covered=covered, reports=reports, report_domains=report_domains, check_id='')
@@ -349,9 +382,10 @@ def find_source(api, download, plan, identity, repository, current_run, workflow
         fresh_scan = api(f"/actions/runs/{clearance['run']}")
         if (not trusted_run(fresh_scan, repository, workflow_data['id'], plan['pr'])
                 or fresh_scan.get('event') != 'pull_request'
-                or fresh_scan.get('conclusion') != 'success'
                 or fresh_scan['run_attempt'] != clearance['attempt']
                 or fresh_scan['head_sha'] != identity['head']):
+            return None
+        if not eligible_scan_donor(fresh_scan, source_job(api, fresh_scan)):
             return None
         fresh_check = find_check(api, identity, plan['pr'], clearance['scan_started_at'],
                                  clearance['check_id'])
@@ -390,8 +424,11 @@ def record_validation(plan, workflow, variables, inputs):
     domains = {d: e['EXECUTED_' + d.upper()] == 'true' for d in DOMAINS}
     if any(e['EXECUTED_' + d.upper()] not in ('true', 'false') for d in DOMAINS):
         raise ValueError('invalid executed-domain selection')
+    if type(plan.get('build_image')) is not bool:
+        raise ValueError('invalid image-build selection')
     proof = dict(schema=1, repository=e['GITHUB_REPOSITORY'], run=int(e['GITHUB_RUN_ID']),
                  attempt=int(e['GITHUB_RUN_ATTEMPT']), checkout=plan['checkout'], tree=plan['tree'],
+                 build_image=plan['build_image'],
                  head=plan.get('head', plan['checkout']), base=plan.get('base', ''),
                  pr=plan.get('pr'), domains=domains, input_digest=inputs,
                  workflow_digest=digest(workflow), variables_digest=digest(canonical(variables)))
