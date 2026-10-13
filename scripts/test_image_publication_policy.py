@@ -98,8 +98,8 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                     with self.subTest(base=base, path=path, draft=draft):
                         result = self.plan(name="pull_request", paths=[path],
                                            event={"pull_request": {"base": {"ref": base}, "draft": draft}})
-                        self.assertEqual(result["deferred"], draft)
-                        self.assertEqual(result["run_tests"], tests and not draft)
+                        self.assertFalse(result["deferred"])
+                        self.assertEqual(result["run_tests"], tests)
                         self.assertEqual(result["build_image"], image and not draft)
                         self.assertFalse(result["publish"])
                         self.assertEqual(result["image_ref"], "")
@@ -171,17 +171,18 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                     self.assertFalse(ready["publish"])
                 draft = self.plan(name="pull_request", paths=[path],
                                   event={"pull_request": {"draft": True}})
-                self.assertTrue(draft["deferred"])
-                self.assertFalse(draft["run_tests"] or draft["build_image"] or draft["publish"])
+                self.assertFalse(draft["deferred"])
+                self.assertTrue(draft["run_tests"] and draft["packaging_pending"])
+                self.assertFalse(draft["build_image"] or draft["publish"])
         self.assertEqual(policy.affected(["scripts/ffmpeg/README.md"]), (False, False))
         self.assertFalse(policy.obligations(["scripts/gpu_generation/benchmark.py"])["build_image"])
 
-    def test_drafts_defer_and_ready_transition_selects_validation(self):
+    def test_drafts_validate_and_hold_packaging_until_authorized(self):
         for draft in (True, False):
             result = self.plan(name='pull_request', paths=['docker/build/x86_64/Dockerfile'],
                                event={'pull_request': {'draft': draft}})
-            self.assertEqual(result['deferred'], draft)
-            self.assertEqual(result['run_tests'], not draft)
+            self.assertFalse(result['deferred'])
+            self.assertTrue(result['run_tests'])
             self.assertEqual(result['build_image'], not draft)
 
     def test_manual_publication_requires_master(self):
@@ -227,9 +228,9 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         for metadata in (None, 'd' * 40, merge):
             pr = {'base': {'sha': BASE}, 'head': {'sha': SHA}, 'merge_commit_sha': metadata}
             with patch.object(policy.subprocess, 'check_output',
-                              return_value=f'{merge} {BASE} {SHA}\n'.encode()) as run:
+                              side_effect=[f'{merge} {BASE} {SHA}\n'.encode(), 't' * 40 + '\n', 't' * 40 + '\n']) as run:
                 policy.validate_pr_merge(Path.cwd(), pr, merge)
-            self.assertEqual(run.call_args.args[0], ['git', 'rev-list', '--parents', '-n', '1', merge])
+            self.assertEqual(run.call_args_list[0].args[0], ['git', 'rev-list', '--parents', '-n', '1', merge])
 
     def test_pr_merge_rejects_wrong_head_base_or_nonmerge_checkout(self):
         merge = 'c' * 40
@@ -347,7 +348,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertEqual(validator['env']['PACKAGING_EVIDENCE_PATH'], '/tmp/pr-packaging.json')
         evidence_save = next(step for step in validator['steps'] if step.get('name') == 'Save PR packaging evidence')
         self.assertEqual(evidence_save['with']['path'], '${{ env.PACKAGING_EVIDENCE_PATH }}')
-        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read', 'id-token': 'write'})
+        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read', 'checks': 'read', 'id-token': 'write'})
         self.assertNotIn('needs', validator)  # Required check starts immediately.
         self.assertNotIn('if', validator)  # It must never be skipped for a draft.
         self.assertFalse(any('login-action' in step.get('uses', '') for step in validator['steps']))
@@ -386,8 +387,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertIn('ready_for_review', document['on']['pull_request']['types'])
         self.assertIn('converted_to_draft', document['on']['pull_request']['types'])
         self.assertEqual(document['env']['POSTHOG_UPLOAD_REQUIRED'], 'false')
-        self.assertIn("'validation-deferred' || 'ci-required'", jobs['ci-required']['name'])
-        self.assertIn('github.event.pull_request.draft', jobs['ci-required']['name'])
+        self.assertEqual(jobs['ci-required']['name'], 'ci-required')
         compiles = [step for step in validator['steps'] if step.get('name', '').startswith('Production ')]
         self.assertEqual(len(compiles), 2)
         for step in compiles:

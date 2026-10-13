@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import image_publication_policy as publication
-from sonar_scan_policy import properties, scanner_plan, verify_source_snapshot, prepare_source_reports
+from sonar_scan_policy import properties, scanner_plan, verify_source_snapshot, prepare_source_reports, verify_current_pr
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = 'rzp-labs/vexxx-stash'
@@ -77,16 +77,21 @@ class ScanPolicyTests(unittest.TestCase):
                 self.assertEqual(scan['sonar_added_domains'], added)
                 self.assertFalse(new['build_image'])
 
-    def test_forks_missing_targets_and_drafts_never_receive_scanner_credentials(self):
+    def test_forks_and_missing_targets_never_receive_scanner_credentials(self):
         for event, status in ((pr(head_repo='other/fork'), 'fork_or_missing_trust_metadata'),
                               (pr(base=''), 'missing_target_branch'),
-                              (pr(draft=True), 'draft'),
                               ({'pull_request': {}}, 'fork_or_missing_trust_metadata')):
             with self.subTest(event=event):
                 old, new, scan = self.selection(['pkg/cache/lru.go'], event=event)
                 self.assertEqual(old, new)
                 self.assertFalse(scan['sonar_scan'])
                 self.assertEqual(scan['sonar_status'], status)
+
+    def test_same_repository_drafts_scan_their_selected_reports(self):
+        old, new, scan = self.selection(['pkg/cache/lru.go'], event=pr(draft=True))
+        self.assertEqual(old, new)
+        self.assertTrue(scan['sonar_scan'])
+        self.assertEqual(scan['sonar_status'], 'import_backend')
 
     def test_same_repo_stacks_scan_actual_target_without_new_validation(self):
         event = pr(base='codex/stack-base')
@@ -126,7 +131,7 @@ class ScanPolicyTests(unittest.TestCase):
         self.assertTrue(original['sonar_scan'])
         retargeted = pr(head_repo='other/fork')
         self.assertEqual(retargeted['pull_request']['head']['sha'], SHA)
-        with self.assertRaisesRegex(ValueError, 'Unsupported non-draft Sonar PR scope'):
+        with self.assertRaisesRegex(ValueError, 'Unsupported Sonar PR scope'):
             publication.plan('pull_request', 'branch', 'docs', SHA, REPO,
                              retargeted, ['README.md'], declared_version='0.2.7', sonar_enabled=True)
         # Baseline selection remains available for comparison in offline tests.
@@ -155,7 +160,7 @@ class ScanPolicyTests(unittest.TestCase):
         self.assertEqual(scan['with']['projectBaseDir'], '.sonar-source')
         self.assertLess(next(i for i,x in enumerate(steps) if x.get('id') == 'required_gate'), steps.index(scan))
         self.assertEqual(w['jobs']['ci-required']['name'],
-                         "${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'validation-deferred' || 'ci-required' }}")
+                         'ci-required')
         self.assertEqual(sum('go test -count=1' in x.get('run', '') for x in steps), 2)
         self.assertEqual(sum('pnpm run test:coverage' in x.get('run', '') for x in steps), 1)
         self.assertEqual(sum('pnpm exec vitest run --coverage' in x.get('run', '') for x in steps), 1)
@@ -177,7 +182,7 @@ class ScanPolicyTests(unittest.TestCase):
 
 
 class SourceIdentityTests(unittest.TestCase):
-    def test_static_scan_allows_reachable_python_only_merge_drift(self):
+    def test_static_scan_rejects_reachable_python_only_merge_drift(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
 
@@ -219,9 +224,10 @@ class SourceIdentityTests(unittest.TestCase):
             source = root / '.sonar-source'
             git('clone', '-q', '--shared', '.', str(source))
             subprocess.run(['git', 'checkout', '-q', '--detach', head], cwd=source, check=True)
-            with self.assertRaisesRegex(ValueError, 'inputs differ'):
+            with self.assertRaisesRegex(ValueError, 'trees differ'):
                 verify_source_snapshot(root, tested, head, CONFIG)
-            prepare_source_reports(root, source, tested, head, '', '')
+            with self.assertRaisesRegex(ValueError, 'trees differ'):
+                prepare_source_reports(root, source, tested, head, '', '')
 
     def test_static_scan_still_rejects_wrong_analysis_checkout(self):
         with tempfile.TemporaryDirectory() as d:
@@ -233,7 +239,7 @@ class SourceIdentityTests(unittest.TestCase):
                     prepare_source_reports(root, root / '.sonar-source', 'b' * 40, SHA, '', '')
                 compare.assert_not_called()
 
-    def test_real_git_rejects_source_drift_but_allows_documentation_drift(self):
+    def test_real_git_rejects_source_and_documentation_drift(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
 
@@ -251,29 +257,27 @@ class SourceIdentityTests(unittest.TestCase):
             (root / 'README.md').write_text('Documentation only\n')
             git('add', 'README.md')
             git('commit', '-qm', 'Fixture documentation')
-            verify_source_snapshot(root, original, git('rev-parse', 'HEAD'), CONFIG)
+            verify_source_snapshot(root, original, original, CONFIG)
+            with self.assertRaisesRegex(ValueError, 'trees differ'):
+                verify_source_snapshot(root, original, git('rev-parse', 'HEAD'), CONFIG)
             (root / 'pkg/helper.go').write_text('package pkg\nvar Changed = true\n')
             git('add', 'pkg/helper.go')
             git('commit', '-qm', 'Fixture source drift')
-            with self.assertRaisesRegex(ValueError, 'inputs differ'):
+            with self.assertRaisesRegex(ValueError, 'trees differ'):
                 verify_source_snapshot(root, original, git('rev-parse', 'HEAD'), CONFIG)
 
-    def test_snapshot_comparison_includes_sources_tests_and_build_inputs(self):
-        with patch('sonar_scan_policy.subprocess.run') as run:
-            run.return_value.returncode = 0
+    def test_snapshot_compares_whole_git_trees(self):
+        with patch('sonar_scan_policy.subprocess.check_output', side_effect=['c' * 40, 'c' * 40]) as run:
             verify_source_snapshot(ROOT, 'a' * 40, 'b' * 40, CONFIG)
-            args = run.call_args.args[0]
-            self.assertEqual(args[:5], ['git', 'diff', '--quiet', 'a' * 40, 'b' * 40])
-            self.assertIn('pkg', args)
-            self.assertIn('ui/v2.5', args)
-            self.assertIn('go.sum', args)
-            self.assertIn('sonar-project.properties', args)
-            run.return_value.returncode = 1
-            with self.assertRaisesRegex(ValueError, 'inputs differ'):
+            self.assertEqual([call.args[0] for call in run.call_args_list],
+                             [['git', 'rev-parse', 'a' * 40 + '^{tree}'],
+                              ['git', 'rev-parse', 'b' * 40 + '^{tree}']])
+        with patch('sonar_scan_policy.subprocess.check_output', side_effect=['c' * 40, 'd' * 40]):
+            with self.assertRaisesRegex(ValueError, 'trees differ'):
                 verify_source_snapshot(ROOT, 'a' * 40, 'b' * 40, CONFIG)
 
     def test_invalid_revision_is_rejected_before_running_git(self):
-        with patch('sonar_scan_policy.subprocess.run') as run:
+        with patch('sonar_scan_policy.subprocess.check_output') as run:
             with self.assertRaisesRegex(ValueError, 'invalid source revision'):
                 verify_source_snapshot(ROOT, 'master;anything', SHA, CONFIG)
             run.assert_not_called()
@@ -295,7 +299,8 @@ class SourceIdentityTests(unittest.TestCase):
             with patch('sonar_scan_policy.verify_source_snapshot') as compare, patch('sonar_scan_policy.subprocess.check_output', return_value=SHA + '\n'):
                 prepare_source_reports(root, source, SHA, SHA, '', '')
                 self.assertFalse((source / 'ui/v2.5/node_modules').exists())
-                compare.assert_not_called()
+                compare.assert_called_once()
+                compare.reset_mock()
                 prepare_source_reports(root, source, SHA, SHA, report.relative_to(root).as_posix(), '')
                 compare.assert_called_once()
                 self.assertEqual((source / 'ui/v2.5/node_modules').resolve(), deps.resolve())
@@ -310,6 +315,54 @@ class SourceIdentityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'report missing or empty'):
                     prepare_source_reports(root, root / '.sonar-source', SHA, SHA,
                                            CONFIG['sonar.go.coverage.reportPaths'], '')
+
+
+class CurrentPRIdentityTests(unittest.TestCase):
+    def setUp(self):
+        import copy
+        self.copy = copy.deepcopy
+        self.plan = {'pr': 65, 'head': 'a' * 40, 'base': 'b' * 40,
+                     'target': 'master', 'tree': 'c' * 40}
+        self.pr = {'state': 'open', 'mergeable': True, 'merge_commit_sha': 'd' * 40,
+                   'head': {'sha': self.plan['head'], 'repo': {'full_name': REPO}},
+                   'base': {'sha': self.plan['base'], 'ref': 'master', 'repo': {'full_name': REPO}}}
+        self.merge = {'parents': [{'sha': self.plan['base']}, {'sha': self.plan['head']}],
+                      'tree': {'sha': self.plan['tree']}}
+        self.head = {'tree': {'sha': self.plan['tree']}}
+
+    def api(self, path):
+        self.assertTrue(path.startswith('/repos/' + REPO + '/'))
+        if '/pulls/' in path:
+            return self.pr
+        return self.head if path.endswith(self.plan['head']) else self.merge
+
+    def test_exact_full_tree_accepts_metadata_only_merge_regeneration(self):
+        for merge in ('d' * 40, 'e' * 40):
+            self.pr['merge_commit_sha'] = merge
+            self.assertEqual(verify_current_pr(self.api, self.plan, REPO)['merge'], merge)
+
+    def test_current_head_base_target_conflict_and_tree_changes_fail(self):
+        original = self.copy(self.pr)
+        for side, field, value in [('head', 'sha', 'e' * 40), ('base', 'sha', 'e' * 40),
+                                   ('base', 'ref', 'other')]:
+            self.pr = self.copy(original)
+            self.pr[side][field] = value
+            with self.assertRaises(ValueError):
+                verify_current_pr(self.api, self.plan, REPO)
+        for value in (None, False):
+            self.pr = self.copy(original)
+            self.pr['mergeable'] = value
+            with self.assertRaises(ValueError):
+                verify_current_pr(self.api, self.plan, REPO)
+        self.pr = self.copy(original)
+        for record in (self.head, self.merge):
+            record['tree']['sha'] = 'e' * 40
+            with self.assertRaisesRegex(ValueError, 'trees differ'):
+                verify_current_pr(self.api, self.plan, REPO)
+            record['tree']['sha'] = self.plan['tree']
+        self.merge['parents'].reverse()
+        with self.assertRaisesRegex(ValueError, 'parents changed'):
+            verify_current_pr(self.api, self.plan, REPO)
 
 
 if __name__ == '__main__':

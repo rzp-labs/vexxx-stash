@@ -55,7 +55,7 @@ def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_i
     local = "vexxx-ci:" + sha
     declared_version = validate_version(declared_version if declared_version is not None else read_version())
     result = {"run_tests": False, "backend": False, "frontend": False, "python": False,
-              "deferred": False, "build_image": False, "publish": False,
+              "deferred": False, "build_image": False, "packaging_pending": False, "publish": False,
               "local_ref": local, "image_ref": "", "sha_ref": "", "latest_ref": "",
               "release_version": declared_version, "version": development_version(declared_version, sha)}
     if event.get("deleted"):
@@ -104,8 +104,9 @@ def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_i
         groups = obligations(paths)
         result.update(groups, run_tests=any(groups[key] for key in ("backend", "frontend", "python")))
         if event_name == "pull_request" and event.get("pull_request", {}).get("draft"):
-            result.update(deferred=True, run_tests=False, backend=False, frontend=False,
-                          python=False, build_image=False)
+            # Drafts perform affected validation and Sonar before peer review.
+            # Packaging remains an explicit, separately authorized operation.
+            result.update(packaging_pending=result['build_image'], build_image=False)
     else:
         raise ValueError("unsupported publication event")
     groups, scan = scanner_plan(event_name, ref_type, ref_name, repository, event,
@@ -116,7 +117,7 @@ def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_i
     if scan['sonar_status'] in ('fork_or_missing_trust_metadata', 'missing_target_branch'):
         # Retargeting can retain an older same-SHA Sonar success. Fail this fresh
         # required validation run; absence of a new Sonar check is not a blocker.
-        raise ValueError('Unsupported non-draft Sonar PR scope: ' + scan['sonar_status'])
+        raise ValueError('Unsupported Sonar PR scope: ' + scan['sonar_status'])
     result.update(groups, **scan)
     result['run_tests'] = any(result[key] for key in ('backend', 'frontend', 'python'))
     return result
@@ -171,6 +172,8 @@ def validate_pr_merge(cwd, pr, checkout):
         ["git", "rev-list", "--parents", "-n", "1", checkout], cwd=cwd, timeout=60).decode().split()
     if parents != [checkout, base, head]:
         raise ValueError("checkout is not the expected PR base/head merge")
+    from sonar_scan_policy import verify_source_snapshot, properties
+    verify_source_snapshot(cwd, checkout, head, properties(cwd))
 
 
 def main():
@@ -196,7 +199,8 @@ def main():
     result.update(checkout=sha, tree=tree, build_date=build_date)
     if name == "pull_request":
         pr = event["pull_request"]
-        result.update(base=pr["base"]["sha"], head=pr["head"]["sha"])
+        result.update(base=pr["base"]["sha"], head=pr["head"]["sha"],
+                      target=pr['base']['ref'], pr=event['number'], action=event.get('action', ''))
         result["merge_base"] = subprocess.check_output(
             ["git", "merge-base", result["base"], result["head"]], timeout=60).decode().strip()
     elif name == "push":

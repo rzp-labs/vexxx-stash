@@ -207,21 +207,27 @@ class RequiredContextTests(unittest.TestCase):
             result = subprocess.run(['bash'], input=self.aggregate, text=True, env=env, capture_output=True)
             self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
 
-    def test_draft_to_ready_and_back_never_emits_required_draft_success(self):
-        name = self.jobs['ci-required']['name']
-        self.assertEqual(name, "${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'validation-deferred' || 'ci-required' }}")
-        self.gate(True, DRAFT_EVENT='true', DEFERRED='true')
-        # A ready event cannot inherit draft deferral even at the same head SHA.
-        self.gate(False, DEFERRED='true')
-        self.gate(False, DRAFT_EVENT='true', DEFERRED='false')
-        for result in ('skipped', 'failure', 'cancelled', ''):
-            self.gate(False, REQUIRED_BACKEND='true', REQUIRED_TESTS='true',
-                      BACKEND='true', RUN_TESTS='true', TEST_RESULT=result)
-        self.gate(True, REQUIRED_BACKEND='true', REQUIRED_TESTS='true',
-                  BACKEND='true', RUN_TESTS='true', TEST_RESULT='success')
-        self.gate(False, DRAFT_EVENT='true', DEFERRED='true',
-                  REQUIRED_BACKEND='true', REQUIRED_TESTS='true', BACKEND='true',
-                  RUN_TESTS='true', TEST_RESULT='success')
+    def test_drafts_and_ready_require_successful_automatic_validation(self):
+        self.assertEqual(self.jobs['ci-required']['name'], 'ci-required')
+        for draft in ('true', 'false'):
+            self.gate(True, DRAFT_EVENT=draft)
+            self.gate(False, DRAFT_EVENT=draft, DEFERRED='true')
+            for result in ('skipped', 'failure', 'cancelled', ''):
+                self.gate(False, DRAFT_EVENT=draft, REQUIRED_BACKEND='true', REQUIRED_TESTS='true',
+                          BACKEND='true', RUN_TESTS='true', TEST_RESULT=result)
+            self.gate(True, DRAFT_EVENT=draft, REQUIRED_BACKEND='true', REQUIRED_TESTS='true',
+                      BACKEND='true', RUN_TESTS='true', TEST_RESULT='success')
+        self.gate(False, DRAFT_EVENT='true', PACKAGING_PENDING='true')
+
+    def test_pr_native_reuse_requires_independently_verified_inputs(self):
+        proven = dict(PR_EVENT='true', REUSE_ALLOWED='false', PR_REUSE_VALIDATED='true',
+                      CURRENT_INPUT_DIGEST='a' * 64, REUSE_INPUT_DIGEST='a' * 64,
+                      REUSE_TREE='b' * 40, REUSE_REVISION='c' * 40,
+                      REQUIRED_TESTS='true', REQUIRED_BACKEND='true', REUSED_BACKEND='true')
+        self.gate(True, **proven)
+        for overrides in ({'PR_REUSE_VALIDATED': 'false'}, {'REUSE_INPUT_DIGEST': 'd' * 64},
+                          {'REUSE_TREE': ''}, {'CURRENT_INPUT_DIGEST': ''}, {'REUSE_ATTEMPT': ''}):
+            self.gate(False, **(proven | overrides))
 
     def test_full_and_partial_reuse_require_complete_coverage_and_fresh_proof(self):
         reused = {'REQUIRED_TESTS': 'true', **{'REQUIRED_' + domain.upper(): 'true' for domain in reuse.DOMAINS},
