@@ -34,8 +34,7 @@ DOMAINS = {
                  'Frontend tests and type check', 'Production frontend compilation'),
     'python': ('Python regression tests',),
 }
-REPORTS = {'backend': {'go-unit.out': 'dist/coverage/go-unit.out',
-                       'go-integration.out': 'dist/coverage/go-integration.out'},
+REPORTS = {'backend': {'go.out': 'dist/coverage/go.out'},
            'frontend': {'lcov.info': 'dist/coverage/frontend/lcov.info'},
            'python': {'python.xml': 'dist/coverage/python.xml'}}
 ARTIFACTS = {'backend': 'go-coverage', 'frontend': 'frontend-coverage', 'python': 'python-coverage'}
