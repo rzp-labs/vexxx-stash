@@ -68,6 +68,8 @@ treat it as generic coverage XML. `sonar.javascript.lcov.reportPaths` takes LCOV
 both JavaScript and TypeScript, and `sonar.python.coverage.reportPaths` takes the
 Cobertura XML. Run the scanner from the repository root; LCOV
 source entries must resolve to `ui/v2.5/src/...`, not a different checkout path.
+`sonar.coverage.exclusions` lists `ui/v2.5/vite.config.js`: build tooling outside
+that LCOV scope can never report coverage, but it is still analyzed for issues.
 
 Reports are required to be nonempty after successful tests and retained for
 seven days as `go-coverage` / `frontend-coverage` / `python-coverage` artifacts. These are evidence,
