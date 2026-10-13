@@ -23,6 +23,12 @@ verified binary paths are grouped into directory/extension patterns. The tracked
 file matches are unchanged; font licenses, SVGs and other application text remain
 available for analysis. Dependency/generated exclusions are unchanged.
 
+The 102 SQLite migration scripts (`pkg/sqlite/migrations/*.sql`) are excluded:
+Sonar analyzes every `.sql` file as Oracle PL/SQL, which is the wrong dialect and
+warns about a missing Oracle Data Dictionary. The Go pre/post-migration code in the
+same directory stays analyzed. `sonar.python.version` is `3.12, 3.13, 3.14`, from
+the ubuntu-24.04 runner's system Python (3.12) to the `alpine:3.24` image (3.14).
+
 Build/cache and coverage directories (`dist`, `.local*`, etc.) are Git-ignored;
 they are not outside configured source roots, because those roots no longer
 exist. Effective server scope remains to be verified. Vitest's separate coverage

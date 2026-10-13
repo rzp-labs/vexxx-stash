@@ -52,6 +52,17 @@ class SonarClassificationTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(excluded(path, self.properties))
 
+    def test_sqlite_migration_sql_is_excluded_but_go_migrations_remain(self):
+        # Sonar analyzes every .sql file as Oracle PL/SQL; these are SQLite.
+        migrations = ROOT / 'pkg/sqlite/migrations'
+        sql = sorted(migrations.glob('*.sql'))
+        go = sorted(migrations.glob('*.go'))
+        self.assertTrue(sql and go)
+        for path in sql + go:
+            with self.subTest(path=path.name):
+                self.assertEqual(excluded(path.relative_to(ROOT).as_posix(), self.properties),
+                                 path.suffix == '.sql')
+
 
 if __name__ == '__main__':
     unittest.main()
