@@ -23,7 +23,8 @@ ENTRIES = [dict(path='app.go', mode='100644', type='blob', sha='2' * 40),
 INPUTS = reuse.fingerprint(ENTRIES, VARIABLES)
 PLAN = dict(checkout=M, head=H, base=B, tree=T, pr=65, target='master', action='synchronize', build_image=False,
             sonar_go_paths='dist/coverage/go-unit.out,dist/coverage/go-integration.out',
-            sonar_lcov_paths='dist/coverage/frontend/lcov.info')
+            sonar_lcov_paths='dist/coverage/frontend/lcov.info',
+            sonar_python_paths='dist/coverage/python.xml')
 IDENTITY = dict(head=H, base=B, tree=T, merge=M, target='master')
 
 
@@ -54,7 +55,7 @@ class Fixture:
                  reuse.REUSE_STEP, 'Verify every selected obligation', 'Record executed native validation',
                  'Save executed validation evidence', 'Submit analysis to the existing Sonar project',
                  'Record current native Sonar clearance', 'Save current Sonar clearance',
-                 'Retain Go coverage from this validation', 'Retain frontend coverage from this validation']
+                 *reuse.RETAIN.values()]
         names += [name for steps in reuse.DOMAINS.values() for name in steps]
         self.job = dict(name='ci-required', head_sha=self.head, run_id=self.run['id'], run_attempt=2,
                         status='completed', conclusion='success', started_at=START, completed_at=END,
@@ -91,7 +92,8 @@ class Fixture:
             ('sonar-clearance-2', {'sonar-clearance.json': reuse.canonical(self.clearance)}),
             ('go-coverage', {'go-unit.out': b'mode: atomic\nfile.go:1.1,1.3 1 1\n',
                              'go-integration.out': b'mode: atomic\nfile.go:1.1,1.3 1 0\n'}),
-            ('frontend-coverage', {'lcov.info': b'SF:ui/v2.5/src/app.ts\nDA:1,1\nend_of_record\n'})):
+            ('frontend-coverage', {'lcov.info': b'SF:ui/v2.5/src/app.ts\nDA:1,1\nend_of_record\n'}),
+            ('python-coverage', {'python.xml': b'<coverage><sources><source></source></sources></coverage>\n'})):
             ident = self.run['id'] * 10 + len(self.artifacts)
             raw = archive(files)
             self.files[ident] = raw
@@ -212,7 +214,8 @@ class ReuseTests(unittest.TestCase):
         source = fixture.find()
         self.assertEqual(source['covered'], set(reuse.DOMAINS))
         self.assertEqual(set(source['reports']), {'dist/coverage/go-unit.out',
-                         'dist/coverage/go-integration.out', 'dist/coverage/frontend/lcov.info'})
+                         'dist/coverage/go-integration.out', 'dist/coverage/frontend/lcov.info',
+                         'dist/coverage/python.xml'})
         self.assertEqual(source['check_id'], '')  # Other events never reuse scan clearance.
 
     def test_draft_scan_with_only_final_packaging_guard_failure_clears_readiness(self):
@@ -385,7 +388,7 @@ class ReuseTests(unittest.TestCase):
                 if reads > 1:
                     return {**fixture.run, 'run_attempt': 3, 'status': 'in_progress', 'conclusion': None}
             return fixture.api(path)
-        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': ''}
+        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': '', 'sonar_python_paths': ''}
         result = reuse.find_source(api, fixture.files.__getitem__, plan, IDENTITY, REPO, '1000',
                                    WORKFLOW, PROPERTIES, VARIABLES, set(), INPUTS, True)
         self.assertIsNone(result)
@@ -416,7 +419,7 @@ class ReuseTests(unittest.TestCase):
 
     def test_no_domain_ready_still_requires_real_sonar_clearance(self):
         fixture = Fixture(inherited=True)
-        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': ''}
+        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': '', 'sonar_python_paths': ''}
         result = reuse.find_source(fixture.api, fixture.files.__getitem__, plan, IDENTITY, REPO, '1000',
                                    WORKFLOW, PROPERTIES, VARIABLES, set(), INPUTS, True)
         self.assertEqual(result['covered'], set())
