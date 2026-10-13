@@ -443,14 +443,14 @@ def record_clearance(plan, workflow, properties, api=request, sleeper=time.sleep
         raise ValueError('scanner quality-gate completion is required')
     identity = current_pr(api, plan, e['GITHUB_REPOSITORY'])
     # The source checkout and explicit scanner revision must equal the cleared head.
-    head = subprocess.check_output(['git', '-C', '.sonar-source', 'rev-parse', 'HEAD'],
+    head = subprocess.check_output(['git', '-C', 'sonar-source', 'rev-parse', 'HEAD'],
                                    text=True, timeout=60).strip()
-    tree = subprocess.check_output(['git', '-C', '.sonar-source', 'rev-parse', 'HEAD^{tree}'],
+    tree = subprocess.check_output(['git', '-C', 'sonar-source', 'rev-parse', 'HEAD^{tree}'],
                                    text=True, timeout=60).strip()
     if head != identity['head'] or tree != identity['tree']:
         raise ValueError('analyzed checkout differs from current merge-result tree')
     task = dict(line.split('=', 1) for line in
-                Path('.sonar-source/.scannerwork/report-task.txt').read_text().splitlines() if '=' in line)
+                Path('sonar-source/.scannerwork/report-task.txt').read_text().splitlines() if '=' in line)
     if task.get('serverUrl', '').rstrip('/') != 'https://sonarcloud.io' or not re.fullmatch(
             r'[A-Za-z0-9_-]+', task.get('ceTaskId', '')):
         raise ValueError('missing expected Sonar analysis task')

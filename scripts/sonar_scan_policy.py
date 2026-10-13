@@ -203,7 +203,7 @@ if __name__ == '__main__':
         repository = os.environ['GITHUB_REPOSITORY']
         prefix = '/repos/' + repository
         verify_current_pr(lambda path: request(path[len(prefix):]), plan, repository)
-    prepare_source_reports(root, root / '.sonar-source', os.environ['TESTED_SHA'],
+    prepare_source_reports(root, root / 'sonar-source', os.environ['TESTED_SHA'],
                            os.environ['ANALYSIS_SHA'], os.environ['GO_REPORTS'],
                            os.environ['LCOV_REPORTS'])
     with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:

@@ -182,7 +182,12 @@ class ScanPolicyTests(unittest.TestCase):
         self.assertNotIn('continue-on-error', scan)
         self.assertEqual(sum(x.get('with', {}).get('path') == '~/.sonar/cache' for x in steps), 1)
         self.assertNotIn("base.ref == 'master'", scan['if'])
-        self.assertEqual(scan['with']['projectBaseDir'], '.sonar-source')
+        # The scanner marks every file under a dot-directory base as hidden, so
+        # Go/JS/TS/CSS/Python sensors skip them and only IaC/text files are analyzed.
+        base_dir = scan['with']['projectBaseDir']
+        self.assertFalse(any(part.startswith('.') for part in Path(base_dir).parts), base_dir)
+        checkout = next(x for x in steps if x.get('name') == 'Checkout exact source for Sonar')
+        self.assertEqual(checkout['with']['path'], base_dir)
         self.assertLess(next(i for i,x in enumerate(steps) if x.get('id') == 'required_gate'), steps.index(scan))
         self.assertEqual(w['jobs']['ci-required']['name'],
                          'ci-required')
@@ -246,7 +251,7 @@ class SourceIdentityTests(unittest.TestCase):
             self.assertFalse(selected['backend'] or selected['frontend'])
             self.assertEqual(selected['sonar_go_paths'], '')
             self.assertEqual(selected['sonar_lcov_paths'], '')
-            source = root / '.sonar-source'
+            source = root / 'sonar-source'
             git('clone', '-q', '--shared', '.', str(source))
             subprocess.run(['git', 'checkout', '-q', '--detach', head], cwd=source, check=True)
             with self.assertRaisesRegex(ValueError, 'trees differ'):
@@ -258,10 +263,10 @@ class SourceIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
-            (root / '.sonar-source').mkdir()
+            (root / 'sonar-source').mkdir()
             with patch('sonar_scan_policy.verify_source_snapshot') as compare, patch('sonar_scan_policy.subprocess.check_output', return_value='b' * 40 + '\n'):
                 with self.assertRaisesRegex(ValueError, 'checkout does not match'):
-                    prepare_source_reports(root, root / '.sonar-source', 'b' * 40, SHA, '', '')
+                    prepare_source_reports(root, root / 'sonar-source', 'b' * 40, SHA, '', '')
                 compare.assert_not_called()
 
     def test_real_git_rejects_source_and_documentation_drift(self):
@@ -311,7 +316,7 @@ class SourceIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
-            source = root / '.sonar-source'
+            source = root / 'sonar-source'
             (source / 'ui/v2.5').mkdir(parents=True)
             deps = root / 'ui/v2.5/node_modules'
             deps.mkdir(parents=True)
@@ -335,10 +340,10 @@ class SourceIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
-            (root / '.sonar-source').mkdir()
+            (root / 'sonar-source').mkdir()
             with patch('sonar_scan_policy.verify_source_snapshot'), patch('sonar_scan_policy.subprocess.check_output', return_value=SHA + '\n'):
                 with self.assertRaisesRegex(ValueError, 'report missing or empty'):
-                    prepare_source_reports(root, root / '.sonar-source', SHA, SHA,
+                    prepare_source_reports(root, root / 'sonar-source', SHA, SHA,
                                            CONFIG['sonar.go.coverage.reportPaths'], '')
 
 

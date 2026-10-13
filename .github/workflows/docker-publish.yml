@@ -490,7 +490,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          path: .sonar-source
+          path: sonar-source
           fetch-depth: 0
           persist-credentials: false
       - name: Verify source identity and reuse this run's coverage
@@ -523,7 +523,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
         with:
-          projectBaseDir: .sonar-source
+          projectBaseDir: sonar-source
           args: >-
             -Dsonar.qualitygate.wait=true
             -Dsonar.scm.revision=${{ steps.plan.outputs.head || github.sha }}

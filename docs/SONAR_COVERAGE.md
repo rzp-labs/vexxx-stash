@@ -122,10 +122,13 @@ The snippet's analyzer cache is used once at `~/.sonar/cache`. It is separate fr
 the action's scanner-binary tool cache. Existing checkout pins, full history, required `SonarCloud Code Analysis` identity, and merge protections are
 preserved. The commented placeholder build/test job is not introduced.
 
-The first merged run retained genuine Go and LCOV artifacts and passed its quality
-gate, but logged no Go or JavaScript/TypeScript coverage sensors. Coverage ingestion
-remains unresolved; absent server metrics are not zero coverage. This follow-up
-has not established a server-side cause or justified an authentication change.
+The scanner checkout must not live under a dot-directory. Early runs used
+`.sonar-source` as `projectBaseDir`; the scanner marks every file below a hidden
+base directory as hidden, and only sensors that opt into hidden files (IaC, text
+and secrets) received them. Go, JavaScript/TypeScript, CSS and Python sensors were
+skipped, so the project reported 851 IaC lines across 9 files and imported no
+coverage. The checkout is now `sonar-source`, and the workflow test rejects any
+hidden path component in `projectBaseDir`.
 
 Before marking VEX-119 complete, inspect real PR and master scanner logs for Go/LCOV
 imports and unresolved paths, compare representative covered/uncovered files and
