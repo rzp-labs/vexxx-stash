@@ -475,6 +475,18 @@ func TestPreviewReplayQueueWorkerRetainsAndWarns(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	warned := previewReplayLastWarning.Load()
+	if err := QueuePreviewReplay(blocked, replayTestRecord()); !errors.Is(err, ErrPreviewReplayQueued) {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for previewReplayLastWarning.Load() == warned {
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("rate limit allowed a second warning")
 }
 
 func TestPreviewReplaySourcePresenceAndRequestPassthrough(t *testing.T) {

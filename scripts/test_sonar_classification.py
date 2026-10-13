@@ -70,7 +70,7 @@ class SonarClassificationTests(unittest.TestCase):
             rel = path.relative_to(ROOT).as_posix()
             if (path.name.endswith('_test.go')
                     or path.name.startswith('test_') and path.suffix == '.py'
-                    or '.test.' in path.name
+                    or '.test.' in path.name or '.spec.' in path.name
                     or rel.startswith('ui/v2.5/src/test/')):
                 tests.append(rel)
         self.assertTrue(tests)
