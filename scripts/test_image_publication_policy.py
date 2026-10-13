@@ -1,5 +1,6 @@
-import json
+import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -438,6 +439,49 @@ class ImagePublicationPolicyTests(unittest.TestCase):
             for step in job["steps"]:
                 if "run" in step:
                     subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True, capture_output=True)
+
+
+    def test_pr_entrypoint_records_full_merge_identity(self):
+        merge = 'c' * 40
+        event = {'number': 65, 'action': 'synchronize',
+                 'pull_request': {'base': {'sha': BASE, 'ref': 'master', 'repo': {'full_name': REPO}},
+                                  'head': {'sha': SHA, 'repo': {'full_name': REPO}}}}
+
+        def git(command, **kwargs):
+            if command[1] == 'rev-parse':
+                return (merge if command[2] == 'HEAD' else 'd' * 40).encode() + b'\n'
+            if command[1] == 'rev-list':
+                return f'{merge} {BASE} {SHA}\n'.encode()
+            if command[1] == 'merge-base':
+                return BASE.encode() + b'\n'
+            if command[1] == 'diff':
+                return b'docs/new.md\0'
+            if command[1] == 'show':
+                return b'1760227200\n'
+            raise AssertionError(command)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_path, output, plan_path, summary = (root / name for name in
+                                                      ('event.json', 'output', 'plan.json', 'summary'))
+            event_path.write_text(json.dumps(event))
+            env = {'GITHUB_EVENT_PATH': str(event_path), 'GITHUB_EVENT_NAME': 'pull_request',
+                   'GITHUB_REF_TYPE': 'branch', 'GITHUB_REF_NAME': 'feature', 'GITHUB_SHA': merge,
+                   'GITHUB_REPOSITORY': REPO, 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1',
+                   'VALIDATION_PLAN_PATH': str(plan_path), 'GITHUB_STEP_SUMMARY': str(summary),
+                   'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, env), patch.object(policy.subprocess, 'check_output', side_effect=git), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                policy.main()
+            written = json.loads(plan_path.read_text())
+            self.assertEqual(written['base'], BASE)
+            self.assertEqual(written['head'], SHA)
+            self.assertEqual(written['target'], 'master')
+            self.assertEqual(written['pr'], 65)
+            self.assertEqual(written['action'], 'synchronize')
+            self.assertEqual(written['merge_base'], BASE)
+            self.assertIn(f'head={SHA}\n', output.read_text())
+            self.assertIn('### Validation plan', summary.read_text())
 
 
 if __name__ == "__main__":
