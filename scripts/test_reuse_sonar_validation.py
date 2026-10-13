@@ -312,6 +312,45 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(result['run'], original.run['id'])
         self.assertEqual(result['check_id'], 999)
 
+    def test_static_ready_rejects_scan_attempt_restarted_before_final_donor_check(self):
+        fixture = Fixture(inherited=True)
+        reads = 0
+        def api(path):
+            nonlocal reads
+            if path == '/actions/runs/124':
+                reads += 1
+                if reads > 1:
+                    return {**fixture.run, 'run_attempt': 3, 'status': 'in_progress', 'conclusion': None}
+            return fixture.api(path)
+        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': ''}
+        result = reuse.find_source(api, fixture.files.__getitem__, plan, IDENTITY, REPO, '1000',
+                                   WORKFLOW, PROPERTIES, VARIABLES, set(), INPUTS, True)
+        self.assertIsNone(result)
+        self.assertEqual(reads, 2)
+
+    def test_ready_rechecks_scan_donor_after_reading_separate_native_donor(self):
+        original, current = Fixture(old=True), Fixture(inherited=True)
+        scan_restarted = False
+        scan_reads = 0
+        def api(path):
+            nonlocal scan_restarted, scan_reads
+            if '/runs?' in path:
+                return {'workflow_runs': [current.run, original.run]}
+            if path == '/actions/runs/124':
+                scan_reads += 1
+                if scan_restarted:
+                    return {**current.run, 'run_attempt': 3, 'status': 'in_progress', 'conclusion': None}
+            if '/actions/runs/123' in path or path.startswith('/git/commits/' + OLD_H) or (
+                    path.startswith('/git/commits/' + OLD_M)) or '/git/trees/' + OLD_T in path or (
+                    '?ref=' + OLD_H in path or '?ref=' + OLD_M in path):
+                scan_restarted = True
+                return original.api(path)
+            return current.api(path)
+        result = reuse.find_source(api, {**original.files, **current.files}.__getitem__, PLAN, IDENTITY,
+                                   REPO, '1000', WORKFLOW, PROPERTIES, VARIABLES, set(reuse.DOMAINS), INPUTS, True)
+        self.assertIsNone(result)
+        self.assertGreaterEqual(scan_reads, 3)
+
     def test_no_domain_ready_still_requires_real_sonar_clearance(self):
         fixture = Fixture(inherited=True)
         plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': ''}

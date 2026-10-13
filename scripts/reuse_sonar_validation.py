@@ -305,11 +305,12 @@ def find_source(api, download, plan, identity, repository, current_run, workflow
                       and all(step_passed(job, name) for name in DOMAINS[d])}
             covered = proven & required
             report_domains = proven & needed_reports
+            pending_clearance = None
             if ready and run.get('conclusion') == 'success' and run['head_sha'] == identity['head']:
                 try:
                     checked = exact_clearance(api, download, run, job, identity, plan,
                                                digest(workflow), digest(properties))
-                    clearance = dict(run=run['id'], attempt=run['run_attempt'], revision=candidate,
+                    pending_clearance = dict(run=run['id'], attempt=run['run_attempt'], revision=candidate,
                                      tree=donor_tree, **checked)
                 except ERRORS:
                     pass
@@ -325,15 +326,32 @@ def find_source(api, download, plan, identity, repository, current_run, workflow
             if not trusted_run(fresh, repository, workflow_data['id'], plan['pr']) or (
                     fresh['run_attempt'] != run['run_attempt'] or fresh['head_sha'] != run['head_sha']):
                 continue
-            result = dict(run=run['id'], attempt=run['run_attempt'], revision=candidate,
+            if pending_clearance and fresh.get('conclusion') == 'success':
+                clearance = pending_clearance
+            result = dict(run=run['id'], attempt=run['run_attempt'], revision=candidate, head=run['head_sha'],
                           tree=donor_tree, covered=covered, reports=reports, report_domains=report_domains, check_id='')
             if best is None or (len(covered), len(report_domains)) > (
                     len(best['covered']), len(best['report_domains'])):
                 best = result
         except ERRORS:
             continue
+    if best is not None:
+        fresh_native = api(f"/actions/runs/{best['run']}")
+        if (not trusted_run(fresh_native, repository, workflow_data['id'], plan['pr'])
+                or fresh_native['run_attempt'] != best['attempt']
+                or fresh_native['head_sha'] != best['head']):
+            return None
     if ready:
         if not clearance:
+            return None
+        # The scan donor is independent of the native report donor. Revalidate
+        # its latest attempt after all other candidates/artifacts were read.
+        fresh_scan = api(f"/actions/runs/{clearance['run']}")
+        if (not trusted_run(fresh_scan, repository, workflow_data['id'], plan['pr'])
+                or fresh_scan.get('event') != 'pull_request'
+                or fresh_scan.get('conclusion') != 'success'
+                or fresh_scan['run_attempt'] != clearance['attempt']
+                or fresh_scan['head_sha'] != identity['head']):
             return None
         fresh_check = find_check(api, identity, plan['pr'], clearance['scan_started_at'],
                                  clearance['check_id'])
