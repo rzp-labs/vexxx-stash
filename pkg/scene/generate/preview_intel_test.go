@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stashapp/stash/pkg/diagnostics"
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/generationbudget"
@@ -267,5 +269,110 @@ func TestGPUMarkerStillUnsupportedSourceDoesNotEncodeOnCPU(t *testing.T) {
 		if entries, _ := os.ReadDir(p.dir); len(entries) != 0 {
 			t.Fatal("temporary output leaked", entries)
 		}
+	}
+}
+
+func TestPreviewSingleSegmentBypassesAdaptiveMeasurement(t *testing.T) {
+	g := metadataTestGenerator(t, "for last do :;done\nprintf 'video' > \"$last\"\n", generationbudget.Settings{MaxProcesses: 1})
+	lock := g.LockManager.ReadLock(context.Background(), "synthetic")
+	defer lock.Cancel()
+	dir := t.TempDir()
+	output := filepath.Join(dir, "preview.mp4")
+	// A clip shorter than one full segment window renders without a capacity workload.
+	if err := g.previewVideo("synthetic", 0.5, PreviewOptions{Segments: 1, SegmentDuration: 0.75}, "", false, false)(lock, output); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil || string(data) != "video" {
+		t.Fatalf("single-segment render did not produce the encoder output: %q %v", data, err)
+	}
+}
+
+func TestPreviewConcatFailureKeepsOriginalError(t *testing.T) {
+	g := metadataTestGenerator(t, "echo concatfailure >&2\nexit 23\n", generationbudget.Settings{MaxProcesses: 1})
+	lock := g.LockManager.ReadLock(context.Background(), "synthetic")
+	defer lock.Cancel()
+	err := g.previewVideoChunkCombine(lock, filepath.Join(t.TempDir(), "concat.txt"), filepath.Join(t.TempDir(), "out.mp4"))
+	var exitErr *exec.ExitError
+	if err == nil || !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 || !strings.Contains(string(exitErr.Stderr), "concatfailure") {
+		t.Fatalf("software concat lost the encoder failure: %v", err)
+	}
+	if r, ok := diagnostics.PreviewFailureSnapshot(err); ok {
+		t.Fatalf("software concat gained GPU replay facts: %+v", r)
+	}
+}
+
+func TestScenePreviewDeviceRefusalRecordsActualReplayFacts(t *testing.T) {
+	record := intelMetadataTestRecord()
+	record["pix_fmt"] = "nv12"
+	record["bit_depth"] = 8
+	record["color_space"], record["color_primaries"], record["color_transfer"] = "bt709", "bt709", "bt709"
+	script := "for last do :;done\nif [ \"$last\" != '-' ];then printf 'video' > \"$last\";fi\nprintf '%s\\n' '" + string(intelMetadataTestOutput(record)) + "'\n"
+	g := metadataTestGenerator(t, script, generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: 4})
+	g.IntelPreviews = &ffmpeg.IntelGenerationConfig{Backend: "vaapi"}
+	var saved []diagnostics.PreviewReplayRecord
+	ctx := diagnostics.WithPreviewSource(context.Background(), 3, 4, "", func(r diagnostics.PreviewReplayRecord) error { saved = append(saved, r); return nil })
+	lock := g.LockManager.ReadLock(ctx, "synthetic")
+	defer lock.Cancel()
+	var diagnostic ffmpeg.IntelGenerationDiagnostic
+	g.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostic = d }
+	err := g.scenePreviewVideo("synthetic", 10, PreviewOptions{Segments: 1, SegmentDuration: 0.75}, "", false, false)(lock, filepath.Join(t.TempDir(), "preview.mp4"))
+	if err == nil {
+		t.Fatal("missing render device rendered")
+	}
+	r, ok := diagnostics.PreviewFailureSnapshot(err)
+	if !ok || r.Command.Stage != "device" || r.Command.PlanID != "intel-scene-preview-v1" || r.Command.TargetWidth == nil || *r.Command.TargetWidth != PreviewWidth || r.Command.TargetHeight == nil || *r.Command.TargetHeight != 320 {
+		t.Fatalf("device refusal lost typed replay facts: %+v", r)
+	}
+	if r.Command.Started == nil || *r.Command.Started {
+		t.Fatal("never-executed render claimed a command start", r.Command.Started)
+	}
+	if len(saved) != 1 || diagnostic.Stage != "device" || diagnostic.Selected != "vaapi" || diagnostic.Actual != "none" {
+		t.Fatalf("device refusal misreported or software retried: %+v %+v", diagnostic, saved)
+	}
+}
+
+func TestScenePreviewGPUSuccessValidatesOutput(t *testing.T) {
+	if err := ffmpeg.ValidateIntelDevice("/dev/dri/renderD128"); err != nil {
+		t.Skip("Mock Intel scene preview success needs an existing authorized render device; run this test in the isolated GPU lab")
+	}
+	p := previewTestPaths{markerTestPaths{t.TempDir()}}
+	dir := t.TempDir()
+	header := `{"streams":[{"codec_type":"video","codec_name":"h264","index":0,"width":1920,"height":1080,"pix_fmt":"yuv420p","duration":"10","r_frame_rate":"30/1","sample_aspect_ratio":"1:1"}],"format":{"start_time":"0"}}`
+	packets := `{"streams":[{"codec_type":"video","codec_name":"h264","nb_read_packets":"30"}]}`
+	probe := filepath.Join(dir, "ffprobe")
+	probeScript := "#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffprobe version 8.1';exit 0;fi\ncase \" $* \" in *count_packets*) cat <<'PACKETS'\n" + packets + "\nPACKETS\n;; *) cat <<'HEADER'\n" + header + "\nHEADER\n;; esac\n"
+	if err := os.WriteFile(probe, []byte(probeScript), 0700); err != nil {
+		t.Fatal(err)
+	}
+	record := intelMetadataTestRecord()
+	record["pix_fmt"] = "nv12"
+	record["bit_depth"] = 8
+	record["color_space"], record["color_primaries"], record["color_transfer"] = "bt709", "bt709", "bt709"
+	encoder := filepath.Join(dir, "ffmpeg")
+	encoderScript := "#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffmpeg version 8.1';exit 0;fi\nfor last do :;done\nif [ \"$last\" = '-' ];then\n case \" $* \" in *wrapped_avframe*) printf '%s\\n' '" + string(intelMetadataTestOutput(record)) + "';; esac\n exit 0\nfi\nprintf 'video' > \"$last\"\n"
+	if err := os.WriteFile(encoder, []byte(encoderScript), 0700); err != nil {
+		t.Fatal(err)
+	}
+	budget, err := generationbudget.New(generationbudget.Settings{MaxProcesses: 4, MaxGPUProcesses: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := Generator{Probe: ffmpeg.NewFFProbe(probe), Encoder: ffmpeg.NewEncoder(encoder), Budget: budget, LockManager: fsutil.NewReadLockManager(), ScenePaths: p,
+		IntelPreviews: &ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}}
+	var diagnostic ffmpeg.IntelGenerationDiagnostic
+	g.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostic = d }
+	lock := g.LockManager.ReadLock(context.Background(), "synthetic")
+	defer lock.Cancel()
+	output := filepath.Join(dir, "preview.mp4")
+	if err := g.scenePreviewVideo("synthetic", 10, PreviewOptions{Segments: 2, SegmentDuration: 0.75}, "", false, false)(lock, output); err != nil {
+		t.Fatal("GPU preview rejected a supported synthetic pipeline", err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil || string(data) != "video" {
+		t.Fatalf("validated GPU preview did not produce the encoder output: %q %v", data, err)
+	}
+	if diagnostic.Actual != "vaapi" || diagnostic.Stage != "" || len(diagnostic.ProbeStages) != 3 {
+		t.Fatal("successful GPU preview misreported its execution", diagnostic)
 	}
 }

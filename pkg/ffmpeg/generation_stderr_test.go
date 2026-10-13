@@ -108,3 +108,18 @@ func TestGenerationStderrReasonKeepsTerminalDriverError(t *testing.T) {
 		t.Fatal("bounded reason lost cause", len(text))
 	}
 }
+
+func TestGenerationStderrReasonHardTruncationBoundsEveryLimit(t *testing.T) {
+	for _, limit := range []int{0, 1, 12, 13} {
+		if got := GenerationStderrText([]byte(strings.Repeat("x", 100)), limit); got != "[truncated]" {
+			t.Fatalf("limit below the marker kept content: limit=%d %q", limit, got)
+		}
+	}
+	data := []byte("x" + strings.Repeat("é", 4096))
+	for limit := 14; limit <= 4096; limit += 17 {
+		got := GenerationStderrText(data, limit)
+		if len(got) > limit || !utf8.ValidString(got) || !strings.Contains(got, "[truncated]") {
+			t.Fatalf("multi-byte cut produced invalid or oversized reason: limit=%d got=%d", limit, len(got))
+		}
+	}
+}

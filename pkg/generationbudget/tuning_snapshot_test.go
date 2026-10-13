@@ -239,3 +239,18 @@ func TestConcurrentQueriesAndIndependentLearning(t *testing.T) {
 	assertTuning(t, b, SpriteWorkload, Measured, 2)
 	assertTuning(t, b, PreviewWorkload, Measured, 2)
 }
+
+func TestSnapshotIgnoresNonIndependentAndUnknownFamilies(t *testing.T) {
+	var b *Budget
+	assertTuning(t, b, SpriteWorkload, NotMeasured, 0)
+	assertTuning(t, b, OtherWorkload, NotMeasured, 0)
+	shared, err := NewWithResources(Settings{MaxProcesses: 2, MaxGPUProcesses: 2}, func() Resources {
+		return Resources{CPUs: 4, MemoryAvailable: 4 << 30, GPUAvailable: 4 << 30}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTuning(t, shared, SpriteWorkload, NotMeasured, 0)
+	independent := independentTestBudget(t, Settings{MaxProcesses: 4, MaxGPUProcesses: 4})
+	assertTuning(t, independent, OtherWorkload, NotMeasured, 0)
+}

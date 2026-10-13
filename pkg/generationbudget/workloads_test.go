@@ -238,3 +238,22 @@ func TestIndependentAutoAggregateAndScopeCleanup(t *testing.T) {
 	}
 	release()
 }
+
+func TestAutoWorkloadNilBudgetAndConstructors(t *testing.T) {
+	var b *Budget
+	if b.AutoWorkload(Workload{Kind: SpriteWorkload}) || b.CanTuneWorkload(Workload{Kind: SpriteWorkload}) {
+		t.Fatal("nil budget claimed workload Auto capacity")
+	}
+	device, err := NewIndependentAutoForDevice(Settings{MaxProcesses: 1}, "")
+	if err != nil || device == nil || !device.AutoWorkload(Workload{Kind: SpriteWorkload}) {
+		t.Fatalf("independent Auto for the runtime device: %v %v", device, err)
+	}
+	for _, settings := range []Settings{{MaxProcesses: -1}, {MaxProcesses: 1, MaxGPUProcesses: 2}} {
+		if b, err := NewIndependentAutoWithResources(settings, func() Resources { return Resources{} }); b != nil || err == nil {
+			t.Fatalf("invalid settings accepted: %+v %v", settings, err)
+		}
+	}
+	if b, err := NewIndependentAutoWithResources(Settings{}, nil); b != nil || err == nil {
+		t.Fatal("missing resource probe accepted", err)
+	}
+}
