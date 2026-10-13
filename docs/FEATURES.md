@@ -32,7 +32,7 @@ We are proud to introduce a suite of powerful new features designed to streamlin
     *   **Plugin System Integration**: Trigger specific tasks from your installed plugins on a schedule.
 *   **Dashboard Control**: Manually trigger tasks, toggle schedules, and view "Next Run" times from a unified dashboard.
 
-## � System Resource Monitor
+##  System Resource Monitor
 **Real-time insight into your server's health.**
 
 *   **Live Metrics**: The Task Dashboard now features a live Resource Monitor displaying:
@@ -41,7 +41,7 @@ We are proud to introduce a suite of powerful new features designed to streamlin
 *   **Parallel Processing**:
     *   **Multi-Tasking**: WetFlix now supports running up to **3 concurrent background tasks** simultaneously, significantly speeding up large library scans and generation queues.
 
-## �💅 Polish & Refinements
+## 💅 Polish & Refinements
 *   **Player UX**: Hidden redundant time displays during segment playback to reduce confusion.
 *   **Layout Fixes**: Resolved layout shifts in the Scene Player for a rock-solid viewing experience.
 *   **Backend Optimization**: Removed restrictions on file assignment to enable the advanced "Group Scenes" architecture.
