@@ -54,6 +54,13 @@ tooling under this policy. Do not assume a development server is already running
 When the user asks for a commit message, **only output the message text** — do not stage files or run `git commit`. Leave all git operations (add, commit, push, branch, etc.) to the user.
 Do not infer Git authorization from review classification or routine coding work.
 
+## Cursor Cloud specific instructions
+
+- The image Go is 1.22 and `node` on `PATH` may be 22. This repo needs Go 1.26 (`go.mod`) and Node 24 (CI). The environment install puts Go 1.26.9 in `/usr/local/go` and Node 24.21.0 plus pnpm 10.33.4 in `/usr/local/node`. `/etc/profile.d/vexxx-dev.sh` prepends those directories and sets `GOTOOLCHAIN=local`. Non-login shells need the same `PATH` or they will build with the wrong toolchain.
+- Before the app will compile, run `make pre-ui` and `make generate`. `ui/v2.5/src/core/generated-graphql.ts` and `internal/api/generated_*.go` are gitignored.
+- Dev loop: `make server-start` serves the API on port 9999 with config under `.local/`. `make ui-start` serves Vite on port 3000 and proxies `/graphql` to 9999. `ffmpeg` is on the image and is required to scan video.
+- A fresh server reports GraphQL `systemStatus` `SETUP` until a library path, database file, and generated path are saved.
+
 ## Claude Code context management
 
 After a discrete task, proactively suggest `/compact` if the conversation is
