@@ -86,6 +86,7 @@ jobs:
           python3 -m unittest discover -s scripts -p test_reuse_master_validation.py
           python3 -m unittest discover -s scripts -p test_reuse_pr_packaging.py
           python3 -m unittest discover -s scripts -p test_sonar_scan_policy.py
+          python3 -m unittest discover -s scripts -p test_sonar_classification.py
           python3 -m unittest discover -s scripts -p test_reuse_sonar_validation.py
       - name: Classify changed inputs and deliberate publication
         id: plan

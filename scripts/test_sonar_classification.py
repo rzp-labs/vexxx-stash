@@ -13,6 +13,11 @@ def excluded(path, properties):
                for pattern in properties['sonar.exclusions'].split(','))
 
 
+def coverage_excluded(path, properties):
+    return any(matches(path, pattern)
+               for pattern in properties['sonar.coverage.exclusions'].split(','))
+
+
 class SonarClassificationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -51,6 +56,34 @@ class SonarClassificationTests(unittest.TestCase):
                      'pkg/models/paths/paths_generated.go'):
             with self.subTest(path=path):
                 self.assertFalse(excluded(path, self.properties))
+
+    def test_every_test_file_is_excluded_from_coverage_metrics(self):
+        # Unexcluded test lines count as uncovered production code server-side.
+        candidates = []
+        for root in ('cmd', 'internal', 'pkg', 'scripts',
+                     'ui/v2.5/scripts', 'ui/v2.5/src'):
+            candidates.extend(sorted((ROOT / root).rglob('*')))
+        tests = []
+        for path in candidates:
+            if not path.is_file():
+                continue
+            rel = path.relative_to(ROOT).as_posix()
+            if (path.name.endswith('_test.go')
+                    or path.name.startswith('test_') and path.suffix == '.py'
+                    or '.test.' in path.name
+                    or rel.startswith('ui/v2.5/src/test/')):
+                tests.append(rel)
+        self.assertTrue(tests)
+        for path in tests:
+            with self.subTest(path=path):
+                self.assertTrue(coverage_excluded(path, self.properties))
+
+    def test_production_sources_keep_coverage_metrics(self):
+        for path in ('pkg/cache/lru.go',
+                     'ui/v2.5/src/App.tsx',
+                     'scripts/sonar_scan_policy.py'):
+            with self.subTest(path=path):
+                self.assertFalse(coverage_excluded(path, self.properties))
 
     def test_sqlite_migration_sql_is_excluded_but_go_migrations_remain(self):
         # Sonar analyzes every .sql file as Oracle PL/SQL; these are SQLite.
