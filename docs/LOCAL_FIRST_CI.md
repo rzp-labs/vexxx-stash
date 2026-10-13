@@ -126,19 +126,20 @@ For a candidate affecting both application domains, the existing commands are:
 ```sh
 export POSTHOG_UPLOAD_REQUIRED=false
 make pre-ui generate generate-login-locale
-# Same test targets as make test / make it, with cached results disabled.
-go test -count=1 ./...
+# Same test targets as CI; the tagged pass also runs every untagged test.
 go test -count=1 -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
 (cd ui/v2.5 && pnpm test && pnpm run check)
-make ui-only
+# CI's validation compile skips the legacy bundle; images still build it.
+STASH_NOLEGACY=true make ui-only
 make flags-release flags-pie stash
 ```
 
 For backend-only changes, use `make generate-backend generate-login-locale`, the
-same two Go test commands, and `make flags-release flags-pie stash`. The existing
+same tagged Go test command, and `make flags-release flags-pie stash`. The existing
 `touch-ui` generation prerequisite provides the embed placeholder: this compile
 checks backend linking, not a complete UI deliverable. For frontend-only changes,
-use `make pre-ui generate-ui`, the frontend test/type commands, and `make ui-only`.
+use `make pre-ui generate-ui`, the frontend test/type commands, and
+`STASH_NOLEGACY=true make ui-only`.
 Python changes use `python3 -m unittest discover -s scripts -p 'test_*.py'`; when
 present, also run the existing suite in `scripts/gpu_generation`.
 

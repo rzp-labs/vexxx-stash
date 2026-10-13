@@ -141,12 +141,11 @@ jobs:
         id: backend_test
         if: steps.reuse.outputs.execute_backend == 'true'
         # Keep build/module caches, but execute tests again against this tree.
+        # The tagged pass also compiles and runs every untagged test, so one pass covers both.
         run: |
           mkdir -p dist/coverage
-          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-unit.out ./...
-          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-integration.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
-          test -s dist/coverage/go-unit.out
-          test -s dist/coverage/go-integration.out
+          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
+          test -s dist/coverage/go.out
       - name: Generate inputs for backend coverage only
         id: backend_coverage_generate
         if: steps.plan.outputs.sonar_coverage_backend == 'true'
@@ -156,16 +155,14 @@ jobs:
         if: steps.plan.outputs.sonar_coverage_backend == 'true'
         run: |
           mkdir -p dist/coverage
-          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-unit.out ./...
-          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-integration.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
-          test -s dist/coverage/go-unit.out
-          test -s dist/coverage/go-integration.out
+          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
+          test -s dist/coverage/go.out
       - name: Retain Go coverage from this validation
         if: steps.backend_test.outcome == 'success' || steps.backend_coverage_test.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: go-coverage
-          path: dist/coverage/go-*.out
+          path: dist/coverage/go.out
           if-no-files-found: error
           retention-days: 7
       - name: Frontend tests and type check
@@ -201,6 +198,9 @@ jobs:
           BUILD_DATE: ${{ steps.plan.outputs.build_date }}
           GITHASH: ${{ github.sha }}
           STASH_VERSION: ${{ steps.plan.outputs.version }}
+          # Validation-only compile: skip the legacy bundle (~90% of build time).
+          # Image builds and releases still compile it inside Docker.
+          STASH_NOLEGACY: 'true'
         if: steps.reuse.outputs.execute_frontend == 'true' && steps.plan.outputs.build_image != 'true'
         # Image candidates compile once in Docker with release maps/metadata.
         run: make ui-only

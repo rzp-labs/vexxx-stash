@@ -43,8 +43,7 @@ the suites:
 
 ```sh
 mkdir -p dist/coverage
-go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-unit.out ./...
-go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-integration.out \
+go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go.out \
   -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
 (cd ui/v2.5 && pnpm run test:coverage && pnpm run check)
 scripts/python_coverage.sh
@@ -63,10 +62,9 @@ Sonar's `sonar-source` checkout. The hyphenated `scripts/ffmpeg/build-*.py` imag
 build scripts are not importable and are not measured. There is no fabricated
 report for build scripts or other languages.
 
-`sonar.go.coverage.reportPaths` takes the two native Go coverprofiles. Do not
-concatenate them or treat them as generic coverage XML. The tagged suite also
-executes unit tests; importing both reports preserves both observations without
-creating a third test run. `sonar.javascript.lcov.reportPaths` takes LCOV for
+`sonar.go.coverage.reportPaths` takes the single native Go coverprofile from the
+integration-tagged run, which also executes every untagged unit test. Do not
+treat it as generic coverage XML. `sonar.javascript.lcov.reportPaths` takes LCOV for
 both JavaScript and TypeScript, and `sonar.python.coverage.reportPaths` takes the
 Cobertura XML. Run the scanner from the repository root; LCOV
 source entries must resolve to `ui/v2.5/src/...`, not a different checkout path.
@@ -122,7 +120,7 @@ GraphQL types are reused when available after input equality, without another
 install. Frontend type precision when dependencies are absent remains a live
 question. No partial PR import is presented as full-project coverage.
 
-A master push changing analyzed inputs imports both Go profiles, frontend LCOV and
+A master push changing analyzed inputs imports the Go profile, frontend LCOV and
 Python Cobertura XML. Separate coverage-only flags add missing report producers
 without changing affected validation obligations: each unselected domain among
 backend, frontend and Python gets a coverage-only run (Go with setup/generation,

@@ -22,7 +22,7 @@ ENTRIES = [dict(path='app.go', mode='100644', type='blob', sha='2' * 40),
            dict(path='sonar-project.properties', mode='100644', type='blob', sha='4' * 40)]
 INPUTS = reuse.fingerprint(ENTRIES, VARIABLES)
 PLAN = dict(checkout=M, head=H, base=B, tree=T, pr=65, target='master', action='synchronize', build_image=False,
-            sonar_go_paths='dist/coverage/go-unit.out,dist/coverage/go-integration.out',
+            sonar_go_paths='dist/coverage/go.out',
             sonar_lcov_paths='dist/coverage/frontend/lcov.info',
             sonar_python_paths='dist/coverage/python.xml')
 IDENTITY = dict(head=H, base=B, tree=T, merge=M, target='master')
@@ -90,8 +90,7 @@ class Fixture:
         for name, files in (
             ('validation-evidence-2', {'validation-evidence.json': reuse.canonical(self.proof)}),
             ('sonar-clearance-2', {'sonar-clearance.json': reuse.canonical(self.clearance)}),
-            ('go-coverage', {'go-unit.out': b'mode: atomic\nfile.go:1.1,1.3 1 1\n',
-                             'go-integration.out': b'mode: atomic\nfile.go:1.1,1.3 1 0\n'}),
+            ('go-coverage', {'go.out': b'mode: atomic\nfile.go:1.1,1.3 1 1\n'}),
             ('frontend-coverage', {'lcov.info': b'SF:ui/v2.5/src/app.ts\nDA:1,1\nend_of_record\n'}),
             ('python-coverage', {'python.xml': b'<coverage><sources><source></source></sources></coverage>\n'})):
             ident = self.run['id'] * 10 + len(self.artifacts)
@@ -213,8 +212,8 @@ class ReuseTests(unittest.TestCase):
         fixture = Fixture(old=True)
         source = fixture.find()
         self.assertEqual(source['covered'], set(reuse.DOMAINS))
-        self.assertEqual(set(source['reports']), {'dist/coverage/go-unit.out',
-                         'dist/coverage/go-integration.out', 'dist/coverage/frontend/lcov.info',
+        self.assertEqual(set(source['reports']), {'dist/coverage/go.out',
+                         'dist/coverage/frontend/lcov.info',
                          'dist/coverage/python.xml'})
         self.assertEqual(source['check_id'], '')  # Other events never reuse scan clearance.
 
@@ -344,7 +343,7 @@ class ReuseTests(unittest.TestCase):
             mutate(fixture)
             self.assertIsNone(fixture.find())
         fixture = Fixture()
-        raw = archive({'../go-unit.out': b'mode: atomic', 'go-integration.out': b'mode: atomic'})
+        raw = archive({'../go.out': b'mode: atomic'})
         artifact = fixture.artifacts[2]
         artifact['digest'] = 'sha256:' + reuse.digest(raw)
         fixture.files[artifact['id']] = raw
