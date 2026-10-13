@@ -47,23 +47,32 @@ go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-unit.out ./...
 go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-integration.out \
   -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
 (cd ui/v2.5 && pnpm run test:coverage && pnpm run check)
+scripts/python_coverage.sh
 ```
 
 Use the existing generation/dependency steps before these commands. The frontend
 coverage script preserves the Node build-config tests and runs Vitest once with
 V8 coverage. Vitest includes untested `src/**/*.{ts,tsx}` files and writes
 `dist/coverage/frontend/lcov.info`; it does not measure the Node build-tool scripts.
-There is no fabricated report for Python, build scripts, or other languages.
+`scripts/python_coverage.sh` runs the Python regression suites (`scripts/` and
+`scripts/gpu_generation/`) under coverage.py, which is installed with hash pinning
+from `scripts/coverage-requirements.txt` into a venv that keeps the runner's
+system PyYAML. `scripts/coverage.ini` measures all of `scripts/` and writes
+repository-relative paths, so `dist/coverage/python.xml` (Cobertura) resolves from
+Sonar's `sonar-source` checkout. The hyphenated `scripts/ffmpeg/build-*.py` image
+build scripts are not importable and are not measured. There is no fabricated
+report for build scripts or other languages.
 
 `sonar.go.coverage.reportPaths` takes the two native Go coverprofiles. Do not
 concatenate them or treat them as generic coverage XML. The tagged suite also
 executes unit tests; importing both reports preserves both observations without
 creating a third test run. `sonar.javascript.lcov.reportPaths` takes LCOV for
-both JavaScript and TypeScript. Run the scanner from the repository root; LCOV
+both JavaScript and TypeScript, and `sonar.python.coverage.reportPaths` takes the
+Cobertura XML. Run the scanner from the repository root; LCOV
 source entries must resolve to `ui/v2.5/src/...`, not a different checkout path.
 
 Reports are required to be nonempty after successful tests and retained for
-seven days as `go-coverage` / `frontend-coverage` artifacts. These are evidence,
+seven days as `go-coverage` / `frontend-coverage` / `python-coverage` artifacts. These are evidence,
 not an automatic input to the remote Sonar service. Each artifact contains only
 the domains actually executed in that run. Drafts run selected validation automatically;
 unselected or reused domains do not produce new reports. Never scan a partial
@@ -113,15 +122,16 @@ GraphQL types are reused when available after input equality, without another
 install. Frontend type precision when dependencies are absent remains a live
 question. No partial PR import is presented as full-project coverage.
 
-A master push changing analyzed inputs imports both Go profiles and frontend LCOV.
-Separate coverage-only flags add missing report producers without changing affected
-validation obligations: backend-only changes add Vitest coverage with setup/generation;
-frontend-only changes add the two Go report runs with setup/generation; Python-only
-analyzed changes add both. These additions perform no standalone TypeScript check,
-Node build-config tests, production compile or image build. Genuine affected validation
-retains those checks. Documentation-only master changes and explicitly excluded
-inputs add no producer work or scan; other repository inputs follow the
-whole-project scope. Workflow changes already select both normal domains. Master coverage-only producers remain unchanged; PR reuse follows the narrow
+A master push changing analyzed inputs imports both Go profiles, frontend LCOV and
+Python Cobertura XML. Separate coverage-only flags add missing report producers
+without changing affected validation obligations: each unselected domain among
+backend, frontend and Python gets a coverage-only run (Go with setup/generation,
+Vitest with setup/generation, `scripts/python_coverage.sh`). These additions
+perform no standalone TypeScript check, Node build-config tests, production compile
+or image build. Genuine affected validation retains those checks. Documentation-only
+master changes and explicitly excluded inputs add no producer work or scan; other
+repository inputs follow the whole-project scope. Workflow changes already select
+all three domains. PR reuse follows the narrow
 independent evidence checks above.
 
 The snippet's analyzer cache is used once at `~/.sonar/cache`. It is separate from

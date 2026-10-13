@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import image_publication_policy as publication
-from sonar_scan_policy import parse_properties, properties, scanner_plan, verify_source_snapshot, prepare_source_reports, verify_current_pr
+from sonar_scan_policy import COVERAGE, parse_properties, properties, scanner_plan, verify_source_snapshot, prepare_source_reports, verify_current_pr
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = 'rzp-labs/vexxx-stash'
@@ -54,8 +54,8 @@ class ScanPolicyTests(unittest.TestCase):
         for paths, status in ((['README.md'], 'import_no_coverage'),
                               (['pkg/cache/lru.go'], 'import_backend'),
                               (['ui/v2.5/src/App.tsx'], 'import_frontend'),
-                              (['scripts/reuse_master_validation.py'], 'import_no_coverage'),
-                              (['.github/workflows/docker-publish.yml'], 'import_backend_and_frontend')):
+                              (['scripts/reuse_master_validation.py'], 'import_python'),
+                              (['.github/workflows/docker-publish.yml'], 'import_backend_and_frontend_and_python')):
             with self.subTest(paths=paths):
                 old, new, scan = self.selection(paths)
                 self.assertEqual(old, new)
@@ -64,6 +64,7 @@ class ScanPolicyTests(unittest.TestCase):
                 self.assertEqual(scan['sonar_added_domains'], '')
                 self.assertEqual(bool(scan['sonar_go_paths']), new['backend'])
                 self.assertEqual(bool(scan['sonar_lcov_paths']), new['frontend'])
+                self.assertEqual(bool(scan['sonar_python_paths']), new['python'])
 
     def test_master_documentation_adds_no_work(self):
         for paths in (['README.md'], ['docs/DEVELOPMENT.md'],
@@ -88,8 +89,8 @@ class ScanPolicyTests(unittest.TestCase):
                 self.assertEqual(bool(scan['sonar_lcov_paths']), expected)
 
     def test_master_adds_only_missing_domains_for_complete_snapshots(self):
-        for paths, added in ((['pkg/cache/lru.go'], 'frontend'),
-                             (['ui/v2.5/src/App.tsx'], 'backend'),
+        for paths, added in ((['pkg/cache/lru.go'], 'frontend,python'),
+                             (['ui/v2.5/src/App.tsx'], 'backend,python'),
                              (['scripts/reuse_master_validation.py'], 'backend,frontend'),
                              (['.github/workflows/docker-publish.yml'], ''),
                              (['sonar-project.properties'], '')):
@@ -97,7 +98,7 @@ class ScanPolicyTests(unittest.TestCase):
                 old, new, scan = self.selection(paths, name='push')
                 self.assertEqual(new, old)
                 self.assertTrue(scan['sonar_scan'])
-                for domain in ('backend', 'frontend'):
+                for domain in ('backend', 'frontend', 'python'):
                     self.assertEqual(scan['sonar_coverage_' + domain], not old[domain])
                 self.assertEqual(scan['sonar_added_domains'], added)
                 self.assertFalse(new['build_image'])
@@ -204,11 +205,16 @@ class ScanPolicyTests(unittest.TestCase):
                       ['scripts/reuse_master_validation.py'], ['.github/workflows/docker-publish.yml']):
             for name in ('push', 'pull_request'):
                 old, new, policy = self.selection(paths, name=name)
-                for domain in ('backend', 'frontend'):
+                for domain in ('backend', 'frontend', 'python'):
                     self.assertFalse(new[domain] and policy['sonar_coverage_' + domain])
         for compile_id in ('backend_compile', 'frontend_compile'):
             compile_step = next(x for x in steps if x.get('id') == compile_id)
             self.assertNotIn('sonar_coverage', compile_step['if'])
+        reports = next(x for x in steps if x.get('id') == 'sonar_reports')
+        for field, key in COVERAGE.values():
+            planned = '${{ steps.plan.outputs.' + field + ' }}'
+            self.assertIn('-D' + key + '=' + planned, scan['with']['args'])
+            self.assertIn(planned, reports['env'].values())
 
 
 class SourceIdentityTests(unittest.TestCase):

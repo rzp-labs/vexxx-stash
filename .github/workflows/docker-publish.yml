@@ -216,11 +216,19 @@ jobs:
       - name: Python regression tests
         id: python_test
         if: steps.reuse.outputs.execute_python == 'true'
-        run: |
-          python3 -m unittest discover -s scripts -p 'test_*.py'
-          if test -d scripts/gpu_generation; then
-            python3 -m unittest discover -s scripts/gpu_generation -p 'test_*.py'
-          fi
+        run: scripts/python_coverage.sh
+      - name: Python coverage only for unchanged scripts
+        id: python_coverage_test
+        if: steps.plan.outputs.sonar_coverage_python == 'true'
+        run: scripts/python_coverage.sh
+      - name: Retain Python coverage from this validation
+        if: steps.python_test.outcome == 'success' || steps.python_coverage_test.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-coverage
+          path: dist/coverage/python.xml
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Build Linux amd64 image locally
         id: image_build
@@ -502,6 +510,7 @@ jobs:
           ANALYSIS_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           GO_REPORTS: ${{ steps.plan.outputs.sonar_go_paths }}
           LCOV_REPORTS: ${{ steps.plan.outputs.sonar_lcov_paths }}
+          PYTHON_REPORTS: ${{ steps.plan.outputs.sonar_python_paths }}
         run: python3 scripts/sonar_scan_policy.py
       - name: Cache Sonar analyzer downloads
         if: steps.plan.outputs.sonar_scan == 'true' && steps.sonar_reports.outcome == 'success'
@@ -529,6 +538,7 @@ jobs:
             -Dsonar.scm.revision=${{ steps.plan.outputs.head || github.sha }}
             -Dsonar.go.coverage.reportPaths=${{ steps.plan.outputs.sonar_go_paths }}
             -Dsonar.javascript.lcov.reportPaths=${{ steps.plan.outputs.sonar_lcov_paths }}
+            -Dsonar.python.coverage.reportPaths=${{ steps.plan.outputs.sonar_python_paths }}
 
       - name: Record current native Sonar clearance
         id: sonar_record

@@ -23,7 +23,7 @@ import zipfile
 
 from reuse_pr_packaging import request, TokenFreeRedirect, VARIABLES, step_passed
 from reuse_master_validation import WORKFLOW, main as reuse_master
-from sonar_scan_policy import verify_current_pr, parse_properties
+from sonar_scan_policy import COVERAGE, verify_current_pr, parse_properties
 
 SHA = re.compile(r'[0-9a-f]{40}')
 LIMIT = 16 * 1024 * 1024
@@ -36,8 +36,12 @@ DOMAINS = {
 }
 REPORTS = {'backend': {'go-unit.out': 'dist/coverage/go-unit.out',
                        'go-integration.out': 'dist/coverage/go-integration.out'},
-           'frontend': {'lcov.info': 'dist/coverage/frontend/lcov.info'}}
-ARTIFACTS = {'backend': 'go-coverage', 'frontend': 'frontend-coverage'}
+           'frontend': {'lcov.info': 'dist/coverage/frontend/lcov.info'},
+           'python': {'python.xml': 'dist/coverage/python.xml'}}
+ARTIFACTS = {'backend': 'go-coverage', 'frontend': 'frontend-coverage', 'python': 'python-coverage'}
+RETAIN = {'backend': 'Retain Go coverage from this validation',
+          'frontend': 'Retain frontend coverage from this validation',
+          'python': 'Retain Python coverage from this validation'}
 REUSE_STEP = 'Verify exact-master validation evidence'
 PROJECT_KEY = 'rzp-labs_vexxx-stash'
 ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError,
@@ -288,8 +292,7 @@ def find_source(api, download, plan, identity, repository, current_run, workflow
     # merely limits candidate discovery; inventories within each donor are closed.
     runs = api('/actions/workflows/docker-publish.yml/runs?' + query)['workflow_runs']
     best, clearance = None, None
-    needed_reports = {d for d, field in (('backend', 'sonar_go_paths'), ('frontend', 'sonar_lcov_paths'))
-                      if plan.get(field)}
+    needed_reports = {d for d, (field, _) in COVERAGE.items() if plan.get(field)}
     for listed in runs:
         if str(listed.get('id')) == str(current_run):
             continue
@@ -342,8 +345,7 @@ def find_source(api, download, plan, identity, repository, current_run, workflow
                     pass
             reports = {}
             for domain in report_domains:
-                if not step_passed(job, 'Retain ' + ('Go' if domain == 'backend' else 'frontend') +
-                                   ' coverage from this validation'):
+                if not step_passed(job, RETAIN[domain]):
                     raise ValueError('report-producing upload did not succeed')
                 artifact = artifact_inventory(api, run, job, ARTIFACTS[domain])
                 values = unpack(download(artifact['id']), artifact['digest'], REPORTS[domain])
