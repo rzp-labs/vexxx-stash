@@ -1,5 +1,6 @@
 import videojs, { VideoJsPlayer } from "video.js";
 import { WebVTT } from "videojs-vtt.js";
+import { timelinePercent, timelineTime } from "./timeline";
 
 export interface IVTTThumbnailsOptions {
   /**
@@ -163,11 +164,14 @@ class VTTThumbnailsPlugin extends videojs.getPlugin("plugin") {
   private onBarPointerMove = (e: Event) => {
     const { progressBar } = this;
     if (!progressBar) return;
+    const seekBar = this.player.$(".vjs-progress-holder") as HTMLElement | null;
+    if (!seekBar || !(e instanceof MouseEvent)) return;
 
     this.showThumbnailHolder();
     this.updateThumbnailStyle(
-      videojs.dom.getPointerPosition(progressBar, e).x,
-      progressBar.offsetWidth
+      timelinePercent(seekBar.getBoundingClientRect(), e.clientX),
+      progressBar.offsetWidth,
+      videojs.dom.getPointerPosition(progressBar, e).x * progressBar.offsetWidth
     );
   };
 
@@ -187,6 +191,11 @@ class VTTThumbnailsPlugin extends videojs.getPlugin("plugin") {
       }
     }
 
+    // Cue ends are exclusive, except for the virtual timeline's final endpoint.
+    const lastCue = this.vttData[this.vttData.length - 1];
+    if (time === this.player.virtualEnd && time === lastCue?.end) {
+      return lastCue.style;
+    }
     return null;
   }
 
@@ -204,11 +213,10 @@ class VTTThumbnailsPlugin extends videojs.getPlugin("plugin") {
     }
   }
 
-  private updateThumbnailStyle(percent: number, width: number) {
+  private updateThumbnailStyle(percent: number, width: number, xPos: number) {
     if (!this.thumbnailHolder) return;
 
-    const duration = this.player.duration();
-    const time = percent * duration;
+    const time = timelineTime(this.player, percent);
     const currentStyle = this.getStyleForTime(time);
 
     if (!currentStyle) {
@@ -216,7 +224,6 @@ class VTTThumbnailsPlugin extends videojs.getPlugin("plugin") {
       return;
     }
 
-    const xPos = percent * width;
     const thumbnailWidth = parseInt(currentStyle.width, 10);
     const halfThumbnailWidth = thumbnailWidth >> 1;
     const marginRight = width - (xPos + halfThumbnailWidth);
