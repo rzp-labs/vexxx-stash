@@ -12,14 +12,16 @@ sprite.jpg#xywh=100,0,120,50
 `;
 
 let player: VideoJsPlayer;
+let vttResponse: string;
 
 beforeEach(() => {
+  vttResponse = vtt;
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(function (
     this: XMLHttpRequest
   ) {
-    Object.defineProperty(this, "responseText", { value: vtt });
+    Object.defineProperty(this, "responseText", { value: vttResponse });
     this.dispatchEvent(new Event("load"));
   });
   const element = document.createElement("video");
@@ -93,6 +95,35 @@ async function timeline() {
 }
 
 describe("virtual timeline hover", () => {
+  it("keeps an interior virtual endpoint on the preceding cue", async () => {
+    vttResponse += `
+00:00:03.000 --> 00:00:04.000
+sprite.jpg#xywh=220,0,140,50
+`;
+    player.virtualStart = 1;
+    player.virtualEnd = 3;
+    const bar = await timeline();
+    bar.hover(1);
+    expect(bar.tooltip.mock.lastCall?.[2]).toBe(3);
+    expect(bar.holder.style.opacity).toBe("1");
+    expect(bar.holder.style.width).toBe("120px");
+
+    delete player.virtualStart;
+    delete player.virtualEnd;
+    bar.hover(0.3);
+    expect(bar.holder.style.width).toBe("140px");
+  });
+
+  it("uses the containing cue when no cue ends at the virtual endpoint", async () => {
+    player.virtualStart = 1;
+    player.virtualEnd = 2.5;
+    const bar = await timeline();
+    bar.hover(1);
+    expect(bar.tooltip.mock.lastCall?.[2]).toBe(2.5);
+    expect(bar.holder.style.opacity).toBe("1");
+    expect(bar.holder.style.width).toBe("120px");
+  });
+
   it.each([
     [0, 1, "100px"],
     [0.5, 2, "120px"],

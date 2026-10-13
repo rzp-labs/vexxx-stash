@@ -183,6 +183,13 @@ class VTTThumbnailsPlugin extends videojs.getPlugin("plugin") {
   private getStyleForTime(time: number) {
     if (!this.vttData) return null;
 
+    // At the virtual endpoint, prefer the scene's preceding cue even when
+    // another physical-file cue starts there.
+    if (time === this.player.virtualEnd) {
+      const endpointCue = this.vttData.find((item) => item.end === time);
+      if (endpointCue) return endpointCue.style;
+    }
+
     for (const element of this.vttData) {
       const item = element;
 
@@ -191,11 +198,6 @@ class VTTThumbnailsPlugin extends videojs.getPlugin("plugin") {
       }
     }
 
-    // Cue ends are exclusive, except for the virtual timeline's final endpoint.
-    const lastCue = this.vttData[this.vttData.length - 1];
-    if (time === this.player.virtualEnd && time === lastCue?.end) {
-      return lastCue.style;
-    }
     return null;
   }
 
