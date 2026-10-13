@@ -332,16 +332,18 @@ func TestScenePreviewDeviceRefusalRecordsActualReplayFacts(t *testing.T) {
 	}
 }
 
-func TestScenePreviewGPUSuccessValidatesOutput(t *testing.T) {
+// The packet probe counts packets only when the rendered artifact holds the
+// encoder's payload, so validation genuinely gates the success path.
+func gpuScenePreviewGenerator(t *testing.T, payload string) (Generator, string) {
+	t.Helper()
 	if err := ffmpeg.ValidateIntelDevice("/dev/dri/renderD128"); err != nil {
-		t.Skip("Mock Intel scene preview success needs an existing authorized render device; run this test in the isolated GPU lab")
+		t.Skip("Mock Intel scene preview needs an existing authorized render device; run this test in the isolated GPU lab")
 	}
 	p := previewTestPaths{markerTestPaths{t.TempDir()}}
 	dir := t.TempDir()
 	header := `{"streams":[{"codec_type":"video","codec_name":"h264","index":0,"width":1920,"height":1080,"pix_fmt":"yuv420p","duration":"10","r_frame_rate":"30/1","sample_aspect_ratio":"1:1"}],"format":{"start_time":"0"}}`
-	packets := `{"streams":[{"codec_type":"video","codec_name":"h264","nb_read_packets":"30"}]}`
 	probe := filepath.Join(dir, "ffprobe")
-	probeScript := "#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffprobe version 8.1';exit 0;fi\ncase \" $* \" in *count_packets*) cat <<'PACKETS'\n" + packets + "\nPACKETS\n;; *) cat <<'HEADER'\n" + header + "\nHEADER\n;; esac\n"
+	probeScript := "#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffprobe version 8.1';exit 0;fi\ncase \" $* \" in *count_packets*) for last do :;done\npackets=0\ngrep -q video \"$last\" && packets=30\ncat <<PACKETS\n{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"nb_read_packets\":\"$packets\"}]}\nPACKETS\n;; *) cat <<'HEADER'\n" + header + "\nHEADER\n;; esac\n"
 	if err := os.WriteFile(probe, []byte(probeScript), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +352,7 @@ func TestScenePreviewGPUSuccessValidatesOutput(t *testing.T) {
 	record["bit_depth"] = 8
 	record["color_space"], record["color_primaries"], record["color_transfer"] = "bt709", "bt709", "bt709"
 	encoder := filepath.Join(dir, "ffmpeg")
-	encoderScript := "#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffmpeg version 8.1';exit 0;fi\nfor last do :;done\nif [ \"$last\" = '-' ];then\n case \" $* \" in *wrapped_avframe*) printf '%s\\n' '" + string(intelMetadataTestOutput(record)) + "';; esac\n exit 0\nfi\nprintf 'video' > \"$last\"\n"
+	encoderScript := "#!/bin/sh\nif [ \"$1\" = '-version' ];then echo 'ffmpeg version 8.1';exit 0;fi\nfor last do :;done\nif [ \"$last\" = '-' ];then\n case \" $* \" in *wrapped_avframe*) printf '%s\\n' '" + string(intelMetadataTestOutput(record)) + "';; esac\n exit 0\nfi\nprintf '" + payload + "' > \"$last\"\n"
 	if err := os.WriteFile(encoder, []byte(encoderScript), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -358,8 +360,12 @@ func TestScenePreviewGPUSuccessValidatesOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := Generator{Probe: ffmpeg.NewFFProbe(probe), Encoder: ffmpeg.NewEncoder(encoder), Budget: budget, LockManager: fsutil.NewReadLockManager(), ScenePaths: p,
-		IntelPreviews: &ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}}
+	return Generator{Probe: ffmpeg.NewFFProbe(probe), Encoder: ffmpeg.NewEncoder(encoder), Budget: budget, LockManager: fsutil.NewReadLockManager(), ScenePaths: p,
+		IntelPreviews: &ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: "/dev/dri/renderD128"}}, dir
+}
+
+func TestScenePreviewGPUSuccessValidatesOutput(t *testing.T) {
+	g, dir := gpuScenePreviewGenerator(t, "video")
 	var diagnostic ffmpeg.IntelGenerationDiagnostic
 	g.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostic = d }
 	lock := g.LockManager.ReadLock(context.Background(), "synthetic")
@@ -374,5 +380,25 @@ func TestScenePreviewGPUSuccessValidatesOutput(t *testing.T) {
 	}
 	if diagnostic.Actual != "vaapi" || diagnostic.Stage != "" || len(diagnostic.ProbeStages) != 3 {
 		t.Fatal("successful GPU preview misreported its execution", diagnostic)
+	}
+}
+
+func TestScenePreviewGPURejectsCorruptOutput(t *testing.T) {
+	g, dir := gpuScenePreviewGenerator(t, "corrupt")
+	var diagnostic ffmpeg.IntelGenerationDiagnostic
+	g.IntelDiagnostic = func(d ffmpeg.IntelGenerationDiagnostic) { diagnostic = d }
+	lock := g.LockManager.ReadLock(context.Background(), "synthetic")
+	defer lock.Cancel()
+	err := g.scenePreviewVideo("synthetic", 10, PreviewOptions{Segments: 2, SegmentDuration: 0.75}, "", false, false)(lock, filepath.Join(dir, "preview.mp4"))
+	var outputError *ffmpeg.GenerationOutputError
+	if err == nil || !errors.As(err, &outputError) {
+		t.Fatal("corrupt GPU output passed validation", err)
+	}
+	r, ok := diagnostics.PreviewFailureSnapshot(err)
+	if !ok || r.Command.Stage != "output" || r.Command.VideoSelection != "first_video" {
+		t.Fatalf("corrupt output lost typed replay facts: %+v", r)
+	}
+	if diagnostic.Actual != "none" || diagnostic.Stage != "output" {
+		t.Fatal("corrupt output misreported or software retried", diagnostic)
 	}
 }
