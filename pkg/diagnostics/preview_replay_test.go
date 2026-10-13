@@ -1,16 +1,19 @@
 package diagnostics
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -280,5 +283,239 @@ func TestPreviewReplayQueueDoesNotWaitForStorageAndCopiesValues(t *testing.T) {
 	write := <-queue
 	if *write.record.Replay.Command.SeekSeconds != 3.5 {
 		t.Fatal("queued mutable values")
+	}
+}
+
+type startedError struct{ started bool }
+
+func (e *startedError) Error() string                  { return "command failed" }
+func (e *startedError) DiagnosticCommandStarted() bool { return e.started }
+
+// Started facts come from typed execution errors or a real ExitError.
+func TestPreviewReplayStartedFactsAndTypedCopies(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		ctx := WithPreviewSource(context.Background(), 3, 4, uuid.NewString(), nil)
+		err := WithPreviewFailure(ctx, &startedError{started}, PreviewCommand{Stage: "render"})
+		r, ok := PreviewFailureSnapshot(err)
+		if !ok || r.Command.Started == nil || *r.Command.Started != started {
+			t.Fatal("typed started fact", r.Command.Started, started)
+		}
+	}
+	ctx := WithPreviewSource(context.Background(), 3, 4, "", nil)
+	exit := &exec.ExitError{ProcessState: &os.ProcessState{}}
+	err := WithPreviewFailure(ctx, exit, PreviewCommand{Stage: "decode"})
+	r, ok := PreviewFailureSnapshot(err)
+	if !ok || r.Command.Started == nil || !*r.Command.Started {
+		t.Fatal("exit error started fact", r.Command.Started)
+	}
+	if _, ok := PreviewFailureSnapshot(errors.New("plain")); ok {
+		t.Fatal("untyped error gave snapshot")
+	}
+	index, width, audio := 2, 640, true
+	command := PreviewCommand{Stage: "filter", StreamIndex: &index, TargetWidth: &width, Audio: &audio,
+		PlanID: "intel-scene-preview-v1", RuntimeFingerprint: strings.Repeat("9", 64), VideoSelection: "mapped"}
+	err = WithPreviewFailure(ctx, errors.New("filter"), command)
+	r, _ = PreviewFailureSnapshot(err)
+	index, width, audio = 9, 9, false
+	if *r.Command.StreamIndex != 2 || *r.Command.TargetWidth != 640 || *r.Command.Audio != true {
+		t.Fatal("typed copies aliased", r.Command)
+	}
+	if r.Command.PlanID != "intel-scene-preview-v1" || r.Command.RuntimeFingerprint != strings.Repeat("9", 64) || r.Command.VideoSelection != "mapped" {
+		t.Fatal("allowed facts dropped", r.Command)
+	}
+}
+
+func TestPreviewReplayStoreRejectsInvalidAndUnmarshalableRecords(t *testing.T) {
+	r := replayTestRecord()
+	r.Replay.Reference = "not-a-uuid"
+	if err := RetainPreviewReplay(filepath.Join(t.TempDir(), "dir"), r); err == nil {
+		t.Fatal("invalid reference retained")
+	}
+	r = replayTestRecord()
+	r.Replay.SourceReference = ""
+	if err := RetainPreviewReplay(filepath.Join(t.TempDir(), "dir"), r); err == nil {
+		t.Fatal("missing source reference retained")
+	}
+	r = replayTestRecord()
+	r.RecordedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := RetainPreviewReplay(filepath.Join(t.TempDir(), "dir"), r); err == nil {
+		t.Fatal("unmarshalable record retained")
+	}
+	if _, err := FindPreviewReplay(filepath.Join(t.TempDir(), "dir"), "not-a-uuid"); err == nil {
+		t.Fatal("invalid lookup reference accepted")
+	}
+	if err := enqueuePreviewReplay(make(chan previewReplayWrite, 1), previewReplayWrite{"d", replayTestRecord()}); !errors.Is(err, ErrPreviewReplayQueued) {
+		t.Fatal("baseline enqueue", err)
+	}
+	bad := replayTestRecord()
+	bad.Replay.SourceReference = "raw"
+	if err := enqueuePreviewReplay(make(chan previewReplayWrite, 1), previewReplayWrite{"d", bad}); err == nil || errors.Is(err, ErrPreviewReplayQueued) {
+		t.Fatal("invalid record queued", err)
+	}
+	bad = replayTestRecord()
+	bad.RecordedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := enqueuePreviewReplay(make(chan previewReplayWrite, 1), previewReplayWrite{"d", bad}); err == nil || errors.Is(err, ErrPreviewReplayQueued) {
+		t.Fatal("unmarshalable record queued", err)
+	}
+}
+
+func TestPreviewReplayStoreRejectsUnreachableAndOpaquePaths(t *testing.T) {
+	if _, err := FindPreviewReplay(filepath.Join(t.TempDir(), "never-created"), uuid.NewString()); err == nil {
+		t.Fatal("missing directory resolved")
+	}
+	// A regular file as a path component makes mkdir fail with ENOTDIR.
+	file := filepath.Join(t.TempDir(), "regular")
+	os.WriteFile(file, []byte("x"), 0600)
+	if err := RetainPreviewReplay(filepath.Join(file, "dir"), replayTestRecord()); err == nil {
+		t.Fatal("file-component dir created")
+	}
+	empty := filepath.Join(t.TempDir(), "preview-replay")
+	os.Mkdir(empty, 0700)
+	if _, err := FindPreviewReplay(empty, uuid.NewString()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("empty store", err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+	sealed := filepath.Join(t.TempDir(), "preview-replay")
+	os.Mkdir(sealed, 0700)
+	sealedFile := filepath.Join(sealed, "current.jsonl")
+	os.WriteFile(sealedFile, []byte("{}\n"), 0600)
+	os.Chmod(sealedFile, 0000)
+	if _, err := FindPreviewReplay(sealed, uuid.NewString()); err == nil {
+		t.Fatal("unreadable file read")
+	}
+	os.Chmod(sealed, 0000)
+	defer os.Chmod(sealed, 0700)
+	if err := RetainPreviewReplay(sealed, replayTestRecord()); err == nil {
+		t.Fatal("unreadable directory retained")
+	}
+	if _, err := FindPreviewReplay(sealed, uuid.NewString()); err == nil {
+		t.Fatal("unreadable directory resolved")
+	}
+}
+
+// Rotation failures: an unwritable directory refuses rename; a corrupt
+// previous file refuses eviction; blank lines never hide a stored record.
+func TestPreviewReplayStoreRotationFailuresAndBlankLines(t *testing.T) {
+	recordSize := func() int {
+		data, err := json.Marshal(replayTestRecord())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(data) + 1
+	}()
+	full := PreviewReplayFileBytes - recordSize + 1
+	if os.Geteuid() != 0 {
+		dir := filepath.Join(t.TempDir(), "preview-replay")
+		os.Mkdir(dir, 0700)
+		os.WriteFile(filepath.Join(dir, "current.jsonl"), append(bytes.Repeat([]byte{'x'}, full), '\n'), 0600)
+		os.Chmod(dir, 0500)
+		defer os.Chmod(dir, 0700)
+		if err := RetainPreviewReplay(dir, replayTestRecord()); err == nil {
+			t.Fatal("rotation allowed without directory write")
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "preview-replay")
+	os.Mkdir(dir, 0700)
+	os.WriteFile(filepath.Join(dir, "current.jsonl"), append(bytes.Repeat([]byte{'x'}, full), '\n'), 0600)
+	os.Mkdir(filepath.Join(dir, "previous.jsonl"), 0700)
+	if err := RetainPreviewReplay(dir, replayTestRecord()); err == nil {
+		t.Fatal("corrupt previous evicted")
+	}
+	dir = filepath.Join(t.TempDir(), "preview-replay")
+	if err := RetainPreviewReplay(dir, replayTestRecord()); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "current.jsonl")
+	data, _ := os.ReadFile(path)
+	os.WriteFile(path, append([]byte{'\n'}, data...), 0600)
+	r := replayTestRecord()
+	if err := RetainPreviewReplay(dir, r); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := FindPreviewReplay(dir, r.Replay.Reference); err != nil || found.FileID != 29 {
+		t.Fatal("blank lines hid record", found, err)
+	}
+}
+
+// The shared worker retains queued writes and rate-limits failure warnings.
+func TestPreviewReplayQueueWorkerRetainsAndWarns(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "preview-replay")
+	r := replayTestRecord()
+	if err := QueuePreviewReplay(dir, r); !errors.Is(err, ErrPreviewReplayQueued) {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		found, err := FindPreviewReplay(dir, r.Replay.Reference)
+		if err == nil {
+			if !found.Replay.Retained || found.Replay.Retention != "retained" {
+				t.Fatal("worker retained facts", found.Replay)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker never retained queued write", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	previewReplayLastWarning.Store(0)
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocked, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := QueuePreviewReplay(blocked, replayTestRecord()); !errors.Is(err, ErrPreviewReplayQueued) {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for previewReplayLastWarning.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("worker never warned on retention failure")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestPreviewReplaySourcePresenceAndRequestPassthrough(t *testing.T) {
+	if HasPreviewSource(context.Background()) {
+		t.Fatal("source without binding")
+	}
+	bound := WithPreviewSource(context.Background(), 1, 2, "", nil)
+	if !HasPreviewSource(bound) {
+		t.Fatal("source binding lost")
+	}
+	if ctx := WithPreviewRequest(context.Background(), PreviewRequest{Segments: 5}); HasPreviewSource(ctx) {
+		t.Fatal("request acquired source")
+	}
+}
+
+// Directory execute permission alone distinguishes open from lookup.
+func TestPreviewReplayStoreRejectsUnsearchableDirectoryAndSealedRotation(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+	dir := filepath.Join(t.TempDir(), "preview-replay")
+	os.Mkdir(dir, 0400)
+	defer os.Chmod(dir, 0700)
+	if _, err := FindPreviewReplay(dir, uuid.NewString()); err == nil {
+		t.Fatal("unsearchable directory resolved")
+	}
+	recordSize := func() int {
+		data, err := json.Marshal(replayTestRecord())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(data) + 1
+	}()
+	full := PreviewReplayFileBytes - recordSize + 1
+	sealed := filepath.Join(t.TempDir(), "preview-replay")
+	os.Mkdir(sealed, 0700)
+	os.WriteFile(filepath.Join(sealed, "current.jsonl"), append(bytes.Repeat([]byte{'x'}, full), '\n'), 0600)
+	os.WriteFile(filepath.Join(sealed, "previous.jsonl"), []byte("old\n"), 0600)
+	os.Chmod(sealed, 0500)
+	defer os.Chmod(sealed, 0700)
+	if err := RetainPreviewReplay(sealed, replayTestRecord()); err == nil {
+		t.Fatal("rotation removed previous without directory write")
 	}
 }
