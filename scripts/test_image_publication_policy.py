@@ -357,7 +357,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertNotIn('path', checkouts[0].get('with', {}))  # Validation checkout stays intact.
         source_checkout = checkouts[1]
         self.assertEqual(source_checkout['name'], 'Checkout exact source for Sonar')
-        self.assertEqual(source_checkout['with']['path'], '.sonar-source')
+        self.assertEqual(source_checkout['with']['path'], 'sonar-source')
         self.assertFalse(source_checkout['with']['persist-credentials'])
         self.assertEqual(source_checkout['with']['fetch-depth'], 0)
         self.assertIn('github.event.pull_request.head.sha', source_checkout['with']['ref'])

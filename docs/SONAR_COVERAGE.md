@@ -23,6 +23,12 @@ verified binary paths are grouped into directory/extension patterns. The tracked
 file matches are unchanged; font licenses, SVGs and other application text remain
 available for analysis. Dependency/generated exclusions are unchanged.
 
+The 102 SQLite migration scripts (`pkg/sqlite/migrations/*.sql`) are excluded:
+Sonar analyzes every `.sql` file as Oracle PL/SQL, which is the wrong dialect and
+warns about a missing Oracle Data Dictionary. The Go pre/post-migration code in the
+same directory stays analyzed. `sonar.python.version` is `3.12, 3.13, 3.14`, from
+the ubuntu-24.04 runner's system Python (3.12) to the `alpine:3.24` image (3.14).
+
 Build/cache and coverage directories (`dist`, `.local*`, etc.) are Git-ignored;
 they are not outside configured source roots, because those roots no longer
 exist. Effective server scope remains to be verified. Vitest's separate coverage
@@ -41,23 +47,32 @@ go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-unit.out ./...
 go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go-integration.out \
   -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
 (cd ui/v2.5 && pnpm run test:coverage && pnpm run check)
+scripts/python_coverage.sh
 ```
 
 Use the existing generation/dependency steps before these commands. The frontend
 coverage script preserves the Node build-config tests and runs Vitest once with
 V8 coverage. Vitest includes untested `src/**/*.{ts,tsx}` files and writes
 `dist/coverage/frontend/lcov.info`; it does not measure the Node build-tool scripts.
-There is no fabricated report for Python, build scripts, or other languages.
+`scripts/python_coverage.sh` runs the Python regression suites (`scripts/` and
+`scripts/gpu_generation/`) under coverage.py, which is installed with hash pinning
+from `scripts/coverage-requirements.txt` into a venv that keeps the runner's
+system PyYAML. `scripts/coverage.ini` measures all of `scripts/` and writes
+repository-relative paths, so `dist/coverage/python.xml` (Cobertura) resolves from
+Sonar's `sonar-source` checkout. The hyphenated `scripts/ffmpeg/build-*.py` image
+build scripts are not importable and are not measured. There is no fabricated
+report for build scripts or other languages.
 
 `sonar.go.coverage.reportPaths` takes the two native Go coverprofiles. Do not
 concatenate them or treat them as generic coverage XML. The tagged suite also
 executes unit tests; importing both reports preserves both observations without
 creating a third test run. `sonar.javascript.lcov.reportPaths` takes LCOV for
-both JavaScript and TypeScript. Run the scanner from the repository root; LCOV
+both JavaScript and TypeScript, and `sonar.python.coverage.reportPaths` takes the
+Cobertura XML. Run the scanner from the repository root; LCOV
 source entries must resolve to `ui/v2.5/src/...`, not a different checkout path.
 
 Reports are required to be nonempty after successful tests and retained for
-seven days as `go-coverage` / `frontend-coverage` artifacts. These are evidence,
+seven days as `go-coverage` / `frontend-coverage` / `python-coverage` artifacts. These are evidence,
 not an automatic input to the remote Sonar service. Each artifact contains only
 the domains actually executed in that run. Drafts run selected validation automatically;
 unselected or reused domains do not produce new reports. Never scan a partial
@@ -107,25 +122,29 @@ GraphQL types are reused when available after input equality, without another
 install. Frontend type precision when dependencies are absent remains a live
 question. No partial PR import is presented as full-project coverage.
 
-A master push changing analyzed inputs imports both Go profiles and frontend LCOV.
-Separate coverage-only flags add missing report producers without changing affected
-validation obligations: backend-only changes add Vitest coverage with setup/generation;
-frontend-only changes add the two Go report runs with setup/generation; Python-only
-analyzed changes add both. These additions perform no standalone TypeScript check,
-Node build-config tests, production compile or image build. Genuine affected validation
-retains those checks. Documentation-only master changes and explicitly excluded
-inputs add no producer work or scan; other repository inputs follow the
-whole-project scope. Workflow changes already select both normal domains. Master coverage-only producers remain unchanged; PR reuse follows the narrow
+A master push changing analyzed inputs imports both Go profiles, frontend LCOV and
+Python Cobertura XML. Separate coverage-only flags add missing report producers
+without changing affected validation obligations: each unselected domain among
+backend, frontend and Python gets a coverage-only run (Go with setup/generation,
+Vitest with setup/generation, `scripts/python_coverage.sh`). These additions
+perform no standalone TypeScript check, Node build-config tests, production compile
+or image build. Genuine affected validation retains those checks. Documentation-only
+master changes and explicitly excluded inputs add no producer work or scan; other
+repository inputs follow the whole-project scope. Workflow changes already select
+all three domains. PR reuse follows the narrow
 independent evidence checks above.
 
 The snippet's analyzer cache is used once at `~/.sonar/cache`. It is separate from
 the action's scanner-binary tool cache. Existing checkout pins, full history, required `SonarCloud Code Analysis` identity, and merge protections are
 preserved. The commented placeholder build/test job is not introduced.
 
-The first merged run retained genuine Go and LCOV artifacts and passed its quality
-gate, but logged no Go or JavaScript/TypeScript coverage sensors. Coverage ingestion
-remains unresolved; absent server metrics are not zero coverage. This follow-up
-has not established a server-side cause or justified an authentication change.
+The scanner checkout must not live under a dot-directory. Early runs used
+`.sonar-source` as `projectBaseDir`; the scanner marks every file below a hidden
+base directory as hidden, and only sensors that opt into hidden files (IaC, text
+and secrets) received them. Go, JavaScript/TypeScript, CSS and Python sensors were
+skipped, so the project reported 851 IaC lines across 9 files and imported no
+coverage. The checkout is now `sonar-source`, and the workflow test rejects any
+hidden path component in `projectBaseDir`.
 
 Before marking VEX-119 complete, inspect real PR and master scanner logs for Go/LCOV
 imports and unresolved paths, compare representative covered/uncovered files and
