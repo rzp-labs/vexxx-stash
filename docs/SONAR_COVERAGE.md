@@ -6,30 +6,29 @@ check, merge protections, or quality gate. No coverage thresholds are added.
 
 ## Analysis scope
 
-The scope includes all Go commands, backend packages, UI sources, repository
-tools, GraphQL inputs, Docker configuration and workflow configuration. Go
-`*_test.go`, frontend `*.test.{ts,tsx}` / `*.spec.{ts,tsx}`, Node `*.test.mjs`,
-Python `test_*.py`, test fixtures, frontend setup/helpers and the test database
-generator are configured as tests. Under the documented legacy scope rules,
-Sonar removes test inclusions from main scope. Live classification must still be
-verified: the first merged run reported that its new analysis-scope UX ignores
-`sonar.sources`, `sonar.tests` and test inclusion/exclusion properties. Repository
-intent and local classification checks do not establish effective server scope.
+The project's new analysis-scope UX analyzes the whole repository by default.
+The scanner reported that `sonar.sources`, `sonar.tests`, `sonar.test.inclusions`
+and `sonar.test.exclusions` have no effect; those four properties are removed.
+Effective source/test classification must be verified in the Sonar project.
+Removing ignored properties does not establish test classification or coverage
+visibility, and tests/support are not moved into global exclusions.
 
-Exclusions identify dependency directories (`node_modules`, `vendor`), built UI
-assets, coverage output and generated login locales. Generated code exclusions
-are tied to `gqlgen.yml`, `ui/v2.5/codegen.ts`, the stash-box client generator,
-dataloaden headers and mockery headers. Handwritten mock helpers
-`pkg/models/mocks/database.go` and `query.go`
-are classified as tests, while only mockery's `*ReaderWriter.go` outputs are
-excluded. Hand-written production code stays in
-scope, including `pkg/models/paths/paths_generated.go`: its name refers to media
-paths and is not evidence of generated source. Build/cache directories at the
-repository root (`dist`, `.local*`, etc.) are outside the configured source roots;
-the live scope warning above prevents assuming that exclusion is effective.
-Vitest additionally excludes TypeScript declarations, tests, test support and
-the actual `generated-graphql.ts` output from instrumentation. Declarations
-remain available for static analysis.
+`sonar.exclusions` retains the existing dependency directories (`node_modules`,
+`vendor`), built UI assets, generated login locales and exact generated code
+outputs. Generated exclusions are tied to `gqlgen.yml`, `ui/v2.5/codegen.ts`, the
+stash-box client generator, dataloaden headers and mockery headers. Only mockery's
+`*ReaderWriter.go` outputs are excluded; handwritten `database.go`, `query.go`
+and `pkg/models/paths/paths_generated.go` stay available for analysis. The 77
+verified binary paths are grouped into directory/extension patterns. The tracked
+file matches are unchanged; font licenses, SVGs and other application text remain
+available for analysis. Dependency/generated exclusions are unchanged.
+
+Build/cache and coverage directories (`dist`, `.local*`, etc.) are Git-ignored;
+they are not outside configured source roots, because those roots no longer
+exist. Effective server scope remains to be verified. Vitest's separate coverage
+configuration still excludes TypeScript declarations, tests, test support and
+`generated-graphql.ts` from instrumentation. Declarations and tests remain
+available for static analysis.
 
 ## Report production
 
@@ -114,9 +113,9 @@ validation obligations: backend-only changes add Vitest coverage with setup/gene
 frontend-only changes add the two Go report runs with setup/generation; Python-only
 analyzed changes add both. These additions perform no standalone TypeScript check,
 Node build-config tests, production compile or image build. Genuine affected validation
-retains those checks. Documentation-only master changes and CI inputs outside the
-analysis scope add no producer work or scan; workflow changes already select both
-normal domains. Master coverage-only producers remain unchanged; PR reuse follows the narrow
+retains those checks. Documentation-only master changes and explicitly excluded
+inputs add no producer work or scan; other repository inputs follow the
+whole-project scope. Workflow changes already select both normal domains. Master coverage-only producers remain unchanged; PR reuse follows the narrow
 independent evidence checks above.
 
 The snippet's analyzer cache is used once at `~/.sonar/cache`. It is separate from

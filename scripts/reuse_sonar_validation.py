@@ -23,7 +23,7 @@ import zipfile
 
 from reuse_pr_packaging import request, TokenFreeRedirect, VARIABLES, step_passed
 from reuse_master_validation import WORKFLOW, main as reuse_master
-from sonar_scan_policy import verify_current_pr
+from sonar_scan_policy import verify_current_pr, parse_properties
 
 SHA = re.compile(r'[0-9a-f]{40}')
 LIMIT = 16 * 1024 * 1024
@@ -97,14 +97,7 @@ def content(api, path, revision):
 
 
 def config(raw):
-    result = {}
-    for line in raw.decode().splitlines():
-        if not line.strip() or line.lstrip().startswith('#'):
-            continue
-        key, value = line.split('=', 1)
-        if key in result:
-            raise ValueError('duplicate scanner property')
-        result[key] = value
+    result = parse_properties(raw.decode())
     result.pop('sonar.exclusions', None)
     return result
 
