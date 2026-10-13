@@ -70,6 +70,11 @@ Cobertura XML. Run the scanner from the repository root; LCOV
 source entries must resolve to `ui/v2.5/src/...`, not a different checkout path.
 `sonar.coverage.exclusions` lists `ui/v2.5/vite.config.js`: build tooling outside
 that LCOV scope can never report coverage, but it is still analyzed for issues.
+It also lists Go `*_test.go`, Vitest `*.test.ts(x)`, `ui/v2.5/src/test/**` and
+Python `scripts/**/test_*.py`. Sonar classifies these as main sources, so they
+otherwise count as lines to cover: Go and Vitest tests are never instrumented and
+appear fully uncovered, while coverage.py measures Python tests as covered. Excluding
+them keeps the new-code gate on production code. They remain analyzed for issues.
 
 Reports are required to be nonempty after successful tests and retained for
 seven days as `go-coverage` / `frontend-coverage` / `python-coverage` artifacts. These are evidence,
