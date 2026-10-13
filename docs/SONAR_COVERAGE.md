@@ -10,8 +10,11 @@ The scope includes all Go commands, backend packages, UI sources, repository
 tools, GraphQL inputs, Docker configuration and workflow configuration. Go
 `*_test.go`, frontend `*.test.{ts,tsx}` / `*.spec.{ts,tsx}`, Node `*.test.mjs`,
 Python `test_*.py`, test fixtures, frontend setup/helpers and the test database
-generator are classified as tests. Sonar automatically removes test inclusions
-from the main source scope, making the two final scopes disjoint.
+generator are configured as tests. Under the documented legacy scope rules,
+Sonar removes test inclusions from main scope. Live classification must still be
+verified: the first merged run reported that its new analysis-scope UX ignores
+`sonar.sources`, `sonar.tests` and test inclusion/exclusion properties. Repository
+intent and local classification checks do not establish effective server scope.
 
 Exclusions identify dependency directories (`node_modules`, `vendor`), built UI
 assets, coverage output and generated login locales. Generated code exclusions
@@ -22,7 +25,8 @@ are classified as tests, while only mockery's `*ReaderWriter.go` outputs are
 excluded. Hand-written production code stays in
 scope, including `pkg/models/paths/paths_generated.go`: its name refers to media
 paths and is not evidence of generated source. Build/cache directories at the
-repository root (`dist`, `.local*`, etc.) are outside the explicit source roots.
+repository root (`dist`, `.local*`, etc.) are outside the configured source roots;
+the live scope warning above prevents assuming that exclusion is effective.
 Vitest additionally excludes TypeScript declarations, tests, test support and
 the actual `generated-graphql.ts` output from instrumentation. Declarations
 remain available for static analysis.
@@ -56,7 +60,7 @@ source entries must resolve to `ui/v2.5/src/...`, not a different checkout path.
 Reports are required to be nonempty after successful tests and retained for
 seven days as `go-coverage` / `frontend-coverage` artifacts. These are evidence,
 not an automatic input to the remote Sonar service. Each artifact contains only
-the domains actually executed in that run. Drafts defer substantive validation;
+the domains actually executed in that run. Drafts run selected validation automatically;
 unselected or reused domains do not produce new reports. Never scan a partial
 run as though it contains full-project coverage. All reports live under `dist/coverage/`, which is already ignored by Git and
 Docker packaging. No ignore-file or image-planner change is needed.
@@ -70,25 +74,39 @@ or exposed to validation. The official pinned scanner runs only on the existing
 GitHub-hosted runner, after validation; no Sonar CLI administration or scanner
 installation is required on the Mini.
 
-Same-repository non-draft PRs retain their actual target branch, including stacks.
-Full history is fetched, and the scanner uses a separate actual-HEAD checkout;
-existing validation continues against the merge tree. The real Sonar service must
-have a suitable target-branch baseline; there is no override to master or synthetic
-successful check. Forks/missing trust metadata fail fresh `ci-required` validation
-without receiving the token. Fork contribution routing needs a maintainer-approved
-policy before activation; the local candidate does not introduce a privileged
-fork-code execution route. Drafts defer substantive validation and scanning;
-ready-for-review and retarget events start a fresh required run at the same SHA.
-Tags and publication dispatches retain their existing publication/validation policy
-and do not run Sonar.
+Same-repository draft and ready PRs retain their actual target branch, including
+stacks. Full history is fetched and the scanner uses the actual HEAD checkout.
+All PR scans, including scans without coverage reports, require the complete HEAD
+Git tree to equal the tested merge-result Git tree. A merge-only difference requires
+updating the branch before scanning. Forks and missing trust metadata fail fresh
+validation without receiving the token. Tags and publication dispatches retain
+their existing validation/publication policy and do not run Sonar.
 
-PR scans import only the Go/UI reports produced by their selected domains. Static
-PR scans with no such reports verify the scan checkout but do not require merge/head
-equivalence. Any copied reports require identical analyzed/test/build inputs between
-tested merge and source HEAD; missing or empty selected reports fail. No partial PR
-import is presented as full-project coverage. Same-run dependencies and generated
-GraphQL types are reused when available after input equality, without another install.
-Sonar-specific precision when frontend types are absent remains a live-pilot question.
+PR scans import only their selected Go/UI reports. A prior completed native run
+may supply those reports when independent Git input/workflow/variable comparison,
+actual generation/test/production-compile results (or a real image build/smoke
+with skipped host compiles), fresh attempts and artifact
+digests prove equivalence. Only `sonar.exclusions` may differ for that validation
+reuse; a changed exclusion list always scans again. Reused reports retain their
+original provenance and are not uploaded as newly produced coverage.
+
+The scanner waits for its actual quality gate. After it succeeds, CI records its
+real analysis task and a fresh successful `SonarCloud Code Analysis` result from
+app ID 12526 for the actual head and PR. Ready events require that completed scan's
+exact head/base/target/full tree/configuration and independently verified native
+validation, then reuse clearance. A draft packaging change may record valid native/Sonar clearance before its final
+packaging guard fails the required job. Only that sole, expected guard failure can
+qualify a scan donor; the ready run must complete the existing image build/smoke.
+Other PR events scan again. Pending mergeability receives bounded retries while
+head/base/target identities are rechecked. Current GitHub PR
+metadata is checked before work, before scan and after clearance. This cannot
+atomically prevent a base change during merge; server-side strict up-to-date
+protection or checks on a merge-queue group SHA remain necessary.
+
+Missing or empty selected reports fail. Same-run dependencies and generated
+GraphQL types are reused when available after input equality, without another
+install. Frontend type precision when dependencies are absent remains a live
+question. No partial PR import is presented as full-project coverage.
 
 A master push changing analyzed inputs imports both Go profiles and frontend LCOV.
 Separate coverage-only flags add missing report producers without changing affected
@@ -98,12 +116,17 @@ analyzed changes add both. These additions perform no standalone TypeScript chec
 Node build-config tests, production compile or image build. Genuine affected validation
 retains those checks. Documentation-only master changes and CI inputs outside the
 analysis scope add no producer work or scan; workflow changes already select both
-normal domains. There is no cross-revision report-cache machinery.
+normal domains. Master coverage-only producers remain unchanged; PR reuse follows the narrow
+independent evidence checks above.
 
 The snippet's analyzer cache is used once at `~/.sonar/cache`. It is separate from
-the action's scanner-binary tool cache. Existing checkout pins, full history, draft
-behavior, required `SonarCloud Code Analysis` identity, and merge protections are
+the action's scanner-binary tool cache. Existing checkout pins, full history, required `SonarCloud Code Analysis` identity, and merge protections are
 preserved. The commented placeholder build/test job is not introduced.
+
+The first merged run retained genuine Go and LCOV artifacts and passed its quality
+gate, but logged no Go or JavaScript/TypeScript coverage sensors. Coverage ingestion
+remains unresolved; absent server metrics are not zero coverage. This follow-up
+has not established a server-side cause or justified an authentication change.
 
 Before marking VEX-119 complete, inspect real PR and master scanner logs for Go/LCOV
 imports and unresolved paths, compare representative covered/uncovered files and

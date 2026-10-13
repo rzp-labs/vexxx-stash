@@ -1,9 +1,12 @@
 """Offline scanner selection; no network, credentials, or image obligations."""
 import os
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 
 
 def properties(root):
@@ -36,9 +39,6 @@ def scanner_plan(name, kind, ref, repository, event, paths, groups, config,
         return groups, result
     if name == 'pull_request':
         pr = event.get('pull_request', {})
-        if pr.get('draft'):
-            result['sonar_status'] = 'draft'
-            return groups, result
         if (pr.get('head', {}).get('repo', {}).get('full_name') != repository
                 or pr.get('base', {}).get('repo', {}).get('full_name') != repository):
             result['sonar_status'] = 'fork_or_missing_trust_metadata'
@@ -74,15 +74,49 @@ def verify_source_snapshot(root, tested_sha, analysis_sha, config):
     if any(not re.fullmatch(r'[0-9a-f]{40}', sha)
            for sha in (tested_sha, analysis_sha)):
         raise ValueError('invalid source revision')
-    # Existing tests validate the PR merge. Sonar scans actual PR HEAD. Reuse its
-    # reports only when all analyzed/test/build inputs match, not just filenames.
-    paths = sorted(set((config['sonar.sources'] + ',' + config['sonar.tests']).split(','))
-                   | {'sonar-project.properties', 'go.mod', 'go.sum', 'Makefile',
-                      'gqlgen.yml', '.gqlgenc.yml', 'VERSION'})
-    result = subprocess.run(['git', 'diff', '--quiet', tested_sha, analysis_sha,
-                             '--', *paths], cwd=root)
-    if result.returncode:
-        raise ValueError('tested merge and analysis HEAD inputs differ; refresh the PR before scanning')
+    # Bind the whole tracked source tree, including files outside scanner scope.
+    # Sonar's supported PR HEAD must be byte-identical to the merge result.
+    trees = [subprocess.check_output(['git', 'rev-parse', sha + '^{tree}'],
+                                    cwd=root, text=True).strip()
+             for sha in (tested_sha, analysis_sha)]
+    if trees[0] != trees[1]:
+        raise ValueError('tested merge and analysis HEAD trees differ; update the branch before scanning')
+
+
+def verify_current_pr(api, plan, repository, sleeper=time.sleep):
+    """Bind current GitHub PR metadata and both complete Git trees to the plan."""
+    number = plan.get('pr')
+    if isinstance(number, bool) or not re.fullmatch(r'[1-9][0-9]*', str(number)):
+        raise ValueError('invalid PR number')
+    prefix = '/repos/' + repository
+    # GitHub computes mergeability asynchronously after PR updates. Retry only
+    # that pending state; reject changed identities and settled conflicts now.
+    for attempt in range(6):
+        pr = api(prefix + '/pulls/' + str(number))
+        for side in ('head', 'base'):
+            if pr.get(side, {}).get('repo', {}).get('full_name') != repository:
+                raise ValueError('PR repository changed')
+            if pr[side].get('sha') != plan.get(side):
+                raise ValueError('PR ' + side + ' changed; run validation again')
+        if pr.get('state') != 'open' or pr['base'].get('ref') != plan.get('target'):
+            raise ValueError('PR target or state changed')
+        if pr.get('mergeable') is not None or attempt == 5:
+            break
+        sleeper(2)
+    merge = pr.get('merge_commit_sha', '')
+    if pr.get('mergeable') is not True or not re.fullmatch(r'[0-9a-f]{40}', merge):
+        raise ValueError('current PR merge result is unavailable')
+    merged = api(prefix + '/git/commits/' + merge)
+    head = api(prefix + '/git/commits/' + plan['head'])
+    if [p.get('sha') for p in merged.get('parents', [])] != [plan['base'], plan['head']]:
+        raise ValueError('current PR merge parents changed')
+    tree = plan.get('tree', '')
+    if (not re.fullmatch(r'[0-9a-f]{40}', tree)
+            or merged.get('tree', {}).get('sha') != tree
+            or head.get('tree', {}).get('sha') != tree):
+        raise ValueError('current PR HEAD and merge trees differ; update the branch')
+    return {'head': plan['head'], 'base': plan['base'], 'target': plan['target'],
+            'merge': merge, 'tree': tree}
 
 
 def prepare_source_reports(root, source_root, tested_sha, analysis_sha,
@@ -97,8 +131,7 @@ def prepare_source_reports(root, source_root, tested_sha, analysis_sha,
     allowed = set(config['sonar.go.coverage.reportPaths'].split(',')) | {
         config['sonar.javascript.lcov.reportPaths']}
     reports = list(filter(None, (go_paths + ',' + lcov_paths).split(',')))
-    if reports:
-        verify_source_snapshot(root, tested_sha, analysis_sha, config)
+    verify_source_snapshot(root, tested_sha, analysis_sha, config)
     for report in reports:
         if report not in allowed:
             raise ValueError('unexpected coverage report path')
@@ -123,6 +156,14 @@ def prepare_source_reports(root, source_root, tested_sha, analysis_sha,
 
 if __name__ == '__main__':
     root = Path.cwd()
+    if os.environ.get('GITHUB_EVENT_NAME') == 'pull_request':
+        from reuse_pr_packaging import request
+        plan = json.loads(Path(os.environ['VALIDATION_PLAN_PATH']).read_text())
+        repository = os.environ['GITHUB_REPOSITORY']
+        prefix = '/repos/' + repository
+        verify_current_pr(lambda path: request(path[len(prefix):]), plan, repository)
     prepare_source_reports(root, root / '.sonar-source', os.environ['TESTED_SHA'],
                            os.environ['ANALYSIS_SHA'], os.environ['GO_REPORTS'],
                            os.environ['LCOV_REPORTS'])
+    with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
+        output.write('scan_started_at=' + datetime.now(timezone.utc).isoformat() + '\n')
