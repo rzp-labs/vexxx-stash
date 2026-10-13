@@ -9,20 +9,61 @@ import subprocess
 import time
 
 
+def parse_properties(text):
+    """Read this repository's key=value properties, including continued values."""
+    result, pending = {}, ''
+    for line in text.splitlines():
+        if not pending and (not line.strip() or line.lstrip().startswith(('#', '!'))):
+            continue
+        line = pending + line.lstrip()
+        if line.endswith('\\'):
+            pending = line[:-1]
+            continue
+        pending = ''
+        key, value = line.split('=', 1)
+        if key in result:
+            raise ValueError('duplicate scanner property')
+        result[key] = value
+    if pending:
+        raise ValueError('unfinished scanner property continuation')
+    return result
+
+
 def properties(root):
-    return dict(line.split('=', 1) for line in
-                (root / 'sonar-project.properties').read_text().splitlines()
-                if line and not line.startswith('#'))
+    return parse_properties((root / 'sonar-project.properties').read_text())
+
+
+def matches(path, pattern):
+    # Sonar path patterns: ** spans directories, * and ? stay within one.
+    regex = ''
+    i = 0
+    while i < len(pattern):
+        if pattern[i:i + 3] == '**/':
+            regex += '(?:.*/)?'
+            i += 3
+        elif pattern[i:i + 2] == '**':
+            regex += '.*'
+            i += 2
+        elif pattern[i] == '*':
+            regex += '[^/]*'
+            i += 1
+        elif pattern[i] == '?':
+            regex += '[^/]'
+            i += 1
+        else:
+            regex += re.escape(pattern[i])
+            i += 1
+    return bool(re.fullmatch(regex, path))
 
 
 def analyzed_input(path, config):
     # Documentation-only changes do not replace the master coverage snapshot.
     if path.endswith('.md') or path.startswith('docs/'):
         return False
-    roots = (config['sonar.sources'] + ',' + config['sonar.tests']).split(',')
-    return (any(path == p or path.startswith(p.rstrip('/') + '/') for p in roots)
-            or path in ('sonar-project.properties', 'go.mod', 'go.sum',
-                        'gqlgen.yml', '.gqlgenc.yml', 'Makefile'))
+    # The project's new scope scans the whole repository. Keep configured
+    # exclusions, but do not reconstruct the removed legacy source/test roots.
+    return not any(matches(path, pattern)
+                   for pattern in config.get('sonar.exclusions', '').split(','))
 
 
 def scanner_plan(name, kind, ref, repository, event, paths, groups, config,

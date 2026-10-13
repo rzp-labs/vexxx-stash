@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import image_publication_policy as publication
-from sonar_scan_policy import properties, scanner_plan, verify_source_snapshot, prepare_source_reports, verify_current_pr
+from sonar_scan_policy import parse_properties, properties, scanner_plan, verify_source_snapshot, prepare_source_reports, verify_current_pr
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = 'rzp-labs/vexxx-stash'
@@ -28,6 +28,18 @@ class ScanPolicyTests(unittest.TestCase):
         self.assertEqual(groups['build_image'], existing['build_image'])
         self.assertEqual(groups['python'], existing['python'])
         return existing, groups, scan
+
+    def test_properties_continuations_preserve_values_and_reuse_comparison(self):
+        from reuse_sonar_validation import config
+        single = 'sonar.projectKey=project\nsonar.exclusions=assets/*.png,fonts/*.ttf\n'
+        continued = 'sonar.projectKey=project\nsonar.exclusions=\\\n  assets/*.png,\\\n  fonts/*.ttf\n'
+        self.assertEqual(parse_properties(single), parse_properties(continued))
+        self.assertEqual(parse_properties(single), parse_properties(continued.replace('\n', '\r\n')))
+        self.assertEqual(config(single.encode()), config(continued.encode()))
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            parse_properties('sonar.projectKey=a\nsonar.projectKey=b\n')
+        with self.assertRaisesRegex(ValueError, 'unfinished'):
+            parse_properties('sonar.exclusions=abc,\\\n')
 
     def test_disabled_preserves_every_existing_domain(self):
         for paths in (['README.md'], ['pkg/cache/lru.go'], ['ui/v2.5/src/App.tsx'],
@@ -53,14 +65,27 @@ class ScanPolicyTests(unittest.TestCase):
                 self.assertEqual(bool(scan['sonar_go_paths']), new['backend'])
                 self.assertEqual(bool(scan['sonar_lcov_paths']), new['frontend'])
 
-    def test_master_documentation_and_unanalyzed_ci_inputs_add_no_work(self):
+    def test_master_documentation_adds_no_work(self):
         for paths in (['README.md'], ['docs/DEVELOPMENT.md'],
-                      ['ui/v2.5/README.md'], ['.codex/config.toml']):
+                      ['ui/v2.5/README.md']):
             with self.subTest(paths=paths):
                 old, new, scan = self.selection(paths, name='push')
                 self.assertEqual(old, new)
                 self.assertFalse(scan['sonar_scan'])
                 self.assertEqual(scan['sonar_added_domains'], '')
+
+    def test_master_whole_repository_inputs_and_exclusions(self):
+        for path, expected in (('config/settings.json', True),
+                               ('.codex/config.toml', True),
+                               ('icon.png', False),
+                               ('ui/v2.5/node_modules/dependency/index.js', False),
+                               ('internal/api/generated_models.go', False)):
+            with self.subTest(path=path):
+                old, new, scan = self.selection([path], name='push')
+                self.assertEqual(old, new)
+                self.assertEqual(scan['sonar_scan'], expected)
+                self.assertEqual(bool(scan['sonar_go_paths']), expected)
+                self.assertEqual(bool(scan['sonar_lcov_paths']), expected)
 
     def test_master_adds_only_missing_domains_for_complete_snapshots(self):
         for paths, added in ((['pkg/cache/lru.go'], 'frontend'),
