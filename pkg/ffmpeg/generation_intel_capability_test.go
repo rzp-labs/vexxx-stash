@@ -12,10 +12,11 @@ import (
 // ceiling, authorize rendering. Device validation is substituted only here;
 // production continues to validate the explicitly selected render device.
 func TestVEX101ActualCapabilityProbesContinueStrictHardwareWork(t *testing.T) {
-	for _, tc := range []struct {
+	type headerCase struct {
 		codec, profile string
 		width, height  int
-	}{
+	}
+	for _, tc := range []headerCase{
 		{"wmv3", "Main", 1920, 1080},
 		{"vc1", "Advanced", 1920, 1080},
 		{"h264", "High", 1920, 1080},
@@ -28,31 +29,41 @@ func TestVEX101ActualCapabilityProbesContinueStrictHardwareWork(t *testing.T) {
 			if err != nil {
 				t.Fatal("header blacklist overruled possible actual capability", err)
 			}
-			var stages []string
-			run := func(_ context.Context, args Args) error {
-				joined := strings.Join(args, " ")
-				for _, required := range []string{"-hwaccel vaapi", "-hwaccel_output_format vaapi", "-hwaccel_strict 1", "-abort_on empty_output", "-frames:v 1", "-map 0:0"} {
-					if !strings.Contains(joined, required) {
-						t.Fatalf("probe lost strict actual-source evidence (%s): %s", required, joined)
-					}
-				}
-				stages = append(stages, plan.Probes[len(stages)].Stage)
-				return nil
-			}
-			deviceChecked, rendered := false, false
-			d, err := runIntelGenerationWork(context.Background(), plan, func(context.Context) error {
-				if !deviceChecked || !reflect.DeepEqual(stages, []string{"decode", "filter", "encode"}) {
-					t.Fatal("render bypassed device/actual-source capability evidence", stages)
-				}
-				rendered = true
-				return nil
-			}, nil, run, func(device string) error {
-				deviceChecked = device == config.Device
-				return nil
-			})
-			if err != nil || !rendered || d.Selected != "vaapi" || d.Actual != "vaapi" {
-				t.Fatalf("supported input did not continue as strict hardware: %+v %v", d, err)
-			}
+			assertStrictHardwareContinue(t, plan, config.Device)
 		})
+	}
+}
+
+func assertStrictProbeArgs(t *testing.T, args Args) {
+	t.Helper()
+	joined := strings.Join(args, " ")
+	for _, required := range []string{"-hwaccel vaapi", "-hwaccel_output_format vaapi", "-hwaccel_strict 1", "-abort_on empty_output", "-frames:v 1", "-map 0:0"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("probe lost strict actual-source evidence (%s): %s", required, joined)
+		}
+	}
+}
+
+func assertStrictHardwareContinue(t *testing.T, plan IntelGenerationPlan, device string) {
+	t.Helper()
+	var stages []string
+	run := func(_ context.Context, args Args) error {
+		assertStrictProbeArgs(t, args)
+		stages = append(stages, plan.Probes[len(stages)].Stage)
+		return nil
+	}
+	deviceChecked, rendered := false, false
+	d, err := runIntelGenerationWork(context.Background(), plan, func(context.Context) error {
+		if !deviceChecked || !reflect.DeepEqual(stages, []string{"decode", "filter", "encode"}) {
+			t.Fatal("render bypassed device/actual-source capability evidence", stages)
+		}
+		rendered = true
+		return nil
+	}, nil, run, func(checked string) error {
+		deviceChecked = checked == device
+		return nil
+	})
+	if err != nil || !rendered || d.Selected != "vaapi" || d.Actual != "vaapi" {
+		t.Fatalf("supported input did not continue as strict hardware: %+v %v", d, err)
 	}
 }
