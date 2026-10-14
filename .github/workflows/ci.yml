@@ -16,9 +16,9 @@ concurrency:
 
 jobs:
   # PR-only classification of changed files; push/merge_group leave outputs
-  # empty and domain jobs run everything via their `if`. First match wins;
-  # mirrors the old obligations() policy: docs-only changes run nothing,
-  # unknown/shared paths run all test domains but not the image.
+  # empty and domain jobs run everything via their `if`. First match wins:
+  # listed docs run nothing; unknown/shared paths run all test domains but
+  # not the image. Renames count both old and new paths.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -38,10 +38,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           backend=false; frontend=false; python=false; image=false
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' > /tmp/changed.txt
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)' > /tmp/changed.txt
           while IFS= read -r p; do
             case "$p" in
-              docs/*|*.md) ;;
+              docs/*|README.md|CONTRIBUTING.md|AGENTS.md|REVIEW.md|LICENSE|docker/production/README.md|docker/build/x86_64/README.md|ui/v2.5/README.md|ui/v2.5/src/locales/README.md|scripts/ffmpeg/README.md|pkg/sqlite/migrations/README.md|pkg/plugin/examples/README.md|pkg/plugin/examples/react-component/README.md) ;;
               docker/*|*Dockerfile*|.dockerignore|Makefile|scripts/check_intel_runtime.py|scripts/ffmpeg/*)
                 backend=true; frontend=true; image=true
                 case "$p" in scripts/ffmpeg/*) python=true;; esac ;;
