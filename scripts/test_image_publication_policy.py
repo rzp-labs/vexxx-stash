@@ -98,8 +98,9 @@ class ImagePublicationPolicyTests(unittest.TestCase):
             pr = self.source_pr(draft=draft)
             policy.validate_pr_source_branch(REPO, pr)
             result = self.plan(name='pull_request', paths=paths, event={'pull_request': pr})
-            self.assertEqual(result['python'], not draft)
-            self.assertEqual(result['deferred'], draft)
+            # Drafts still run affected validation; only packaging is held.
+            self.assertTrue(result['python'])
+            self.assertFalse(result['deferred'])
             self.assertFalse(result['backend'] or result['frontend'] or result['build_image'] or result['publish'])
 
     def test_cli_source_validation_precedes_planning_and_preserves_merge_identity(self):
@@ -113,7 +114,8 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                                                input=input, text=True).strip()
             git('init', '-q')
             (root / 'README.md').write_text('fixture\n')
-            git('add', 'README.md')
+            (root / 'sonar-project.properties').write_text('sonar.projectKey=fixture\n')
+            git('add', 'README.md', 'sonar-project.properties')
             tree = git('write-tree')
             base = git('commit-tree', tree, '-m', 'base')
             (root / 'docker').mkdir()
@@ -130,12 +132,14 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                    'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_REF_TYPE': 'branch',
                    'GITHUB_REF_NAME': '117/merge', 'GITHUB_SHA': merge, 'GITHUB_REPOSITORY': REPO,
                    'VALIDATION_PLAN_PATH': str(plan_path), 'GITHUB_STEP_SUMMARY': str(summary)}
-            pr = {**self.source_pr(), 'base': {'sha': base, 'ref': 'any/stack-base'},
+            pr = {**self.source_pr(), 'base': {'sha': base, 'ref': 'any/stack-base',
+                                               'repo': {'full_name': REPO}},
                   'merge_commit_sha': None}
             pr['head']['sha'] = head
             cases = [(REPO, pr, merge, True)]
             for branch, repository, author, accepted in (
-                    ('fork-user/VEX-117-suffix', 'fork/vexxx-stash', None, True),
+                    # Conforming fork names pass naming but Sonar fails fork heads.
+                    ('fork-user/VEX-117-suffix', 'fork/vexxx-stash', None, False),
                     ('release-v0.2.7', REPO, None, True),
                     ('master', 'fork/vexxx-stash', None, False),
                     ('release-v0.2.7', 'fork/vexxx-stash', None, False),
@@ -151,7 +155,8 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                     cases.append((REPO, deepcopy(changed), merge, accepted))
             other_pr = deepcopy(pr)
             other_pr['head'].pop('ref')
-            other_pr['head'].pop('repo')
+            other_pr['head']['repo'] = {'full_name': 'other/repository'}
+            other_pr['base']['repo'] = {'full_name': 'other/repository'}
             cases.append(('other/repository', other_pr, merge, True))
             cases.append((REPO, pr, head, False))  # Good name cannot hide a nonmerge checkout.
             for repository, source, checkout, accepted in cases:
@@ -159,7 +164,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                     git('update-ref', 'HEAD', checkout)
                     for path in (output, plan_path, summary):
                         path.unlink(missing_ok=True)
-                    event_path.write_text(json.dumps({'pull_request': source}))
+                    event_path.write_text(json.dumps({'number': 65, 'pull_request': source}))
                     run_env = {**env, 'GITHUB_REPOSITORY': repository, 'GITHUB_SHA': checkout,
                                'GITHUB_ACTOR': 'dependabot[bot]'}
                     with patch.dict(os.environ, {'VALIDATION_PLAN_PATH': str(ambient)}):
@@ -172,7 +177,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                         self.assertEqual(planned['head'], head)
                         self.assertEqual(planned['base'], base)
                         self.assertEqual(planned['tree'], head_tree)
-                        self.assertEqual(planned['deferred'], bool(source.get('draft')))
+                        self.assertFalse(planned['deferred'])
                         self.assertEqual(planned['build_image'], not source.get('draft', False))
                         self.assertFalse(planned['publish'])
                         self.assertIn('publish=false\n', output.read_text())
@@ -601,7 +606,8 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         merge = 'c' * 40
         event = {'number': 65, 'action': 'synchronize',
                  'pull_request': {'base': {'sha': BASE, 'ref': 'master', 'repo': {'full_name': REPO}},
-                                  'head': {'sha': SHA, 'repo': {'full_name': REPO}}}}
+                                  'head': {'sha': SHA, 'ref': 'codex/vex-65',
+                                           'repo': {'full_name': REPO}}}}
 
         def git(command, **kwargs):
             if command[1] == 'rev-parse':

@@ -41,8 +41,8 @@ For PRs into this repository, the planner validates the actual source branch
 before selecting work. A naming failure prevents a passing `ci-required` run;
 it does not prevent branch creation, rename, or push. Other PR base branches
 receive the same validation without adding protections to those bases. Drafts
-still defer substantive validation under `validation-deferred`, but may report a
-naming error; ready-for-review runs required validation.
+run the same `ci-required` validation, including this naming check; only image
+packaging waits for the draft to become ready for review.
 
 Same-repository exceptions are `master`, exact legacy branches
 `codex/ct102-media-generation` and `feat/posthog-instrumentation`, and precise
