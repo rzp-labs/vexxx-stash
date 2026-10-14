@@ -2,10 +2,12 @@ import base64
 import copy
 import io
 import json
+import os
 from pathlib import Path
+import runpy
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import zipfile
 
 import reuse_sonar_validation as reuse
@@ -22,8 +24,9 @@ ENTRIES = [dict(path='app.go', mode='100644', type='blob', sha='2' * 40),
            dict(path='sonar-project.properties', mode='100644', type='blob', sha='4' * 40)]
 INPUTS = reuse.fingerprint(ENTRIES, VARIABLES)
 PLAN = dict(checkout=M, head=H, base=B, tree=T, pr=65, target='master', action='synchronize', build_image=False,
-            sonar_go_paths='dist/coverage/go-unit.out,dist/coverage/go-integration.out',
-            sonar_lcov_paths='dist/coverage/frontend/lcov.info')
+            sonar_go_paths='dist/coverage/go.out',
+            sonar_lcov_paths='dist/coverage/frontend/lcov.info',
+            sonar_python_paths='dist/coverage/python.xml')
 IDENTITY = dict(head=H, base=B, tree=T, merge=M, target='master')
 
 
@@ -54,7 +57,7 @@ class Fixture:
                  reuse.REUSE_STEP, 'Verify every selected obligation', 'Record executed native validation',
                  'Save executed validation evidence', 'Submit analysis to the existing Sonar project',
                  'Record current native Sonar clearance', 'Save current Sonar clearance',
-                 'Retain Go coverage from this validation', 'Retain frontend coverage from this validation']
+                 *reuse.RETAIN.values()]
         names += [name for steps in reuse.DOMAINS.values() for name in steps]
         self.job = dict(name='ci-required', head_sha=self.head, run_id=self.run['id'], run_attempt=2,
                         status='completed', conclusion='success', started_at=START, completed_at=END,
@@ -89,9 +92,9 @@ class Fixture:
         for name, files in (
             ('validation-evidence-2', {'validation-evidence.json': reuse.canonical(self.proof)}),
             ('sonar-clearance-2', {'sonar-clearance.json': reuse.canonical(self.clearance)}),
-            ('go-coverage', {'go-unit.out': b'mode: atomic\nfile.go:1.1,1.3 1 1\n',
-                             'go-integration.out': b'mode: atomic\nfile.go:1.1,1.3 1 0\n'}),
-            ('frontend-coverage', {'lcov.info': b'SF:ui/v2.5/src/app.ts\nDA:1,1\nend_of_record\n'})):
+            ('go-coverage', {'go.out': b'mode: atomic\nfile.go:1.1,1.3 1 1\n'}),
+            ('frontend-coverage', {'lcov.info': b'SF:ui/v2.5/src/app.ts\nDA:1,1\nend_of_record\n'}),
+            ('python-coverage', {'python.xml': b'<coverage><sources><source></source></sources></coverage>\n'})):
             ident = self.run['id'] * 10 + len(self.artifacts)
             raw = archive(files)
             self.files[ident] = raw
@@ -211,8 +214,9 @@ class ReuseTests(unittest.TestCase):
         fixture = Fixture(old=True)
         source = fixture.find()
         self.assertEqual(source['covered'], set(reuse.DOMAINS))
-        self.assertEqual(set(source['reports']), {'dist/coverage/go-unit.out',
-                         'dist/coverage/go-integration.out', 'dist/coverage/frontend/lcov.info'})
+        self.assertEqual(set(source['reports']), {'dist/coverage/go.out',
+                         'dist/coverage/frontend/lcov.info',
+                         'dist/coverage/python.xml'})
         self.assertEqual(source['check_id'], '')  # Other events never reuse scan clearance.
 
     def test_draft_scan_with_only_final_packaging_guard_failure_clears_readiness(self):
@@ -341,7 +345,7 @@ class ReuseTests(unittest.TestCase):
             mutate(fixture)
             self.assertIsNone(fixture.find())
         fixture = Fixture()
-        raw = archive({'../go-unit.out': b'mode: atomic', 'go-integration.out': b'mode: atomic'})
+        raw = archive({'../go.out': b'mode: atomic'})
         artifact = fixture.artifacts[2]
         artifact['digest'] = 'sha256:' + reuse.digest(raw)
         fixture.files[artifact['id']] = raw
@@ -385,7 +389,7 @@ class ReuseTests(unittest.TestCase):
                 if reads > 1:
                     return {**fixture.run, 'run_attempt': 3, 'status': 'in_progress', 'conclusion': None}
             return fixture.api(path)
-        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': ''}
+        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': '', 'sonar_python_paths': ''}
         result = reuse.find_source(api, fixture.files.__getitem__, plan, IDENTITY, REPO, '1000',
                                    WORKFLOW, PROPERTIES, VARIABLES, set(), INPUTS, True)
         self.assertIsNone(result)
@@ -416,11 +420,120 @@ class ReuseTests(unittest.TestCase):
 
     def test_no_domain_ready_still_requires_real_sonar_clearance(self):
         fixture = Fixture(inherited=True)
-        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': ''}
+        plan = {**PLAN, 'sonar_go_paths': '', 'sonar_lcov_paths': '', 'sonar_python_paths': ''}
         result = reuse.find_source(fixture.api, fixture.files.__getitem__, plan, IDENTITY, REPO, '1000',
                                    WORKFLOW, PROPERTIES, VARIABLES, set(), INPUTS, True)
         self.assertEqual(result['covered'], set())
         self.assertEqual(result['check_id'], 999)
+
+
+class DonorInventoryTests(unittest.TestCase):
+    def test_missing_or_stale_required_job_rejects_donor(self):
+        for mutate in (lambda f: f.job.update(name='other'),
+                       lambda f: f.job.update(head_sha=OLD_H)):
+            with self.subTest(mutation=mutate):
+                fixture = Fixture()
+                mutate(fixture)
+                self.assertIsNone(fixture.find())
+
+    def test_wrong_source_workflow_fails_closed(self):
+        fixture = Fixture()
+        api = fixture.api
+        def wrong(path):
+            if path == '/actions/workflows/docker-publish.yml':
+                return {'id': 45, 'path': 'other/workflow.yml'}
+            return api(path)
+        with patch.object(fixture, 'api', wrong), self.assertRaisesRegex(ValueError, 'wrong source workflow'):
+            fixture.find()
+
+    def test_untracked_sha_and_push_donor_mismatch_are_skipped(self):
+        fixture = Fixture()
+        fixture.proof['checkout'] = 'not-a-sha'
+        fixture.refresh()
+        self.assertIsNone(fixture.find())
+        push = Fixture()
+        push.run.update(event='push', head_branch='master')
+        push.run.pop('pull_requests')
+        self.assertIsNone(push.find())
+
+    def test_clearance_requires_unique_check_task_and_stable_completion(self):
+        fixture = Fixture()
+        fixture.api = lambda path: ({'total_count': 2, 'check_runs': [check()]} if '/check-runs?' in path
+                                    else Fixture.api(fixture, path))
+        self.assertIsNone(fixture.find(ready=True))
+        for mutate in (lambda f: f.job['steps'].remove(
+                next(s for s in f.job['steps'] if s['name'] == 'Submit analysis to the existing Sonar project')),
+                       lambda f: f.clearance.update(ce_task_id='has spaces!'),
+                       lambda f: f.clearance.update(check_completed_at=START)):
+            with self.subTest(mutation=mutate):
+                fixture = Fixture()
+                mutate(fixture)
+                fixture.refresh()
+                self.assertIsNone(fixture.find(ready=True))
+
+    def test_retained_report_upload_failure_rejects_donor(self):
+        fixture = Fixture()
+        fixture.job['steps'].remove(
+            next(s for s in fixture.job['steps'] if s['name'] == reuse.RETAIN['backend']))
+        self.assertIsNone(fixture.find())
+
+    def test_ready_rejects_scan_donor_settling_on_success(self):
+        fixture = Fixture()
+        fixture.run['conclusion'] = fixture.job['conclusion'] = 'failure'
+        fixture.job['steps'].append(dict(name='Require selected packaging validation',
+                                         status='completed', conclusion='failure'))
+        self.assertEqual(fixture.find(ready=True)['check_id'], 999)
+        reads = 0
+        api = fixture.api
+        def settled(path):
+            nonlocal reads
+            if path == '/actions/runs/124':
+                reads += 1
+                if reads >= 4:
+                    return {**fixture.run, 'conclusion': 'success'}
+            return api(path)
+        with patch.object(fixture, 'api', settled):
+            self.assertIsNone(fixture.find(ready=True))
+    def test_current_run_listing_is_never_its_own_donor(self):
+        fixture = Fixture()
+        api = fixture.api
+        def with_current(path):
+            if '/runs?' in path:
+                return {'workflow_runs': [dict(id=1000), fixture.run]}
+            return api(path)
+        with patch.object(fixture, 'api', with_current):
+            self.assertEqual(fixture.find()['run'], 124)
+
+    def test_donor_attempt_restart_after_artifact_reads_rejects_result(self):
+        fixture = Fixture()
+        reads = 0
+        api = fixture.api
+        def stale(path):
+            nonlocal reads
+            if path == '/actions/runs/124':
+                reads += 1
+                if reads >= 3:
+                    return {**fixture.run, 'run_attempt': 3}
+            return api(path)
+        with patch.object(fixture, 'api', stale):
+            self.assertIsNone(fixture.find())
+
+    def test_ready_rejects_native_check_changed_after_clearance_reads(self):
+        fixture = Fixture()
+        calls = 0
+        api = fixture.api
+        def changed(path):
+            nonlocal calls
+            if '/check-runs?' in path:
+                calls += 1
+                if calls == 2:
+                    return {'total_count': 1,
+                            'check_runs': [{**check(), 'completed_at': '2026-10-12T01:30:00Z'}]}
+            return api(path)
+        with patch.object(fixture, 'api', changed):
+            self.assertIsNone(fixture.find(ready=True))
+
+
 
 
 class RoutingTests(unittest.TestCase):
@@ -529,6 +642,264 @@ class RecordTests(unittest.TestCase):
         with patch.dict(reuse.os.environ, {'SONAR_SCAN_SUCCEEDED': 'false'}):
             with self.assertRaises(ValueError):
                 reuse.record_clearance(PLAN, WORKFLOW, PROPERTIES)
+
+
+class InputBindingTests(unittest.TestCase):
+    def test_fingerprint_rejects_unsupported_and_duplicate_entries(self):
+        with self.assertRaisesRegex(ValueError, 'unsupported source inventory'):
+            reuse.fingerprint([dict(path='tree-dir', mode='040000', type='tree', sha='5' * 40)], VARIABLES)
+        with self.assertRaisesRegex(ValueError, 'unsupported source inventory'):
+            reuse.fingerprint([dict(path='app.go', mode='100644', type='blob', sha='not-a-sha')], VARIABLES)
+        with self.assertRaisesRegex(ValueError, 'duplicate tracked input'):
+            reuse.fingerprint(ENTRIES + [dict(ENTRIES[0])], VARIABLES)
+
+    def test_local_inputs_parses_nul_terminated_tree_rows(self):
+        raw = b''.join(f"{entry['mode']} {entry['type']} {entry['sha']}\t{entry['path']}".encode() + b'\0'
+                       for entry in ENTRIES)
+        with patch.object(reuse.subprocess, 'check_output', return_value=raw) as git:
+            self.assertEqual(reuse.local_inputs(M, VARIABLES), INPUTS)
+        self.assertEqual(git.call_args.args[0], ['git', 'ls-tree', '-r', '-z', M])
+
+    def test_remote_inputs_bind_commit_tree_and_donor_content(self):
+        tree = {'sha': T, 'truncated': False,
+                'tree': ENTRIES + [dict(path='sub', mode='040000', type='tree', sha='9' * 40)]}
+        commit = {'sha': M, 'tree': {'sha': T}}
+        def api(path):
+            if path == '/git/commits/' + M:
+                return commit
+            if path == '/git/trees/' + T + '?recursive=1':
+                return tree
+            if path == '/contents/' + reuse.WORKFLOW + '?ref=' + M:
+                return {'encoding': 'base64', 'content': base64.b64encode(WORKFLOW).decode()}
+            return {'encoding': 'text'}
+        self.assertEqual(reuse.remote_inputs(api, M, VARIABLES), (INPUTS, T))
+        self.assertEqual(reuse.content(api, reuse.WORKFLOW, M), WORKFLOW)
+        for change in ({'sha': '0' * 40}, {'tree': {'sha': 'short'}}):
+            def bad(path, changed={**commit, **change}):
+                return changed if '/commits/' in path else api(path)
+            with self.assertRaisesRegex(ValueError, 'invalid donor commit'):
+                reuse.remote_inputs(bad, M, VARIABLES)
+        with self.assertRaisesRegex(ValueError, 'missing donor file'):
+            reuse.content(api, 'other-file', M)
+
+    def test_download_rejects_nonpositive_or_noninteger_artifact_identity(self):
+        for ident in ('123', 0, -7, True, 1.5):
+            with self.subTest(identity=ident), self.assertRaisesRegex(ValueError, 'invalid artifact identity'):
+                reuse.download(ident)
+
+    def test_download_uses_bounded_token_free_read(self):
+        opener = MagicMock()
+        response = opener.open.return_value.__enter__.return_value
+        response.read.return_value = b'zipped-report'
+        env = dict(GITHUB_REPOSITORY=REPO, GH_TOKEN='secret-token')
+        with patch.dict(reuse.os.environ, env, clear=True), \
+                patch.object(reuse.urllib.request, 'build_opener', return_value=opener) as build:
+            self.assertEqual(reuse.download(12345), b'zipped-report')
+        build.assert_called_once()
+        self.assertIsInstance(build.call_args.args[0], reuse.TokenFreeRedirect)
+        req = opener.open.call_args.args[0]
+        self.assertEqual(req.full_url,
+                         'https://api.github.com/repos/rzp-labs/vexxx-stash/actions/artifacts/12345/zip')
+        self.assertEqual(req.get_header('Authorization'), 'Bearer secret-token')
+        response.read.assert_called_once_with(reuse.LIMIT + 1)
+
+    def test_link_and_step_helpers_reject_unparsed_and_partial_failures(self):
+        for wrong in (123, 'https://sonarcloud.io/dashboard?bad'):
+            self.assertFalse(reuse.sonar_check_link(wrong, 65))
+        fixture = Fixture()
+        fixture.job['conclusion'] = 'failure'
+        self.assertFalse(reuse.eligible_scan_donor(fixture.run, fixture.job))
+        for value in ('yes', 1, None):
+            self.assertFalse(reuse.domain_covered(fixture.job, 'backend', value))
+
+    def test_executed_domain_selection_rejects_unparsed_values(self):
+        env = dict(GITHUB_REPOSITORY=REPO, GITHUB_RUN_ID='124', GITHUB_RUN_ATTEMPT='2',
+                   EXECUTED_BACKEND='yes', EXECUTED_FRONTEND='false', EXECUTED_PYTHON='true',
+                   SONAR_VALIDATION_EVIDENCE_PATH='/nonexistent/evidence.json')
+        with patch.dict(reuse.os.environ, env), self.assertRaisesRegex(ValueError, 'executed-domain'):
+            reuse.record_validation(PLAN, WORKFLOW, VARIABLES, INPUTS)
+
+    def test_clearance_requires_sonarcloud_task_url_and_valid_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(GITHUB_REPOSITORY=REPO, GITHUB_RUN_ID='124', GITHUB_RUN_ATTEMPT='2',
+                       SONAR_SCAN_SUCCEEDED='true', SONAR_SCAN_STARTED_AT=SCAN,
+                       SONAR_CLEARANCE_PATH=str(Path(directory) / 'sonar-clearance.json'),
+                       GITHUB_OUTPUT=str(Path(directory) / 'outputs'))
+            reports = ('serverUrl=https://example.test\nceTaskId=real-task\n',
+                       'serverUrl=https://sonarcloud.io\nceTaskId=has spaces!\n')
+            for report in reports:
+                with self.subTest(report=report), \
+                        patch.dict(reuse.os.environ, env), \
+                        patch.object(reuse, 'current_pr', return_value=IDENTITY), \
+                        patch.object(reuse.subprocess, 'check_output', side_effect=[H + '\n', T + '\n']), \
+                        patch.object(Path, 'read_text', return_value=report), \
+                        patch.object(reuse, 'find_check', return_value=check()):
+                    with self.assertRaisesRegex(ValueError, 'missing expected Sonar analysis task'):
+                        reuse.record_clearance(PLAN, WORKFLOW, PROPERTIES,
+                                               api=lambda p: None, sleeper=lambda n: None)
+            self.assertFalse(Path(env['SONAR_CLEARANCE_PATH']).exists())
+
+
+class MainFlowTests(unittest.TestCase):
+    def call_main(self, env, argv, source=None):
+        with patch.dict(reuse.os.environ, env, clear=True), \
+                patch.object(reuse.sys, 'argv', argv), \
+                patch.object(reuse, 'current_context', return_value=(WORKFLOW, PROPERTIES, VARIABLES)), \
+                patch.object(reuse, 'local_inputs', return_value=INPUTS), \
+                patch.object(reuse, 'current_pr', return_value=IDENTITY), \
+                patch.object(reuse, 'find_source', return_value=source, side_effect=None) as find:
+            if isinstance(source, Exception):
+                find.side_effect = source
+            reuse.main()
+            return find
+
+    def base_env(self, directory, action='synchronize', event_name='pull_request', required='false'):
+        root = Path(directory)
+        event_path = root / 'event.json'
+        event_path.write_text(json.dumps({'number': 65, 'action': action}))
+        plan_path = root / 'plan.json'
+        plan_path.write_text(json.dumps({**PLAN, 'action': action}))
+        return dict(GITHUB_EVENT_NAME=event_name, VALIDATION_PLAN_PATH=str(plan_path),
+                    GITHUB_EVENT_PATH=str(event_path), GITHUB_REPOSITORY=REPO, GITHUB_RUN_ID='1000',
+                    REQUIRED_BACKEND=required, REQUIRED_FRONTEND=required, REQUIRED_PYTHON=required,
+                    GITHUB_OUTPUT=str(root / 'outputs'), GITHUB_STEP_SUMMARY=str(root / 'summary'))
+
+    def test_current_context_binds_checkout_files_and_variables(self):
+        variables = {**VARIABLES, 'POSTHOG_CLI_HOST': 'https://example.test'}
+        with patch.object(reuse.subprocess, 'check_output', side_effect=[M + '\n', T + '\n']), \
+                patch.dict(reuse.os.environ, {'POSTHOG_CLI_HOST': 'https://example.test'}, clear=True):
+            workflow, properties, bound = reuse.current_context(PLAN)
+        self.assertEqual(workflow, Path(reuse.WORKFLOW).read_bytes())
+        self.assertEqual(properties, Path('sonar-project.properties').read_bytes())
+        self.assertEqual(bound, variables)
+        with patch.object(reuse.subprocess, 'check_output', side_effect=[M + '\n', OLD_T + '\n']), \
+                patch.dict(reuse.os.environ, {}, clear=True), \
+                self.assertRaisesRegex(ValueError, 'differs from plan'):
+            reuse.current_context(PLAN)
+
+    def test_record_modes_write_proof_and_clearance_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = dict(VALIDATION_PLAN_PATH=str(root / 'plan.json'),
+                       SONAR_VALIDATION_EVIDENCE_PATH=str(root / 'evidence.json'),
+                       GITHUB_REPOSITORY=REPO, GITHUB_RUN_ID='124', GITHUB_RUN_ATTEMPT='2',
+                       EXECUTED_BACKEND='true', EXECUTED_FRONTEND='false', EXECUTED_PYTHON='false')
+            (root / 'plan.json').write_text(json.dumps(PLAN))
+            self.call_main(env, ['reuse_sonar_validation.py', 'record-validation'])
+            proof = json.loads((root / 'evidence.json').read_bytes())
+            self.assertEqual(proof['schema'], 1)
+            self.assertEqual(proof['domains'], dict(backend=True, frontend=False, python=False))
+            env = {**env, 'SONAR_CLEARANCE_PATH': str(root / 'clearance.json'),
+                   'GITHUB_OUTPUT': str(root / 'outputs'), 'SONAR_SCAN_SUCCEEDED': 'true',
+                   'SONAR_SCAN_STARTED_AT': SCAN}
+            with patch.object(reuse, 'record_clearance') as record:
+                self.call_main(env, ['reuse_sonar_validation.py', 'record-clearance'])
+            record.assert_called_once_with(PLAN, WORKFLOW, PROPERTIES)
+
+    def test_invalid_mode_and_event_mismatch_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.base_env(directory)
+            with self.assertRaisesRegex(ValueError, 'invalid helper event/mode'):
+                self.call_main(env, ['reuse_sonar_validation.py', 'bogus'])
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.base_env(directory)
+            Path(env['GITHUB_EVENT_PATH']).write_text(json.dumps({'number': 66, 'action': 'synchronize'}))
+            with self.assertRaisesRegex(ValueError, 'event identity mismatch'):
+                self.call_main(env, ['reuse_sonar_validation.py'])
+
+    def test_invalid_required_selection_and_ready_without_clearance_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.base_env(directory, required='maybe')
+            with self.assertRaisesRegex(ValueError, 'required-domain'):
+                self.call_main(env, ['reuse_sonar_validation.py'])
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.base_env(directory, action='ready_for_review')
+            with self.assertRaisesRegex(ValueError, 'readiness requires'):
+                self.call_main(env, ['reuse_sonar_validation.py'], source=None)
+
+    def test_reuse_writes_reports_outputs_and_summary(self):
+        reports = {'dist/coverage/go.out': b'mode: atomic\nfile.go:1.1,1.3 1 1\n'}
+        source = dict(covered={'backend'}, reports=reports, run=124, attempt=2, revision=M, tree=T,
+                      check_id='')
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.base_env(directory, required='true')
+            cwd = os.getcwd()
+            try:
+                os.chdir(directory)
+                find = self.call_main(env, ['reuse_sonar_validation.py'], source=source)
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(find.call_count, 1)
+            output = Path(env['GITHUB_OUTPUT']).read_text()
+            self.assertIn('pr_reuse_validated=true\n', output)
+            self.assertIn('reuse_run=124\n', output)
+            self.assertIn('execute_tests=true\n', output)
+            self.assertIn('reused_backend=true\n', output)
+            self.assertIn('execute_frontend=true\n', output)
+            self.assertIn('reuse_workflow_digest=' + reuse.digest(WORKFLOW) + '\n', output)
+            self.assertEqual((Path(directory) / 'dist/coverage/go.out').read_bytes(), reports['dist/coverage/go.out'])
+            text = Path(env['GITHUB_STEP_SUMMARY']).read_text()
+            self.assertIn('### Pre-review validation', text)
+            self.assertIn('Native checks reused: backend', text)
+            self.assertIn('execute: frontend, python', text)
+
+    def test_find_source_error_falls_back_and_writes_none_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.base_env(directory, required='true')
+            self.call_main(env, ['reuse_sonar_validation.py'], source=ValueError('api down'))
+            output = Path(env['GITHUB_OUTPUT']).read_text()
+            self.assertIn('pr_reuse_validated=false\n', output)
+            self.assertIn('execute_tests=true\n', output)
+            text = Path(env['GITHUB_STEP_SUMMARY']).read_text()
+            self.assertIn('Native checks reused: none', text)
+
+    def test_ready_mode_verifies_identity_again_and_records_clearance(self):
+        source = dict(covered=set(), reports={}, run=124, attempt=2, revision=M, tree=T, check_id=999)
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.base_env(directory, action='ready_for_review')
+            with patch.object(reuse, 'current_context', return_value=(WORKFLOW, PROPERTIES, VARIABLES)), \
+                    patch.object(reuse, 'local_inputs', return_value=INPUTS), \
+                    patch.object(reuse, 'current_pr', return_value=IDENTITY) as verify, \
+                    patch.object(reuse, 'find_source', return_value=source), \
+                    patch.dict(reuse.os.environ, env, clear=True), \
+                    patch.object(reuse.sys, 'argv', ['reuse_sonar_validation.py']):
+                reuse.main()
+            self.assertEqual(verify.call_count, 2)
+            output = Path(env['GITHUB_OUTPUT']).read_text()
+            self.assertIn('sonar_clearance_reused=true\n', output)
+            self.assertIn('sonar_check_id=999\n', output)
+            text = Path(env['GITHUB_STEP_SUMMARY']).read_text()
+            self.assertIn('Exact current-tree Sonar clearance verified before readiness.', text)
+
+    def test_module_entrypoint_executes_record_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'plan.json').write_text(json.dumps(PLAN))
+            env = dict(VALIDATION_PLAN_PATH=str(root / 'plan.json'),
+                       SONAR_VALIDATION_EVIDENCE_PATH=str(root / 'evidence.json'),
+                       GITHUB_REPOSITORY=REPO, GITHUB_RUN_ID='124', GITHUB_RUN_ATTEMPT='2',
+                       EXECUTED_BACKEND='true', EXECUTED_FRONTEND='false', EXECUTED_PYTHON='false')
+            ls_tree = b''.join(f"{entry['mode']} {entry['type']} {entry['sha']}\t{entry['path']}".encode()
+                               + b'\0' for entry in ENTRIES)
+            def git(command, **kwargs):
+                if command[1] == 'rev-parse':
+                    return (M if command[2] == 'HEAD' else T) + '\n'
+                if command[1] == 'ls-tree':
+                    return ls_tree
+                raise AssertionError(command)
+            original = Path.read_bytes
+            def read_bytes(self):
+                if str(self) == reuse.WORKFLOW:
+                    return WORKFLOW
+                return original(self)
+            with patch.dict(os.environ, env, clear=True), \
+                    patch.object(reuse.sys, 'argv', ['reuse_sonar_validation.py', 'record-validation']), \
+                    patch.object(reuse.subprocess, 'check_output', side_effect=git), \
+                    patch.object(Path, 'read_bytes', read_bytes):
+                runpy.run_path(str(Path(reuse.__file__)), run_name='__main__')
+            proof = json.loads((root / 'evidence.json').read_bytes())
+            self.assertEqual(proof['checkout'], M)
+            self.assertEqual(proof['run'], 124)
 
 
 if __name__ == '__main__':

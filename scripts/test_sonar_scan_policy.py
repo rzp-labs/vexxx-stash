@@ -1,12 +1,14 @@
 import json
+import os
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import image_publication_policy as publication
-from sonar_scan_policy import properties, scanner_plan, verify_source_snapshot, prepare_source_reports, verify_current_pr
+from sonar_scan_policy import COVERAGE, parse_properties, properties, scanner_plan, matches, verify_source_snapshot, prepare_source_reports, verify_current_pr
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = 'rzp-labs/vexxx-stash'
@@ -29,6 +31,18 @@ class ScanPolicyTests(unittest.TestCase):
         self.assertEqual(groups['python'], existing['python'])
         return existing, groups, scan
 
+    def test_properties_continuations_preserve_values_and_reuse_comparison(self):
+        from reuse_sonar_validation import config
+        single = 'sonar.projectKey=project\nsonar.exclusions=assets/*.png,fonts/*.ttf\n'
+        continued = 'sonar.projectKey=project\nsonar.exclusions=\\\n  assets/*.png,\\\n  fonts/*.ttf\n'
+        self.assertEqual(parse_properties(single), parse_properties(continued))
+        self.assertEqual(parse_properties(single), parse_properties(continued.replace('\n', '\r\n')))
+        self.assertEqual(config(single.encode()), config(continued.encode()))
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            parse_properties('sonar.projectKey=a\nsonar.projectKey=b\n')
+        with self.assertRaisesRegex(ValueError, 'unfinished'):
+            parse_properties('sonar.exclusions=abc,\\\n')
+
     def test_disabled_preserves_every_existing_domain(self):
         for paths in (['README.md'], ['pkg/cache/lru.go'], ['ui/v2.5/src/App.tsx'],
                       ['scripts/reuse_master_validation.py'], ['.github/workflows/docker-publish.yml'],
@@ -42,8 +56,8 @@ class ScanPolicyTests(unittest.TestCase):
         for paths, status in ((['README.md'], 'import_no_coverage'),
                               (['pkg/cache/lru.go'], 'import_backend'),
                               (['ui/v2.5/src/App.tsx'], 'import_frontend'),
-                              (['scripts/reuse_master_validation.py'], 'import_no_coverage'),
-                              (['.github/workflows/docker-publish.yml'], 'import_backend_and_frontend')):
+                              (['scripts/reuse_master_validation.py'], 'import_python'),
+                              (['.github/workflows/docker-publish.yml'], 'import_backend_and_frontend_and_python')):
             with self.subTest(paths=paths):
                 old, new, scan = self.selection(paths)
                 self.assertEqual(old, new)
@@ -52,19 +66,33 @@ class ScanPolicyTests(unittest.TestCase):
                 self.assertEqual(scan['sonar_added_domains'], '')
                 self.assertEqual(bool(scan['sonar_go_paths']), new['backend'])
                 self.assertEqual(bool(scan['sonar_lcov_paths']), new['frontend'])
+                self.assertEqual(bool(scan['sonar_python_paths']), new['python'])
 
-    def test_master_documentation_and_unanalyzed_ci_inputs_add_no_work(self):
+    def test_master_documentation_adds_no_work(self):
         for paths in (['README.md'], ['docs/DEVELOPMENT.md'],
-                      ['ui/v2.5/README.md'], ['.codex/config.toml']):
+                      ['ui/v2.5/README.md']):
             with self.subTest(paths=paths):
                 old, new, scan = self.selection(paths, name='push')
                 self.assertEqual(old, new)
                 self.assertFalse(scan['sonar_scan'])
                 self.assertEqual(scan['sonar_added_domains'], '')
 
+    def test_master_whole_repository_inputs_and_exclusions(self):
+        for path, expected in (('config/settings.json', True),
+                               ('.codex/config.toml', True),
+                               ('icon.png', False),
+                               ('ui/v2.5/node_modules/dependency/index.js', False),
+                               ('internal/api/generated_models.go', False)):
+            with self.subTest(path=path):
+                old, new, scan = self.selection([path], name='push')
+                self.assertEqual(old, new)
+                self.assertEqual(scan['sonar_scan'], expected)
+                self.assertEqual(bool(scan['sonar_go_paths']), expected)
+                self.assertEqual(bool(scan['sonar_lcov_paths']), expected)
+
     def test_master_adds_only_missing_domains_for_complete_snapshots(self):
-        for paths, added in ((['pkg/cache/lru.go'], 'frontend'),
-                             (['ui/v2.5/src/App.tsx'], 'backend'),
+        for paths, added in ((['pkg/cache/lru.go'], 'frontend,python'),
+                             (['ui/v2.5/src/App.tsx'], 'backend,python'),
                              (['scripts/reuse_master_validation.py'], 'backend,frontend'),
                              (['.github/workflows/docker-publish.yml'], ''),
                              (['sonar-project.properties'], '')):
@@ -72,7 +100,7 @@ class ScanPolicyTests(unittest.TestCase):
                 old, new, scan = self.selection(paths, name='push')
                 self.assertEqual(new, old)
                 self.assertTrue(scan['sonar_scan'])
-                for domain in ('backend', 'frontend'):
+                for domain in ('backend', 'frontend', 'python'):
                     self.assertEqual(scan['sonar_coverage_' + domain], not old[domain])
                 self.assertEqual(scan['sonar_added_domains'], added)
                 self.assertFalse(new['build_image'])
@@ -157,7 +185,12 @@ class ScanPolicyTests(unittest.TestCase):
         self.assertNotIn('continue-on-error', scan)
         self.assertEqual(sum(x.get('with', {}).get('path') == '~/.sonar/cache' for x in steps), 1)
         self.assertNotIn("base.ref == 'master'", scan['if'])
-        self.assertEqual(scan['with']['projectBaseDir'], '.sonar-source')
+        # The scanner marks every file under a dot-directory base as hidden, so
+        # Go/JS/TS/CSS/Python sensors skip them and only IaC/text files are analyzed.
+        base_dir = scan['with']['projectBaseDir']
+        self.assertFalse(any(part.startswith('.') for part in Path(base_dir).parts), base_dir)
+        checkout = next(x for x in steps if x.get('name') == 'Checkout exact source for Sonar')
+        self.assertEqual(checkout['with']['path'], base_dir)
         self.assertLess(next(i for i,x in enumerate(steps) if x.get('id') == 'required_gate'), steps.index(scan))
         self.assertEqual(w['jobs']['ci-required']['name'],
                          'ci-required')
@@ -174,11 +207,16 @@ class ScanPolicyTests(unittest.TestCase):
                       ['scripts/reuse_master_validation.py'], ['.github/workflows/docker-publish.yml']):
             for name in ('push', 'pull_request'):
                 old, new, policy = self.selection(paths, name=name)
-                for domain in ('backend', 'frontend'):
+                for domain in ('backend', 'frontend', 'python'):
                     self.assertFalse(new[domain] and policy['sonar_coverage_' + domain])
         for compile_id in ('backend_compile', 'frontend_compile'):
             compile_step = next(x for x in steps if x.get('id') == compile_id)
             self.assertNotIn('sonar_coverage', compile_step['if'])
+        reports = next(x for x in steps if x.get('id') == 'sonar_reports')
+        for field, key in COVERAGE.values():
+            planned = '${{ steps.plan.outputs.' + field + ' }}'
+            self.assertIn('-D' + key + '=' + planned, scan['with']['args'])
+            self.assertIn(planned, reports['env'].values())
 
 
 class SourceIdentityTests(unittest.TestCase):
@@ -221,7 +259,7 @@ class SourceIdentityTests(unittest.TestCase):
             self.assertFalse(selected['backend'] or selected['frontend'])
             self.assertEqual(selected['sonar_go_paths'], '')
             self.assertEqual(selected['sonar_lcov_paths'], '')
-            source = root / '.sonar-source'
+            source = root / 'sonar-source'
             git('clone', '-q', '--shared', '.', str(source))
             subprocess.run(['git', 'checkout', '-q', '--detach', head], cwd=source, check=True)
             with self.assertRaisesRegex(ValueError, 'trees differ'):
@@ -233,10 +271,10 @@ class SourceIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
-            (root / '.sonar-source').mkdir()
+            (root / 'sonar-source').mkdir()
             with patch('sonar_scan_policy.verify_source_snapshot') as compare, patch('sonar_scan_policy.subprocess.check_output', return_value='b' * 40 + '\n'):
                 with self.assertRaisesRegex(ValueError, 'checkout does not match'):
-                    prepare_source_reports(root, root / '.sonar-source', 'b' * 40, SHA, '', '')
+                    prepare_source_reports(root, root / 'sonar-source', 'b' * 40, SHA, '', '')
                 compare.assert_not_called()
 
     def test_real_git_rejects_source_and_documentation_drift(self):
@@ -286,7 +324,7 @@ class SourceIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
-            source = root / '.sonar-source'
+            source = root / 'sonar-source'
             (source / 'ui/v2.5').mkdir(parents=True)
             deps = root / 'ui/v2.5/node_modules'
             deps.mkdir(parents=True)
@@ -310,10 +348,10 @@ class SourceIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
-            (root / '.sonar-source').mkdir()
+            (root / 'sonar-source').mkdir()
             with patch('sonar_scan_policy.verify_source_snapshot'), patch('sonar_scan_policy.subprocess.check_output', return_value=SHA + '\n'):
                 with self.assertRaisesRegex(ValueError, 'report missing or empty'):
-                    prepare_source_reports(root, root / '.sonar-source', SHA, SHA,
+                    prepare_source_reports(root, root / 'sonar-source', SHA, SHA,
                                            CONFIG['sonar.go.coverage.reportPaths'], '')
 
 
@@ -395,6 +433,75 @@ class CurrentPRIdentityTests(unittest.TestCase):
             return next(responses)
         with self.assertRaisesRegex(ValueError, 'base changed'):
             verify_current_pr(api, self.plan, REPO, sleeper=lambda _: None)
+
+
+class ScanPolicyRemainingTests(unittest.TestCase):
+    def test_single_character_wildcards_stay_within_one_component(self):
+        self.assertTrue(matches('assets/a.png', 'assets/?.png'))
+        self.assertFalse(matches('assets/deep/a.png', 'assets/?.png'))
+        self.assertFalse(matches('assets/.png', 'assets/?.png'))
+        self.assertTrue(matches('a/b/c.py', '**/c.py'))
+        self.assertFalse(matches('a/b/c.py', '*/c.py'))
+
+    def test_current_pr_rejects_nonnumeric_numbers_and_repo_identity(self):
+        self.plan = {'pr': 'x', 'head': SHA, 'base': 'b' * 40, 'target': 'master', 'tree': 'c' * 40}
+        for number in ('x', -1, True, 0):
+            with self.subTest(number=number):
+                with self.assertRaisesRegex(ValueError, 'invalid PR number'):
+                    verify_current_pr(lambda p: self.fail(p), {**self.plan, 'pr': number}, REPO)
+        self.plan = {'pr': 65, 'head': SHA, 'base': 'b' * 40, 'target': 'master', 'tree': 'c' * 40}
+        for side in ('head', 'base'):
+            pr = {'state': 'open', 'mergeable': True, 'merge_commit_sha': 'd' * 40,
+                  'head': {'sha': self.plan['head'], 'repo': {'full_name': REPO}},
+                  'base': {'sha': self.plan['base'], 'ref': 'master', 'repo': {'full_name': REPO}}}
+            pr[side]['repo']['full_name'] = 'other/fork'
+            with self.subTest(side=side), self.assertRaisesRegex(ValueError, 'PR repository changed'):
+                verify_current_pr(lambda path: pr, self.plan, REPO)
+
+    def test_report_selection_rejects_unconfigured_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
+            (root / 'sonar-source').mkdir()
+            with patch('sonar_scan_policy.verify_source_snapshot'), \
+                    patch('sonar_scan_policy.subprocess.check_output', return_value=SHA + '\n'):
+                with self.assertRaisesRegex(ValueError, 'unexpected coverage report path'):
+                    prepare_source_reports(root, root / 'sonar-source', SHA, SHA, 'secret/coverage.txt', '')
+
+    def test_entrypoint_binds_pr_identity_and_records_scan_start(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
+            (root / 'sonar-source').mkdir()
+            plan_path = root / 'plan.json'
+            plan_path.write_text(json.dumps({'pr': 'invalid'}))
+            output = root / 'outputs'
+            env = {'GITHUB_EVENT_NAME': 'pull_request', 'VALIDATION_PLAN_PATH': str(plan_path),
+                   'GITHUB_REPOSITORY': REPO, 'TESTED_SHA': SHA, 'ANALYSIS_SHA': SHA,
+                   'GO_REPORTS': '', 'LCOV_REPORTS': '', 'PYTHON_REPORTS': '',
+                   'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, env, clear=True), \
+                    patch('pathlib.Path.cwd', return_value=root), \
+                    patch('sonar_scan_policy.subprocess.check_output', return_value=SHA + '\n'):
+                with self.assertRaisesRegex(ValueError, 'invalid PR number'):
+                    runpy.run_path(str(ROOT / 'scripts/sonar_scan_policy.py'), run_name='__main__')
+                self.assertFalse(output.exists())
+                os.environ['GITHUB_EVENT_NAME'] = 'push'
+                runpy.run_path(str(ROOT / 'scripts/sonar_scan_policy.py'), run_name='__main__')
+            line = output.read_text().strip()
+            self.assertTrue(line.startswith('scan_started_at='))
+            from datetime import datetime
+            self.assertIsNotNone(datetime.fromisoformat(line.split('=', 1)[1]).tzinfo)
+    def test_scan_entry_requires_full_analysis_revision(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
+            (root / 'sonar-source').mkdir()
+            with patch('sonar_scan_policy.subprocess.check_output') as run, \
+                    self.assertRaisesRegex(ValueError, 'invalid analysis revision'):
+                prepare_source_reports(root, root / 'sonar-source', SHA, 'refs/heads/master', '', '')
+            run.assert_not_called()
+
 
 
 if __name__ == '__main__':

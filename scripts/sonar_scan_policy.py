@@ -9,29 +9,77 @@ import subprocess
 import time
 
 
+def parse_properties(text):
+    """Read this repository's key=value properties, including continued values."""
+    result, pending = {}, ''
+    for line in text.splitlines():
+        if not pending and (not line.strip() or line.lstrip().startswith(('#', '!'))):
+            continue
+        line = pending + line.lstrip()
+        if line.endswith('\\'):
+            pending = line[:-1]
+            continue
+        pending = ''
+        key, value = line.split('=', 1)
+        if key in result:
+            raise ValueError('duplicate scanner property')
+        result[key] = value
+    if pending:
+        raise ValueError('unfinished scanner property continuation')
+    return result
+
+
 def properties(root):
-    return dict(line.split('=', 1) for line in
-                (root / 'sonar-project.properties').read_text().splitlines()
-                if line and not line.startswith('#'))
+    return parse_properties((root / 'sonar-project.properties').read_text())
+
+
+def matches(path, pattern):
+    # Sonar path patterns: ** spans directories, * and ? stay within one.
+    regex = ''
+    i = 0
+    while i < len(pattern):
+        if pattern[i:i + 3] == '**/':
+            regex += '(?:.*/)?'
+            i += 3
+        elif pattern[i:i + 2] == '**':
+            regex += '.*'
+            i += 2
+        elif pattern[i] == '*':
+            regex += '[^/]*'
+            i += 1
+        elif pattern[i] == '?':
+            regex += '[^/]'
+            i += 1
+        else:
+            regex += re.escape(pattern[i])
+            i += 1
+    return bool(re.fullmatch(regex, path))
 
 
 def analyzed_input(path, config):
     # Documentation-only changes do not replace the master coverage snapshot.
     if path.endswith('.md') or path.startswith('docs/'):
         return False
-    roots = (config['sonar.sources'] + ',' + config['sonar.tests']).split(',')
-    return (any(path == p or path.startswith(p.rstrip('/') + '/') for p in roots)
-            or path in ('sonar-project.properties', 'go.mod', 'go.sum',
-                        'gqlgen.yml', '.gqlgenc.yml', 'Makefile'))
+    # The project's new scope scans the whole repository. Keep configured
+    # exclusions, but do not reconstruct the removed legacy source/test roots.
+    return not any(matches(path, pattern)
+                   for pattern in config.get('sonar.exclusions', '').split(','))
+
+
+# Validation domain -> (planner output field, scanner coverage property).
+COVERAGE = {'backend': ('sonar_go_paths', 'sonar.go.coverage.reportPaths'),
+            'frontend': ('sonar_lcov_paths', 'sonar.javascript.lcov.reportPaths'),
+            'python': ('sonar_python_paths', 'sonar.python.coverage.reportPaths')}
+
 
 
 def scanner_plan(name, kind, ref, repository, event, paths, groups, config,
                  enabled=False):
     groups = dict(groups)
-    result = {'sonar_scan': False, 'sonar_status': 'disabled',
-              'sonar_added_domains': '', 'sonar_go_paths': '',
-              'sonar_lcov_paths': '', 'sonar_coverage_backend': False,
-              'sonar_coverage_frontend': False}
+    result = {'sonar_scan': False, 'sonar_status': 'disabled', 'sonar_added_domains': ''}
+    for domain, (field, _) in COVERAGE.items():
+        result[field] = ''
+        result['sonar_coverage_' + domain] = False
     if not enabled:
         return groups, result
     if event.get('deleted'):
@@ -52,7 +100,7 @@ def scanner_plan(name, kind, ref, repository, event, paths, groups, config,
             result['sonar_status'] = 'analyzed_inputs_unchanged'
             return groups, result
         # A full master snapshot cannot carry forward omitted coverage reports.
-        added = [d for d in ('backend', 'frontend') if not groups[d]]
+        added = [d for d in COVERAGE if not groups[d]]
         result['sonar_added_domains'] = ','.join(added)
         for domain in added:
             result['sonar_coverage_' + domain] = True
@@ -60,13 +108,11 @@ def scanner_plan(name, kind, ref, repository, event, paths, groups, config,
         result['sonar_status'] = 'event_outside_scanner_scope'
         return groups, result
     result['sonar_scan'] = True
-    selected = [d for d in ('backend', 'frontend')
-                if groups[d] or result['sonar_coverage_' + d]]
+    selected = [d for d in COVERAGE if groups[d] or result['sonar_coverage_' + d]]
     result['sonar_status'] = 'import_' + ('_and_'.join(selected) or 'no_coverage')
-    if groups['backend'] or result['sonar_coverage_backend']:
-        result['sonar_go_paths'] = config['sonar.go.coverage.reportPaths']
-    if groups['frontend'] or result['sonar_coverage_frontend']:
-        result['sonar_lcov_paths'] = config['sonar.javascript.lcov.reportPaths']
+    for domain in selected:
+        field, key = COVERAGE[domain]
+        result[field] = config[key]
     return groups, result
 
 
@@ -119,8 +165,7 @@ def verify_current_pr(api, plan, repository, sleeper=time.sleep):
             'merge': merge, 'tree': tree}
 
 
-def prepare_source_reports(root, source_root, tested_sha, analysis_sha,
-                           go_paths, lcov_paths):
+def prepare_source_reports(root, source_root, tested_sha, analysis_sha, *report_paths):
     config = properties(root)
     if not re.fullmatch(r'[0-9a-f]{40}', analysis_sha):
         raise ValueError('invalid analysis revision')
@@ -128,9 +173,8 @@ def prepare_source_reports(root, source_root, tested_sha, analysis_sha,
                                           cwd=source_root, text=True).strip()
     if checked_out != analysis_sha:
         raise ValueError('scanner checkout does not match the analysis revision')
-    allowed = set(config['sonar.go.coverage.reportPaths'].split(',')) | {
-        config['sonar.javascript.lcov.reportPaths']}
-    reports = list(filter(None, (go_paths + ',' + lcov_paths).split(',')))
+    allowed = {path for _, key in COVERAGE.values() for path in config[key].split(',')}
+    reports = list(filter(None, ','.join(report_paths).split(',')))
     verify_source_snapshot(root, tested_sha, analysis_sha, config)
     for report in reports:
         if report not in allowed:
@@ -162,8 +206,8 @@ if __name__ == '__main__':
         repository = os.environ['GITHUB_REPOSITORY']
         prefix = '/repos/' + repository
         verify_current_pr(lambda path: request(path[len(prefix):]), plan, repository)
-    prepare_source_reports(root, root / '.sonar-source', os.environ['TESTED_SHA'],
+    prepare_source_reports(root, root / 'sonar-source', os.environ['TESTED_SHA'],
                            os.environ['ANALYSIS_SHA'], os.environ['GO_REPORTS'],
-                           os.environ['LCOV_REPORTS'])
+                           os.environ['LCOV_REPORTS'], os.environ['PYTHON_REPORTS'])
     with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
         output.write('scan_started_at=' + datetime.now(timezone.utc).isoformat() + '\n')

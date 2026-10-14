@@ -15,6 +15,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const nolegacy = process.env.VITE_APP_NOLEGACY === "true";
 const sourcemap = process.env.VITE_APP_SOURCEMAPS === "true";
+// @vitejs/plugin-legacy forces these modern JS/CSS targets; keep no-legacy
+// builds compiling the same modern code. Re-check when upgrading plugin-legacy.
+const legacyModernTarget = [
+  "es2020",
+  "edge79",
+  "firefox67",
+  "chrome64",
+  "safari12",
+];
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
@@ -93,6 +102,7 @@ export default defineConfig(({ command, mode }) => {
     },
     build: {
       outDir: "build",
+      ...(nolegacy && { target: legacyModernTarget, cssTarget: "chrome61" }),
       sourcemap: uploadSourceMaps ? "hidden" : sourcemap,
       reportCompressedSize: false,
       // Bound aggregate memory, including the legacy minifier worker.

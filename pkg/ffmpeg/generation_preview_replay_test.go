@@ -123,3 +123,11 @@ func TestIntelPreviewReplayProjectionProbeRetainsActualStage(t *testing.T) {
 		})
 	}
 }
+
+func TestPreviewSourcePixelsRejectsUnknownDimensions(t *testing.T) {
+	for _, source := range []IntelSource{{Width: 0, Height: 1080}, {Width: 1920, Height: 0}, {Width: -1, Height: -1}, {}} {
+		if got := PreviewSourcePixels(source); got != nil {
+			t.Fatalf("unknown dimensions retained pixel facts: %+v -> %+v", source, got)
+		}
+	}
+}

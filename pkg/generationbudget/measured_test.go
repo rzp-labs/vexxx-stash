@@ -499,3 +499,39 @@ func TestScopedCleanupCannotRestoreEvidenceAfterNewerInvalidation(t *testing.T) 
 		t.Fatal("stale cleanup resurrected evidence invalidated by a newer generation")
 	}
 }
+
+func TestNonAutoAndContendedSamplesSkipWorkloadCapacity(t *testing.T) {
+	var missing *Budget
+	if missing.RefineCapacity(Workload{Kind: SpriteWorkload}, 3) {
+		t.Fatal("nil budget refined capacity")
+	}
+	manual := newAdaptive(Settings{MaxProcesses: 4, MaxGPUProcesses: 4}, func() Resources {
+		return Resources{CPUs: 4, MemoryAvailable: 4 << 30, GPUAvailable: -1}
+	})
+	w := Workload{Key: "manual/sprite", Kind: SpriteWorkload, MemoryPerSlot: 1 << 20}
+	if manual.RefineCapacity(w, 3) {
+		t.Fatal("manual GPU budget refined an Auto trial")
+	}
+	b := independentTestBudget(t, Settings{MaxProcesses: 8})
+	w.Key = "sprite/contended"
+	lanes := b.PrepareWorkload(w)
+	b.StartTuning(w)
+	s := Sample{Elapsed: time.Second, MemoryPeak: 64 << 20, MemoryKnown: true, Isolated: true, Live: true}
+	if !b.RecordSample(w, s, lanes, 4, 8, nil) {
+		t.Fatal("validated baseline did not open a larger trial")
+	}
+	if got := b.RefineCapacity(w, 6); !got {
+		t.Fatal("rejected speculative count did not refine between best and rejected")
+	}
+	if got := b.learning[w.Key]; got == nil || got.limit <= got.bestLimit || !got.unfinished {
+		t.Fatalf("refined capacity must sit between best and rejected counts: %+v", got)
+	}
+	// Contention never replaces the same-subset comparison or settles tuning.
+	s.Isolated = false
+	if b.RecordSample(w, s, 3, 4, 8, nil) || !b.learning[w.Key].unfinished {
+		t.Fatal("contended sample changed the comparison or claimed settled capacity")
+	}
+	if got := b.FinishTuning(Workload{Kind: PreviewWorkload}); got != 1 {
+		t.Fatal("untested family did not fall back to the shared type ceiling", got)
+	}
+}
