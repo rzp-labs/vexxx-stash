@@ -60,7 +60,7 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           if out=$(docker manifest inspect "$IMAGE:v$VERSION" 2>&1); then
-            labels=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{range $_, $i := .Image}}{{index $i.Config.Labels "org.opencontainers.image.revision"}} {{index $i.Config.Labels "org.opencontainers.image.version"}}{{end}}')
+            labels=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}} {{index .Image.Config.Labels "org.opencontainers.image.version"}}')
             test "$labels" = "$GITHUB_SHA $VERSION" ||
               { echo "v$VERSION already published from another commit; bump VERSION" >&2; exit 1; }
             echo 'skip=true' >> "$GITHUB_OUTPUT"
