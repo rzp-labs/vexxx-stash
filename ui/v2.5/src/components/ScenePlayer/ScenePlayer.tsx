@@ -21,6 +21,7 @@ import "./autostart-button";
 import "./rating-button";
 import MarkersPlugin, { type IMarker } from "./markers";
 import { watchMarkerMetadata } from "./markerLifecycle";
+import { timelinePercent, timelineTime, watchPlayerPosition } from "./timeline";
 void MarkersPlugin;
 import "./vtt-thumbnails";
 import "./big-buttons";
@@ -80,14 +81,6 @@ import { PatchComponent } from "src/patch";
 airplay(videojs);
 chromecast(videojs);
 abLoopPlugin(window, videojs);
-
-// Extend VideoJsPlayer to support virtual timeline properties
-declare module "video.js" {
-  interface VideoJsPlayer {
-    virtualStart?: number;
-    virtualEnd?: number;
-  }
-}
 
 function handleHotkeys(player: VideoJsPlayer, event: videojs.KeyboardEvent) {
   function seekStep(step: number) {
@@ -687,6 +680,7 @@ export const ScenePlayer: React.FC<IScenePlayerProps> = PatchComponent(
     useEffect(() => {
       const player = getPlayer();
       if (!player) return;
+      const stopWatchingPosition = watchPlayerPosition(player, setTime);
 
       function playing(this: VideoJsPlayer) {
         if (scene.interactive && interactiveReady.current) {
@@ -707,30 +701,12 @@ export const ScenePlayer: React.FC<IScenePlayerProps> = PatchComponent(
       function timeupdate(this: VideoJsPlayer) {
         if (this.paused()) return;
         const currentTime = this.currentTime();
-        setTime(currentTime);
 
         // Keep the device's script clock on the video. The client throttles this
         // itself (and the cloud transport ignores it while already playing), so
         // it is safe on a high-frequency event.
         if (scene.interactive && interactiveReady.current) {
           interactiveClient.ensurePlaying(currentTime);
-        }
-
-        // Update virtual progress bar display
-        if (this.virtualStart !== undefined || this.virtualEnd !== undefined) {
-          const vStart = this.virtualStart ?? 0;
-          const vEnd = this.virtualEnd ?? this.duration();
-          if (vEnd > vStart) {
-            const pct =
-              Math.min(
-                1,
-                Math.max(0, (currentTime - vStart) / (vEnd - vStart))
-              ) * 100;
-            (this.el() as HTMLElement).style.setProperty(
-              "--vjs-virtual-progress",
-              `${pct.toFixed(2)}%`
-            );
-          }
         }
 
         if (scene.end_point && currentTime >= scene.end_point) {
@@ -761,6 +737,7 @@ export const ScenePlayer: React.FC<IScenePlayerProps> = PatchComponent(
       player.on("seeking", seeking);
 
       return () => {
+        stopWatchingPosition();
         player.off("playing", playing);
         player.off("pause", pause);
         player.off("timeupdate", timeupdate);
@@ -1232,28 +1209,18 @@ export const ScenePlayer: React.FC<IScenePlayerProps> = PatchComponent(
           };
 
         const handleProgressSeek = (e: MouseEvent) => {
-          const vStart = player.virtualStart ?? 0;
-          const vEnd = player.virtualEnd ?? player.duration();
           const rect = progressHolder.getBoundingClientRect();
-          const pct = Math.min(
-            1,
-            Math.max(0, (e.clientX - rect.left) / rect.width)
-          );
+          const pct = timelinePercent(rect, e.clientX);
           e.stopPropagation();
-          player.currentTime(vStart + pct * (vEnd - vStart));
+          player.currentTime(timelineTime(player, pct));
         };
 
         const handleProgressTouchSeek = (e: TouchEvent) => {
           if (!e.touches.length) return;
-          const vStart = player.virtualStart ?? 0;
-          const vEnd = player.virtualEnd ?? player.duration();
           const rect = progressHolder.getBoundingClientRect();
-          const pct = Math.min(
-            1,
-            Math.max(0, (e.touches[0].clientX - rect.left) / rect.width)
-          );
+          const pct = timelinePercent(rect, e.touches[0].clientX);
           e.stopPropagation();
-          player.currentTime(vStart + pct * (vEnd - vStart));
+          player.currentTime(timelineTime(player, pct));
         };
 
         progressHolder.addEventListener("mousedown", handleProgressSeek, true);
