@@ -26,6 +26,7 @@ jobs:
     permissions: {contents: read, packages: read}
     outputs:
       version: ${{ steps.meta.outputs.version }}
+      skip: ${{ steps.state.outputs.skip }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with: {fetch-depth: 0, persist-credentials: false}
@@ -40,30 +41,39 @@ jobs:
           test "${{ github.event_name }}" = pull_request && exit 0
           test "${{ github.ref }}" = refs/heads/master ||
             { echo "Releases only publish from refs/heads/master" >&2; exit 1; }
-          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$version" \
-            --jq '.[] | .ref + " " + .object.sha' | grep -F "refs/tags/v$version " | cut -d' ' -f2 || true)
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" --jq '.object.sha' 2>/dev/null || true)
           if test -n "$tag" && test "$tag" != "$GITHUB_SHA"; then
             echo "v$version exists at $tag; bump VERSION instead of moving it" >&2
             exit 1
           fi
-      - name: Log in to GHCR for the overwrite check
+      - name: Log in to GHCR for the release check
         if: github.event_name != 'pull_request'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Reject overwriting a published release version
+      - name: Check published state for overwrite and recovery
+        id: state
         if: github.event_name != 'pull_request'
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          if docker manifest inspect "$IMAGE:v$VERSION" > /dev/null 2>&1; then
-            echo "$IMAGE:v$VERSION already published; bump VERSION" >&2
+          if out=$(docker manifest inspect "$IMAGE:v$VERSION" 2>&1); then
+            labels=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{range $_, $i := .Image}}{{index $i.Config.Labels "org.opencontainers.image.revision"}} {{index $i.Config.Labels "org.opencontainers.image.version"}}{{end}}')
+            test "$labels" = "$GITHUB_SHA $VERSION" ||
+              { echo "v$VERSION already published from another commit; bump VERSION" >&2; exit 1; }
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          elif echo "$out" | grep -qiE 'no such manifest|manifest unknown|not found'; then
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          else
+            { echo "Cannot determine published state for $IMAGE:v$VERSION:"; echo "$out"; } >&2
             exit 1
           fi
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - if: steps.state.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Build Linux amd64 image locally
+        if: steps.state.outputs.skip != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         env:
           # Dry runs must not require PostHog credentials; publishes upload symbols.
@@ -98,6 +108,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=min
       - name: Smoke test container and verify source identity
+        if: steps.state.outputs.skip != 'true'
         env:
           EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
         run: |
@@ -118,7 +129,7 @@ jobs:
           test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "$LOCAL_IMAGE")" = 'linux/amd64'
           test "${{ github.event_name }}" = pull_request || docker save "$LOCAL_IMAGE" --output image.tar
       - name: Transfer tested image to publication job
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.state.outputs.skip != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: tested-image
@@ -136,8 +147,10 @@ jobs:
     permissions: {contents: write, packages: write}
     env:
       VERSION: ${{ needs.build.outputs.version }}
+      SKIP: ${{ needs.build.outputs.skip }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - if: env.SKIP != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: {name: tested-image}
       - name: Log in to GHCR for publication
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -146,17 +159,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish the tested image without rebuilding
+        if: env.SKIP != 'true'
         run: |
           docker load --input image.tar
-          for tag in "v$VERSION" latest "sha-$GITHUB_SHA"; do
-            docker tag "$LOCAL_IMAGE" "$IMAGE:$tag"
-            docker push "$IMAGE:$tag"
-          done
+          if out=$(docker manifest inspect "$IMAGE:v$VERSION" 2>&1); then
+            echo "$IMAGE:v$VERSION appeared since the preflight check; refusing overwrite" >&2
+            exit 1
+          elif echo "$out" | grep -qiE 'no such manifest|manifest unknown|not found'; then
+            for tag in "v$VERSION" latest "sha-$GITHUB_SHA"; do
+              docker tag "$LOCAL_IMAGE" "$IMAGE:$tag"
+              docker push "$IMAGE:$tag"
+            done
+          else
+            { echo "Cannot determine published state for $IMAGE:v$VERSION:"; echo "$out"; } >&2
+            exit 1
+          fi
+      - name: Re-point tags at the already-published image
+        if: env.SKIP == 'true'
+        run: |
+          if docker manifest inspect "$IMAGE:v$VERSION" > /dev/null 2>&1; then
+            docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:sha-$GITHUB_SHA" "$IMAGE:v$VERSION"
+          else
+            echo "$IMAGE:v$VERSION vanished between check and publish" >&2
+            exit 1
+          fi
       - name: Tag the release commit and summarize
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          existing=$(gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/v$VERSION" --jq '.object.sha' 2>/dev/null || true)
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" --jq '.object.sha' 2>/dev/null || true)
           if test -n "$existing" && test "$existing" != "$GITHUB_SHA"; then
             echo "v$VERSION moved to $existing during this run; refusing" >&2
             exit 1
@@ -165,6 +196,6 @@ jobs:
             -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" > /dev/null
           {
             echo "Published $IMAGE:v$VERSION + :latest + :sha-$GITHUB_SHA"
-            docker image inspect --format '{{range .RepoDigests}}{{.}}{{end}}' "$IMAGE:v$VERSION"
+            test "$SKIP" = true || docker image inspect --format '{{range .RepoDigests}}{{.}}{{end}}' "$IMAGE:v$VERSION"
             echo "Tagged v$VERSION at $GITHUB_SHA"
           } >> "$GITHUB_STEP_SUMMARY"
