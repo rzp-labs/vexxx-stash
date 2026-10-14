@@ -1,0 +1,263 @@
+name: CI
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+  push:
+    branches: [master]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      python: ${{ steps.filter.outputs.python }}
+      image: ${{ steps.filter.outputs.image }}
+    steps:
+      # push/merge_group leave outputs empty; domain jobs run everything via `if`.
+      - uses: dorny/paths-filter@15192bc058cc28a13dbf6cde61f19e18988b7af6 # v3
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          # Last pattern wins. Catch-all mirrors the old policy: shared/unknown
+          # paths run everything but the image; docs-only changes run nothing.
+          filters: |
+            backend:
+              - '**'
+              - '!docs/**'
+              - '!*.md'
+              - '!ui/v2.5/**'
+              - 'ui/v2.5/src/locales/**'
+              - '!scripts/**'
+              - 'scripts/check_intel_runtime.py'
+              - 'scripts/ffmpeg/**'
+            frontend:
+              - '**'
+              - '!docs/**'
+              - '!*.md'
+              - '!docker/**'
+              - '!scripts/**'
+              - 'scripts/ffmpeg/**'
+            python:
+              - '**'
+              - '!docs/**'
+              - '!*.md'
+              - '!docker/**'
+              - '!ui/v2.5/**'
+              - '!internal/**'
+              - '!pkg/**'
+              - '!cmd/**'
+              - '!go.mod'
+              - '!go.sum'
+              - '!*.go'
+            image:
+              - 'docker/**'
+              - '**/Dockerfile'
+              - '.dockerignore'
+              - 'Makefile'
+              - 'scripts/check_intel_runtime.py'
+              - 'scripts/ffmpeg/**'
+
+  branch-name:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: python3 scripts/check_branch_name.py
+
+  backend:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Install media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libvips-tools
+      - run: make generate-backend generate-login-locale
+      - name: Go unit and integration tests
+        run: |
+          mkdir -p dist/coverage
+          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
+          test -s dist/coverage/go.out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: go-coverage
+          path: dist/coverage/go.out
+          if-no-files-found: error
+          retention-days: 7
+
+  frontend:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 10.34.4
+      - name: Configure pnpm store before restoring cache
+        run: pnpm config set store-dir ~/.pnpm-store
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/v2.5/pnpm-lock.yaml
+      - run: make pre-ui generate-ui
+      - name: Frontend tests and type check
+        working-directory: ui/v2.5
+        run: |
+          pnpm run test:coverage
+          test -s ../../dist/coverage/frontend/lcov.info
+          pnpm run check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-coverage
+          path: dist/coverage/frontend/lcov.info
+          if-no-files-found: error
+          retention-days: 7
+
+  python:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Ensure PyYAML for the system interpreter
+        run: python3 -c 'import yaml' || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+      - run: scripts/python_coverage.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-coverage
+          path: dist/coverage/python.xml
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_CLI_PROJECT_ID }}
+      POSTHOG_CLI_HOST: ${{ vars.POSTHOG_CLI_HOST }}
+      VITE_PUBLIC_POSTHOG_PROJECT_TOKEN: ${{ vars.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN }}
+      VITE_PUBLIC_POSTHOG_HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Stamp build metadata
+        id: stamp
+        run: |
+          echo "build_date=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
+          echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build Linux amd64 image locally
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/build/x86_64/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: vexxx-ci:local
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            GITHASH=${{ github.sha }}
+            STASH_VERSION=${{ steps.stamp.outputs.version }}
+            BUILD_DATE=${{ steps.stamp.outputs.build_date }}
+            POSTHOG_UPLOAD_REQUIRED=false
+            POSTHOG_CLI_PROJECT_ID=${{ env.POSTHOG_CLI_PROJECT_ID }}
+            POSTHOG_CLI_HOST=${{ env.POSTHOG_CLI_HOST }}
+            VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=${{ env.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN }}
+            VITE_PUBLIC_POSTHOG_HOST=${{ env.VITE_PUBLIC_POSTHOG_HOST }}
+            GITHUB_ACTIONS=true
+            GITHUB_SHA=${{ github.sha }}
+            GITHUB_REF_NAME=${{ github.ref_name }}
+            GITHUB_REPOSITORY=${{ github.repository }}
+            GITHUB_SERVER_URL=${{ github.server_url }}
+          secrets: |
+            POSTHOG_CLI_API_KEY=
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+      - name: Smoke test container
+        run: |
+          docker image inspect --format '{{ .Id }}' vexxx-ci:local > image.id
+          docker run --detach --name vexxx-smoke \
+            --publish 127.0.0.1:9999:9999 \
+            --env STASH_HOST=0.0.0.0 \
+            --env POSTHOG_PROJECT_TOKEN=offline-smoke \
+            --env POSTHOG_HOST=http://127.0.0.1:1 \
+            "$(cat image.id)"
+          trap 'docker logs vexxx-smoke; docker rm --force vexxx-smoke' EXIT
+          docker exec vexxx-smoke sh -ec 'test "$POSTHOG_PROJECT_TOKEN" = offline-smoke && test "$POSTHOG_HOST" = http://127.0.0.1:1'
+          curl --fail --silent --show-error --retry 30 \
+            --retry-all-errors --retry-delay 2 --max-time 5 \
+            http://127.0.0.1:9999/ > /dev/null
+
+  # Skipped on merge_group (master analysis covers the push). The step-level
+  # env check skips quietly when SONAR_TOKEN is unavailable (fork PRs).
+  sonar:
+    needs: [backend, frontend, python]
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - if: needs.backend.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: go-coverage
+          path: dist/coverage
+      - if: needs.frontend.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: frontend-coverage
+          path: dist/coverage/frontend
+      - if: needs.python.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-coverage
+          path: dist/coverage
+      - if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >-
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.scm.revision=${{ github.event.pull_request.head.sha || github.sha }}
+
+  ci-required:
+    name: ci-required
+    needs: [changes, branch-name, backend, frontend, python, image, sonar]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail when any required check failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

@@ -1,12 +1,8 @@
-name: Validate and deliberately publish Docker images
+name: Publish Docker images
 
-# Plan validates exact normal-release syntax after the trigger prefilter.
+# Pull request and master validation moved to ci.yml; tags and manual runs only.
 "on":
-  pull_request:
-    # Validate every PR base, including stacks outside the legacy CT102 prefix.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   push:
-    branches: [master]
     # GitHub's + repeats the preceding digit class; v1.2.3 matches this glob.
     # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#filter-pattern-cheat-sheet
     # This is a numeric prefilter; plan rejects leading zeros and suffixes.
