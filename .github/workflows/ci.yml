@@ -15,10 +15,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # PR-only classification of changed files; push/merge_group leave outputs
-  # empty and domain jobs run everything via their `if`. First match wins:
+  # Classifies changed files on every event: the PR's files, the queued
+  # group's base..head, or the master push's before..after. First match wins:
   # listed docs run nothing; unknown/shared paths run all test domains but
-  # not the image. Renames count both old and new paths.
+  # not the image. Renames count both old and new paths. Master pushes always
+  # run every test domain so Sonar's branch analysis gets complete coverage;
+  # the image builds only when Docker inputs changed.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -31,14 +33,23 @@ jobs:
       python: ${{ steps.classify.outputs.python }}
       image: ${{ steps.classify.outputs.image }}
     steps:
-      - if: github.event_name == 'pull_request'
-        id: classify
+      - if: github.event_name != 'pull_request'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - id: classify
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.merge_group.base_sha || github.event.before }}
         run: |
           backend=false; frontend=false; python=false; image=false
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)' > /tmp/changed.txt
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)' > /tmp/changed.txt
+          elif [ -n "$BASE" ] && [ "$BASE" != 0000000000000000000000000000000000000000 ] && git fetch -q --no-tags --depth=1 origin "$BASE"; then
+            git diff -z --name-only --no-renames "$BASE" HEAD | tr '\0' '\n' > /tmp/changed.txt  # -z: raw, unquoted names
+          else
+            printf 'Dockerfile\nunknown\n' > /tmp/changed.txt  # unknown base: run everything
+          fi
+          if [ "$GITHUB_EVENT_NAME" = push ]; then backend=true; frontend=true; python=true; fi
           while IFS= read -r p; do
             case "$p" in
               docs/*|README.md|CONTRIBUTING.md|AGENTS.md|REVIEW.md|LICENSE|docker/production/README.md|docker/build/x86_64/README.md|ui/v2.5/README.md|ui/v2.5/src/locales/README.md|scripts/ffmpeg/README.md|pkg/sqlite/migrations/README.md|pkg/plugin/examples/README.md|pkg/plugin/examples/react-component/README.md) ;;
@@ -66,7 +77,7 @@ jobs:
 
   backend:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -102,7 +113,7 @@ jobs:
 
   frontend:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -140,7 +151,7 @@ jobs:
 
   python:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.python == 'true'
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -157,7 +168,7 @@ jobs:
 
   image:
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.image == 'true'
+    if: needs.changes.outputs.image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
