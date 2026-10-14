@@ -16,29 +16,32 @@ are not acceptance evidence.
 | Docker packaging, `.dockerignore`, Makefile, runtime packaging probe | Both domains plus build/startup smoke of Linux amd64 image | Yes |
 | Explicit documentation paths | No domain checks | No |
 
-On PRs, `ci.yml` runs only the matching domain jobs: ui changes → `frontend`
+`ci.yml` runs only the matching domain jobs: ui changes → `frontend`
 (locales also `backend`), scripts → `python`, Go paths → `backend`, Docker
 inputs → `backend`+`frontend`+`image` (FFmpeg scripts also `python`),
 shared or unknown paths → `backend`+`frontend`+`python`. Listed documentation
-paths run no domain jobs. On `merge_group` and
-`master` pushes every domain runs, plus production compiles (`make ui-only` in
-`frontend`, `make flags-release flags-pie stash` in `backend`) that PRs skip.
+paths run no domain jobs. PRs classify the PR's files, `merge_group` runs
+classify the queued group's changes, and `master` pushes classify the pushed
+commits' changes, except
+that `master` pushes always run all three test domains so Sonar's branch
+analysis gets complete coverage. Outside PRs, the domains that run also do the
+production compiles (`make ui-only` in `frontend`,
+`make flags-release flags-pie stash` in `backend`) that PRs skip.
 
 ## CI pipeline
 
 `ci.yml` runs on pull requests, merge groups, and pushes to `master`. A `changes`
-job classifies PR inputs; `backend`, `frontend`, `python`, and `image` run in
-parallel, plus `branch-name` on PRs and a `sonar` scan on PRs and `master`
-pushes (not `merge_group`). The aggregate `ci-required` job is the required
-check on `master`. Pushing to a PR branch cancels its in-progress run. Each run
-executes its jobs fresh; there is no cross-run evidence reuse, so master branch
-protection (and the merge queue, once enabled) is what guarantees the tested
-tree is what lands.
+job classifies the changed files; `backend`, `frontend`, `python`, and `image`
+run in parallel, plus `branch-name` on PRs and a `sonar` scan on PRs and
+`master` pushes (not `merge_group`). The aggregate `ci-required` job is the
+required check on `master`, and PRs land through the merge queue. Pushing to a
+PR branch cancels its in-progress run. Each run executes its jobs fresh; there
+is no cross-run evidence reuse, so master branch protection and the merge queue
+are what guarantee the tested tree is what lands.
 
 PR domain jobs skip standalone production frontend and backend compiles; packaging PRs compile both inside the image. The `image` job
-runs on PRs only when Docker packaging inputs changed; on `merge_group` and
-`master` it always runs. Either way it builds and smoke-tests the real
-`linux/amd64` image but publishes nothing.
+runs only when Docker packaging inputs changed, on every event. It builds and
+smoke-tests the real `linux/amd64` image but publishes nothing.
 
 ## Existing commands
 
