@@ -1,4 +1,6 @@
+import json
 import os
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -75,6 +77,21 @@ class CheckBranchNameTests(unittest.TestCase):
             with self.subTest(pr=pr), self.assertRaisesRegex(ValueError, 'missing or malformed'):
                 check_branch_name.validate_pr_source_branch(REPO, pr)
         check_branch_name.validate_pr_source_branch('other/repository', None)
+
+    def test_cli_reads_the_pull_request_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'event.json'
+            for event, ok in (({'pull_request': self.source_pr()}, True),
+                              ({'pull_request': self.source_pr('bad-name')}, False),
+                              ({'push': {}}, False)):
+                path.write_text(json.dumps(event))
+                with self.subTest(event=event), patch.dict(os.environ, {
+                        'GITHUB_REPOSITORY': REPO, 'GITHUB_EVENT_PATH': str(path)}):
+                    if ok:
+                        check_branch_name.main()
+                    else:
+                        with self.assertRaises(ValueError):
+                            check_branch_name.main()
 
 
 if __name__ == '__main__':
