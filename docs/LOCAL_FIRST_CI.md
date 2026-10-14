@@ -6,119 +6,47 @@ run the affected complete checks once after the inputs stop changing. Existing G
 build/module caches and the pnpm store remain useful; cached passing test results
 are not acceptance evidence.
 
-| Changed inputs | Local and CI confirmation | Automatic image |
+| Changed inputs | Local confirmation | Automatic image |
 | --- | --- | --- |
 | Backend source/tests or Go dependencies | Generate backend/login locales; unit and integration tests; production backend compile | No |
 | Frontend source/tests or pnpm dependencies | Frozen install; generate operations; Vitest; TypeScript; production UI compile | No |
 | Schema, generators, workflow, unknown/shared inputs | Both domains and Python regression tests | No |
-| Python scripts | Existing Python regression suites | No |
+| Python scripts | Python regression suites | No |
 | UI locale inputs | Both domains | No |
-| Docker packaging, `.dockerignore`, Makefile, runtime packaging probe | Both domains plus build/startup smoke of Linux amd64 image | Yes, for ready candidates |
-| Explicit documentation paths | Cheap planner and aggregate | No |
+| Docker packaging, `.dockerignore`, Makefile, runtime packaging probe | Both domains plus build/startup smoke of Linux amd64 image | Yes |
+| Explicit documentation paths | No domain checks | No |
 
-PR planning includes both the increment against the declared base's merge base
-and changes introduced from PR head to the checked-out merge tree. Missing
-history or a checkout mismatch fails planning. Master pushes classify the whole
-`before..after` range. The summary records base/head/merge/tree identities and
-selected groups. Unknown paths select all test domains, not an image.
+On PRs, `ci.yml` runs only the matching domain jobs: ui changes → `frontend`
+(locales also `backend`), scripts → `python`, Go paths → `backend`, Docker
+inputs → `backend`+`frontend`+`image` (FFmpeg scripts also `python`),
+shared or unknown paths → `backend`+`frontend`+`python`. Listed documentation
+paths run no domain jobs. On `merge_group` and
+`master` pushes every domain runs, plus production compiles (`make ui-only` in
+`frontend`, `make flags-release flags-pie stash` in `backend`) that PRs skip.
 
-Drafts run affected validation and Sonar automatically under `ci-required`, before
-peer review. The job starts immediately and verifies planner success, valid domain
-coverage, generation, selected tests and compilation. Draft packaging changes
-remain pending separate build authorization. Native validation and Sonar can clear
-first; a final packaging guard keeps `ci-required` unsuccessful until the existing
-ready build and smoke test complete. Missing packaging is never reported as passed. Superseded PR runs alone are cancelled. Master protection and
-the native required `SonarCloud Code Analysis` app check are unchanged.
+## CI pipeline
 
-For same-repository PRs, native tests and reports can be reused from a completed
-run only after independently verifying the complete tracked input inventory,
-workflow bytes, declared variables, current run attempt, artifact digests and actual
-successful generation/test/production-compile steps. An image donor must instead
-prove its real successful Docker build and smoke test with skipped host compiles. Only a `sonar.exclusions`
-configuration change can differ between validation inputs; it always needs a new
-scan. Missing or malformed test evidence executes selected checks normally. An
-artifact assertion alone cannot authorize reuse.
+`ci.yml` runs on pull requests, merge groups, and pushes to `master`. A `changes`
+job classifies PR inputs; `backend`, `frontend`, `python`, and `image` run in
+parallel, plus `branch-name` on PRs and a `sonar` scan on PRs and `master`
+pushes (not `merge_group`). The aggregate `ci-required` job is the required
+check on `master`. Pushing to a PR branch cancels its in-progress run. Each run
+executes its jobs fresh; there is no cross-run evidence reuse, so master branch
+protection (and the merge queue, once enabled) is what guarantees the tested
+tree is what lands.
 
-Marking ready requires a completed successful pre-review scan and the native
-Sonar app result for the current head, base, target and complete merge-result Git
-tree. A ready event verifies those identities again and reuses clearance rather
-than scanning twice. A draft packaging donor may have a failed final packaging
-guard, but its native validation, scan and recorded clearance must all pass, and
-that guard must be its sole failed step. Other PR events scan again, including any change after review.
-A base advance or retarget requires new validation; equal head SHAs or diff summaries
-alone are insufficient. Sonar's supported HEAD checkout must have exactly the
-same Git tree as the tested merge. Branches with merge-only changes must be updated.
-
-Pending GitHub mergeability is retried briefly with identities checked each time;
-settled conflicts, changed identities and exhausted retries still fail.
-
-The workflow checks current GitHub PR metadata before validation, before scanning
-and after native clearance. These checks cannot atomically lock the base at merge.
-Server-side strict up-to-date protection or a merge queue with checks on its group
-SHA is needed to close that race; this change neither installs nor bypasses rules.
-
-Deliberate release/manual runs can reuse backend, frontend or Python tests from
-one successful master push at the exact commit and workflow revision. The probe
-compares immutable workflow bytes, repository/ref/event identity, completed run
-attempt, and successful classifier/aggregate/domain steps. The summary records
-source run/attempt, commit/workflow revision, workflow digest and domain coverage.
-Unproven domains execute normally; missing, pending, failed, stale, mismatched or
-inaccessible evidence triggers normal execution. PR checks, tree equality and
-nearby commits are insufficient for release test reuse. Ordinary master tests still execute their selected domains; PR reuse follows the
-independent native evidence checks above.
-
-For a packaging-changing PR, a successful real build/smoke can record a small
-seven-day evidence artifact containing identities, hashes, resolved base-image
-materials and a GitHub-signed workflow/job receipt. A normal two-parent master merge may reuse that packaging validation
-only when the same-repository merged PR, ordered base/head parents, synthetic
-merge tree, immutable workflow, declared variable inputs and selected coverage
-match. The receipt's signature and proof-hash audience independently bind the
-actual source workflow/checkout, PR ref, run/attempt and job; artifact assertions
-alone cannot authorize reuse. Historical receipts must have been valid during the
-completed source job, and unavailable signing keys force a rebuild. Registry reads
-must confirm that mutable base tags still resolve to the
-source build's actual material digests. The current run also checks its own landed
-checkout identity and runs master tests/generation normally. The final gate accepts
-skipped build/smoke only with this complete proof and records the source run/attempt,
-candidate/landed commits and input/workflow hashes. Unsupported or absent source
-provenance, expired artifacts, squash/rebase landings, changed inputs, stale run
-attempts and API/registry failures rebuild normally. Branch protection is unchanged.
-The proof confirms the same declared recipe/variables and current registry base
-materials; it does not re-resolve every APK/npm repository response or tool download.
-It reuses recent validation evidence, not binary equivalence or a freshly built image.
-
-The explicitly approved `id-token: write` permission applies to the entire
-`ci-required` job across its existing triggers. Only successful same-repository PR
-packaging validation requests the proof-bound receipt. Receipt values and request
-errors are never logged, and no token is exchanged with a cloud provider or cloud
-trust configured. Missing receipt access still makes master packaging build normally.
-The publishing job receives no new permission; ordinary GitHub credentials,
-branch rules and the published release are unchanged.
-
-This reuses packaging evidence, never a synthetic-merge image. Its commit/version/
-date metadata is deliberately distinct from landed master; no image is represented
-as built for the landed SHA. Tag and manual candidates always build and smoke-test
-their own final image, including release identity and PostHog UI maps/chunk IDs.
-
-For image candidates, the existing Docker stages compile each production output
-once and use those outputs in the final image. Host production compilation is
-omitted in that case; ordinary non-image validation still compiles on the host.
-An ordinary validation binary is never promoted into a release: release metadata,
-hidden source maps/chunk IDs remain release-specific. Validation Docker builds
-already retain native symbols; publication uploads those from its exact release
-binary. Native symbols alone are not a reason to repeat an equivalent build.
+PR domain jobs skip standalone production frontend and backend compiles; packaging PRs compile both inside the image. The `image` job
+runs on PRs only when Docker packaging inputs changed; on `merge_group` and
+`master` it always runs. Either way it builds and smoke-tests the real
+`linux/amd64` image but publishes nothing.
 
 ## Existing commands
 
-Use Python 3.11 or newer for the existing packaging regression tests. No dependency
+Use Python 3.11 or newer for the existing regression tests. No dependency
 installation is needed for these fast offline checks:
 
 ```sh
-python3 -m unittest discover -s scripts -p test_image_publication_policy.py
-python3 -m unittest discover -s scripts -p test_release_version.py
-python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
-python3 -m unittest discover -s scripts -p test_reuse_master_validation.py
-python3 -m unittest discover -s scripts -p test_reuse_pr_packaging.py
+python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 
 For a candidate affecting both application domains, the existing commands are:
@@ -126,10 +54,8 @@ For a candidate affecting both application domains, the existing commands are:
 ```sh
 export POSTHOG_UPLOAD_REQUIRED=false
 make pre-ui generate generate-login-locale
-# Same test targets as CI; the tagged pass also runs every untagged test.
 go test -count=1 -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
 (cd ui/v2.5 && pnpm test && pnpm run check)
-# CI's validation compile skips the legacy bundle; images still build it.
 STASH_NOLEGACY=true make ui-only
 make flags-release flags-pie stash
 ```
@@ -144,8 +70,6 @@ Python changes use `python3 -m unittest discover -s scripts -p 'test_*.py'`; whe
 present, also run the existing suite in `scripts/gpu_generation`.
 
 `pnpm run validate` remains the documented lint/type/format acceptance command.
-This workflow retains the existing test/type checks and adds production
-compilation; it does not claim a clean lint/format baseline that has not been run.
 
 These commands can download modules/packages and use CPU, memory and disk for
 code generation, tests and native compilation. They do not build/push an image or
@@ -155,7 +79,7 @@ patch before push; later relevant changes require renewed evidence.
 ## Packaging and deliberate delivery
 
 Use the existing `make docker-build` only after affected checks pass and packaging
-has changed, or an integrated image candidate/release is deliberately selected.
+has changed, or an image candidate/release is deliberately selected.
 Its target is Linux amd64. The Docker frontend has an explicit 4 GiB Node heap
 cap; backend generation/compilation uses four-way parallelism and a 2 GiB Go
 soft memory limit. These settings apply only to build stages, not the final app. On the Mac, prefer the existing OrbStack route after
@@ -175,37 +99,23 @@ Before 1.0, document compatibility changes in the release notes.
 
 Released application/UI metadata, the OCI version label, PostHog `$app_version`
 and UI source-map release version use `0.1.0`; Git and GHCR tags use `v0.1.0`.
-The commit SHA remains separate revision/build provenance. Local and ordinary CI
-builds use `0.1.0-dev+sha.<12hex>`; a feature name or transport tag is never the
-application version. `make` resolves this default with Python 3 and `VERSION`.
-CI explicitly supplies the planned version to the backend and UI. Native symbol
-uploads retain the exact release binary's build ID and existing symbol settings.
+The commit SHA remains separate revision/build provenance. Local `make` builds
+and CI host production compiles default to `0.1.0-dev+sha.<12hex>` (resolved
+with Python 3 and `VERSION`); CI Docker images and releases stamp the `VERSION`
+value directly. A feature name or
+transport tag is never the application version.
+The release build bakes the version into the backend and UI before compiling.
 
-For a release, bump `VERSION` in the reviewed candidate, land it on master, then
-tag that exact commit `v<the VERSION value>`. Tag planning rejects a different
-version or a commit outside master. The exact final image is built/smoke-tested
-once and published as `:vMAJOR.MINOR.PATCH`, `:sha-<full SHA>` and `:latest`.
-The user's existing Compose `latest` reference therefore keeps working. Our
-publishers serialize and refuse to replace an existing version tag, including
-reruns; a new release needs a new version. Registry/auth/network uncertainty
-refuses publication. This is workflow enforcement, not a registry ruleset change.
-
-Manual workflow dispatch explicitly selects a full build/smoke even without
-publication. Both publication options require master and explicit opt-in; they
-are mutually exclusive and default off. `publish_latest` uses the same release
-version/tag policy as a tagged release. `publish_test_image` uses the separate
-test package, an opaque `test-<SHA prefix>-<run>-<attempt>` transport tag and the
-development application version. The optional diagnostic `test_label` affects
-neither version nor tag. Ordinary PR/master validation never publishes images.
-No image dispatch is needed to validate changes to version planning.
-
-The publication summary records image references and repository digests.
-Release versions are baked before the build; retagging a development image
-cannot change its application version.
-Until a trusted local-to-CI artifact intake exists, deliberate CI publication
-keeps the existing same-run build/smoke/archive/checksum handoff. The isolated
-publisher checks the smoke-tested image ID, checksums and revision/version/platform, then publishes those bytes without
-checkout or rebuilding. No arbitrary build artifact intake or general cache framework is introduced.
+Releasing is a normal reviewed change: open a PR from a `release-vX.Y.Z` branch
+that bumps `VERSION`, and merge it. When that merge lands on `master`,
+`release.yml` builds the Linux amd64 image once, smoke-tests it, and pushes the
+same image to `ghcr.io/rzp-labs/vexxx-stash` as `vX.Y.Z`, `latest` and
+`sha-<commit>`, then creates the git tag `vX.Y.Z`. It does not re-run tests:
+master already required `ci-required`. It refuses to overwrite an existing
+version tag, so a new release needs a new `VERSION` value. A PR that edits
+`release.yml` runs a dry-run build without publishing, and the workflow can be
+re-run manually via `workflow_dispatch`. Ordinary PR and master validation never
+publishes images.
 
 ## PostHog build and runtime configuration
 
@@ -227,7 +137,7 @@ unset can enable uploads. The Docker backend uploads only when
 `POSTHOG_UPLOAD_REQUIRED` equals `true`, but the Makefile's
 `build-release-posthog-*` targets upload unconditionally; do not use those targets
 for validation. Retain ordinary compile targets and the explicit false setting
-when integrating branches. Reconcile deliberate publication's upload build args
+when integrating branches. Reconcile the release build's upload build args
 separately; workflow environment variables alone do not become Docker build args.
 
 The checked-in Compose template names the same application package but defaults

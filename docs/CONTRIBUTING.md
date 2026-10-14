@@ -37,12 +37,11 @@ Usernames and identifiers accept letter case variations; usernames may contain
 single internal hyphens. Issue numbers must be positive without leading zeros.
 Descriptions use hyphen-separated letters/digits, without additional slashes.
 
-For PRs into this repository, the planner validates the actual source branch
-before selecting work. A naming failure prevents a passing `ci-required` run;
-it does not prevent branch creation, rename, or push. Other PR base branches
-receive the same validation without adding protections to those bases. Drafts
-run the same `ci-required` validation, including this naming check; only image
-packaging waits for the draft to become ready for review.
+For PRs into this repository, the `branch-name` CI job runs
+`scripts/check_branch_name.py` against the actual source branch. A naming
+failure blocks a passing `ci-required` check; it does not prevent branch
+creation, rename, or push. The same check applies regardless of the PR's base
+branch or draft state.
 
 Same-repository exceptions are `master`, exact legacy branches
 `codex/ct102-media-generation` and `feat/posthog-instrumentation`, and precise
