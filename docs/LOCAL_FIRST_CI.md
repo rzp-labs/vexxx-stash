@@ -16,9 +16,11 @@ are not acceptance evidence.
 | Docker packaging, `.dockerignore`, Makefile, runtime packaging probe | Both domains plus build/startup smoke of Linux amd64 image | Yes |
 | Explicit documentation paths | No domain checks | No |
 
-On PRs, `ci.yml` runs only the matching domain jobs (ui changes → `frontend`,
-scripts → `python`, most other paths → `backend`+`frontend`+`python`, Docker
-inputs → `image`); docs-only PRs run no domain jobs. On `merge_group` and
+On PRs, `ci.yml` runs only the matching domain jobs: ui changes → `frontend`
+(locales also `backend`), scripts → `python`, Go paths → `backend`, Docker
+inputs → `backend`+`frontend`+`image` (FFmpeg scripts also `python`),
+shared or unknown paths → `backend`+`frontend`+`python`. Listed documentation
+paths run no domain jobs. On `merge_group` and
 `master` pushes every domain runs, plus production compiles (`make ui-only` in
 `frontend`, `make flags-release flags-pie stash` in `backend`) that PRs skip.
 
@@ -33,7 +35,7 @@ executes its jobs fresh; there is no cross-run evidence reuse, so master branch
 protection (and the merge queue, once enabled) is what guarantees the tested
 tree is what lands.
 
-PR runs do not build a production frontend or backend bundle. The `image` job
+PR domain jobs skip standalone production frontend and backend compiles; packaging PRs compile both inside the image. The `image` job
 runs on PRs only when Docker packaging inputs changed; on `merge_group` and
 `master` it always runs. Either way it builds and smoke-tests the real
 `linux/amd64` image but publishes nothing.
@@ -98,8 +100,9 @@ Before 1.0, document compatibility changes in the release notes.
 Released application/UI metadata, the OCI version label, PostHog `$app_version`
 and UI source-map release version use `0.1.0`; Git and GHCR tags use `v0.1.0`.
 The commit SHA remains separate revision/build provenance. Local `make` builds
-default to `0.1.0-dev+sha.<12hex>` (resolved with Python 3 and `VERSION`); CI
-builds instead stamp `STASH_VERSION` straight from `VERSION`. A feature name or
+and CI host production compiles default to `0.1.0-dev+sha.<12hex>` (resolved
+with Python 3 and `VERSION`); CI Docker images and releases stamp the `VERSION`
+value directly. A feature name or
 transport tag is never the application version.
 The release build bakes the version into the backend and UI before compiling.
 
