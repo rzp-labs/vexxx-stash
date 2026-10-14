@@ -16,6 +16,7 @@ For reviews, follow [REVIEW.md](REVIEW.md); classification does not grant tool p
   Use the generated `src/core/generated-graphql` hooks for frontend API operations.
 - Detailed conventions: [contribution guide](docs/CONTRIBUTING.md),
   [development](docs/DEVELOPMENT.md), and [GraphQL workflow](docs/GQL_TECHNICAL_DOC.md).
+- Knowledge store: `docs/solutions/` holds documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`).
 
 ## Development and verification
 
@@ -32,6 +33,10 @@ Run checks appropriate to the change and report their results and limitations.
 The existing browser-verification policy uses these checks plus explicit manual
 click/select steps for the user. Do not search for or install headless browser
 tooling under this policy. Do not assume a development server is already running.
+
+After a solved, verified problem, offer once to invoke the `ce-compound` skill at the completion checkpoint only when the work produced durable project reasoning that is not readily recoverable from the final code, tests, types, comments, or existing documentation, and losing it would plausibly cause recurrence, material risk, or substantial rediscovery. Apply this counterfactual: if the learning document disappeared, would a future engineer reading the final implementation still be likely to repeat the mistake or redo substantial investigation? If not, do not offer. Completion, effort, and diff size alone are not enough. Offer at the checkpoint so a qualifying learning can ship in the PR that produced it, and only where the repository treats captured learnings as tracked, committed knowledge.
+
+Write every report, summary, or handoff to the user through the `ce-noslop` skill. This applies when you are the top-level agent writing to the user, not when you are a subagent reporting to its caller. Do not apply it to code, config, verbatim quotes, or text the user asked to post as written.
 
 ## Frontend conventions
 
@@ -60,9 +65,3 @@ Do not infer Git authorization from review classification or routine coding work
 - Before the app will compile, run `make pre-ui` and `make generate`. `ui/v2.5/src/core/generated-graphql.ts` and `internal/api/generated_*.go` are gitignored.
 - Dev loop: `make server-start` serves the API on port 9999 with config under `.local/`. `make ui-start` serves Vite on port 3000. In dev, `getPlatformURL` sends GraphQL HTTP and WebSocket requests to port 9999 on the page host, or to `VITE_APP_PLATFORM_URL` when that is set, so the browser needs port 9999 as well as port 3000. Session cookies are cross-origin in that setup, so authentication stays off for the dev UI. `ffmpeg` is on the image and is required to scan video.
 - A fresh server reports GraphQL `systemStatus` `SETUP` until the database and generated paths are saved. An empty library is allowed; the setup wizard warns and continues after confirmation.
-
-## Claude Code context management
-
-After a discrete task, proactively suggest `/compact` if the conversation is
-getting long, including multi-file reads, a build/test cycle, or roughly 10 tool calls.
-Suggest `/clear` when switching to a completely different area of the codebase.
