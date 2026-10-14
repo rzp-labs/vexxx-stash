@@ -120,6 +120,13 @@ version tag, so a new release needs a new `VERSION` value. A PR that edits
 re-run manually via `workflow_dispatch`. Ordinary PR and master validation never
 publishes images.
 
+After publishing, the `linear-release` job records `vX.Y.Z` in Linear's "Vexxx"
+release pipeline with the VEX issues referenced by commits since the previous
+version tag. The pipeline auto-generates release notes when a release
+completes, so the notes appear in its changelog without a manual step. The job
+needs the pipeline access key in the `LINEAR_ACCESS_KEY` repository secret; it
+warns and skips without it, and can be re-run alone if Linear is unavailable.
+
 ## PostHog build and runtime configuration
 
 Published builds embed the same `VITE_PUBLIC_POSTHOG_PROJECT_TOKEN` and
