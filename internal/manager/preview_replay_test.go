@@ -44,16 +44,17 @@ func TestPreviewReplayManagerEarlyHeaderMapsInsideConfigVolume(t *testing.T) {
 	mgr.FFProbe = nil
 	fileID := models.FileID(29)
 	start, end := 4.0, 8.0
+	vrMode := models.VRModeTB360
 	g := &generate.Generator{IntelPreviews: mgr.Config.GetIntelPreviewGeneration()}
-	task := GeneratePreviewTask{Scene: models.Scene{ID: 17, Path: input, PrimaryFileID: &fileID, Checksum: "fixture", StartPoint: &start, EndPoint: &end}, Overwrite: true, generator: g, Options: generate.PreviewOptions{Segments: 2, SegmentDuration: 0.25, ExcludeStart: "12.5%"}, fileNamingAlgorithm: models.HashAlgorithmMd5}
+	task := GeneratePreviewTask{Scene: models.Scene{ID: 17, Path: input, PrimaryFileID: &fileID, Checksum: "fixture", StartPoint: &start, EndPoint: &end, VRMode: &vrMode}, Overwrite: true, generator: g, Options: generate.PreviewOptions{Segments: 2, SegmentDuration: 0.25, ExcludeStart: "12.5%"}, fileNamingAlgorithm: models.HashAlgorithmMd5}
 	err := task.Start(context.Background())
 	r, ok := diagnostics.PreviewFailureSnapshot(err)
-	if !ok || r.Command.Stage != "header" || r.Command.SeekSeconds != nil || r.Request.DurationSeconds != nil || r.Request.LimitStart == nil || *r.Request.LimitStart != 4 || *r.Request.ExcludeStart != 12.5 || r.Retention != "queued" || r.Retained {
+	if !ok || r.Command.Stage != "header" || r.Command.SeekSeconds != nil || r.Request.DurationSeconds != nil || r.Request.LimitStart == nil || *r.Request.LimitStart != 4 || *r.Request.ExcludeStart != 12.5 || r.Request.Projection != string(models.VRModeTB360) || r.Retention != "queued" || r.Retained {
 		t.Fatal("header/request facts", r, err)
 	}
 	stored := waitPreviewReplay(t, filepath.Join(configDir, "preview-replay"), r.Reference)
-	if stored.SceneID != 17 || stored.FileID != 29 || !stored.Replay.SourceResolved {
-		t.Fatal("source mapping", stored)
+	if stored.SceneID != 17 || stored.FileID != 29 || !stored.Replay.SourceResolved || stored.Replay.Request.Projection != string(models.VRModeTB360) {
+		t.Fatal("source/projection mapping", stored)
 	}
 	data, _ := json.Marshal(r)
 	if strings.Contains(string(data), input) || strings.Contains(string(data), "scene_id") || strings.Contains(string(data), "file_id") {
