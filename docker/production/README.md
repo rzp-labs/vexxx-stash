@@ -27,7 +27,7 @@ Select an image in `.env`:
 # Existing edge image (no longer updated by master pushes):
 IMAGE_TAG=edge
 
-# Deliberately published application candidate (updated only by manual opt-in):
+# Latest published release (updated when a VERSION bump lands on master):
 # IMAGE_TAG=latest
 
 # Select an actually published normal release or its commit tag:
@@ -37,17 +37,13 @@ IMAGE_TAG=edge
 
 # For an immutable reference, override the entire image instead:
 # STASH_IMAGE=ghcr.io/rzp-labs/vexxx-stash@sha256:<digest>
-
-# Deliberately published manual test images use a separate package:
-# STASH_IMAGE=ghcr.io/rzp-labs/vexxx-stash-test:test-candidate-123456789-1
 ```
 
 `STASH_IMAGE` takes precedence over `IMAGE_TAG`. A digest is immutable; release
-and commit tags identify builds but can be overwritten if republished. Multiple
-release tags for the same commit can overwrite its SHA tag with a different
-embedded version. The existing `edge` default is retained for compatibility;
-it stops updating under the publication policy below. Choose an actually
-published release, candidate/latest image, test image, or digest explicitly when upgrading.
+and commit tags identify builds but can be overwritten if republished. The
+existing `edge` default is retained for compatibility; it stops updating under
+the publication policy below. Choose an actually published release, `latest`,
+or a digest explicitly when upgrading.
 
 Public packages need no login. For private packages, log in on the server with a
 GitHub personal access token (classic) with `read:packages` and package access.
@@ -90,48 +86,26 @@ named volumes.
 
 ## Building and publishing
 
-[The GitHub Actions workflow](../../.github/workflows/docker-publish.yml) always
-checks the publication policy and Intel packaging tests. Ready application PRs
-and master landings run affected backend/frontend/Python checks and production
-compilation. Ordinary application edits do not build images. Actual packaging
-inputs and explicit manual/release candidates build and smoke-test Linux amd64
-images. Drafts report a separate informational `validation-deferred` context.
-Ready runs start `ci-required` immediately and keep it pending until all planned
-obligations pass. Deliberate release/manual runs reuse only individually proven
-tests from successful exact-SHA master validation with matching workflow revision;
-unavailable or incomplete evidence runs normally. Image candidates compile once
-in Docker with release maps/symbols and publish the exact smoke-tested image. See
+CI and releases are split across two workflows.
+[ci.yml](../../.github/workflows/ci.yml) validates pull requests and master
+pushes and never publishes images; when a PR changes Docker packaging it still
+builds and smoke-tests the Linux amd64 image. See
 [local validation before push](../../docs/LOCAL_FIRST_CI.md) for the existing
-commands and classification rules.
+commands.
 
-Publication requires a deliberate release tag or manual choice:
+Releasing is automatic: when a `VERSION` bump lands on `master`,
+[release.yml](../../.github/workflows/release.yml) builds the image once,
+smoke-tests it, and pushes that same image to
+`ghcr.io/rzp-labs/vexxx-stash` as `vX.Y.Z`, `latest` and `sha-<commit>`, then
+creates the git tag `vX.Y.Z`. It does not re-run tests (master already required
+`ci-required`) and refuses to overwrite an existing version tag. To re-run the
+release build manually, use `workflow_dispatch` on release.yml.
 
-- Pushes to `master` and pull requests validate relevant changes and never publish.
-- Normal release tags must be exactly `vMAJOR.MINOR.PATCH`, with no leading zeros,
-  prerelease suffix, or build metadata (for example, the format `v1.2.3`). After
-  full validation, they publish the exact tag and `sha-<full commit SHA>` in
-  `ghcr.io/rzp-labs/vexxx-stash`.
-- Manual runs validate and smoke-test by default. To publish a test image,
-  deliberately enable `publish_test_image` and supply `test_label`: 1–32 lowercase
-  letters/digits separated by single hyphens. These runs publish only to
-  `ghcr.io/rzp-labs/vexxx-stash-test:test-<label>-<run ID>-<attempt>`, never the
-  release package, `edge`, or `latest`.
-- Manual master runs may instead explicitly enable `publish_latest` and supply
-  the same validated candidate label. They publish the tested image to
-  `ghcr.io/rzp-labs/vexxx-stash:candidate-<label>-<run ID>-<attempt>` and tag those
-  same bytes as `ghcr.io/rzp-labs/vexxx-stash:latest`. The candidate tag is its
-  baked application version. Test/latest publication are mutually exclusive and
-  default off; neither ordinary master pushes nor release tags update latest.
-
-Validation and image construction use a read-only `GITHUB_TOKEN`. Only the
-separate publication job gets `packages: write` (plus `actions: read` for the
-tested artifact); it checks the image archive checksum, source revision, version and platform,
-then uploads the exact smoke-tested image without rebuilding or executing
-repository scripts. No PAT is needed in repository secrets. After the first
-successful publication of either package, set its visibility in GitHub's package
-settings. Packages may initially be private even when the repository is public.
-Organization settings must allow the workflow to create/write packages. The
-source label links each image to the repository.
+The release job uses `GITHUB_TOKEN` with `packages: write`; no PAT is needed in
+repository secrets. After the first successful publication, set the package's
+visibility in GitHub's package settings; packages may initially be private even
+when the repository is public. Organization settings must allow the workflow to
+create/write packages. The source label links each image to the repository.
 
 For a local build on Linux or an Apple Silicon Mac:
 

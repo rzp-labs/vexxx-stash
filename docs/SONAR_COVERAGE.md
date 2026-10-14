@@ -38,8 +38,7 @@ available for static analysis.
 
 ## Report production
 
-The existing `ci-required` validation runs generate reports without repeating
-the suites:
+The `ci.yml` domain jobs generate reports as part of their normal runs:
 
 ```sh
 mkdir -p dist/coverage
@@ -78,13 +77,10 @@ instrumented and appear fully uncovered, while coverage.py measures Python
 tests as covered. Excluding them keeps the new-code gate on production code.
 They remain analyzed for issues.
 
-Reports are required to be nonempty after successful tests and retained for
-seven days as `go-coverage` / `frontend-coverage` / `python-coverage` artifacts. These are evidence,
-not an automatic input to the remote Sonar service. Each artifact contains only
-the domains actually executed in that run. Drafts run selected validation automatically;
-unselected or reused domains do not produce new reports. Never scan a partial
-run as though it contains full-project coverage. All reports live under `dist/coverage/`, which is already ignored by Git and
-Docker packaging. No ignore-file or image-planner change is needed.
+Reports are required to be nonempty after successful tests and are uploaded as
+`go-coverage` / `frontend-coverage` / `python-coverage` artifacts for the `sonar`
+job to import. All reports live under `dist/coverage/`, which is already ignored
+by Git and Docker packaging.
 
 ## CI analysis and acceptance
 
@@ -95,51 +91,19 @@ or exposed to validation. The official pinned scanner runs only on the existing
 GitHub-hosted runner, after validation; no Sonar CLI administration or scanner
 installation is required on the Mini.
 
-Same-repository draft and ready PRs retain their actual target branch, including
-stacks. Full history is fetched and the scanner uses the actual HEAD checkout.
-All PR scans, including scans without coverage reports, require the complete HEAD
-Git tree to equal the tested merge-result Git tree. A merge-only difference requires
-updating the branch before scanning. Forks and missing trust metadata fail fresh
-validation without receiving the token. Tags and publication dispatches retain
-their existing validation/publication policy and do not run Sonar.
+Same-repository PRs retain their actual target branch, including stacks. Full
+history is fetched and the scanner uses the actual HEAD checkout. The merge
+queue runs its own `ci-required` jobs before landing. Forks do not receive the
+token. Release runs do not scan.
 
-PR scans import only their selected Go/UI reports. A prior completed native run
-may supply those reports when independent Git input/workflow/variable comparison,
-actual generation/test/production-compile results (or a real image build/smoke
-with skipped host compiles), fresh attempts and artifact
-digests prove equivalence. Only `sonar.exclusions` may differ for that validation
-reuse; a changed exclusion list always scans again. Reused reports retain their
-original provenance and are not uploaded as newly produced coverage.
+PR scans import the coverage reports produced by that run's `backend`,
+`frontend` and `python` jobs. The `sonar` job waits for its actual quality gate;
+the `SonarCloud Code Analysis` app check on `master` remains required alongside
+`ci-required`. Missing or empty reports fail the scan. No partial PR import is
+presented as full-project coverage.
 
-The scanner waits for its actual quality gate. After it succeeds, CI records its
-real analysis task and a fresh successful `SonarCloud Code Analysis` result from
-app ID 12526 for the actual head and PR. Ready events require that completed scan's
-exact head/base/target/full tree/configuration and independently verified native
-validation, then reuse clearance. A draft packaging change may record valid native/Sonar clearance before its final
-packaging guard fails the required job. Only that sole, expected guard failure can
-qualify a scan donor; the ready run must complete the existing image build/smoke.
-Other PR events scan again. Pending mergeability receives bounded retries while
-head/base/target identities are rechecked. Current GitHub PR
-metadata is checked before work, before scan and after clearance. This cannot
-atomically prevent a base change during merge; server-side strict up-to-date
-protection or checks on a merge-queue group SHA remain necessary.
-
-Missing or empty selected reports fail. Same-run dependencies and generated
-GraphQL types are reused when available after input equality, without another
-install. Frontend type precision when dependencies are absent remains a live
-question. No partial PR import is presented as full-project coverage.
-
-A master push changing analyzed inputs imports the Go profile, frontend LCOV and
-Python Cobertura XML. Separate coverage-only flags add missing report producers
-without changing affected validation obligations: each unselected domain among
-backend, frontend and Python gets a coverage-only run (Go with setup/generation,
-Vitest with setup/generation, `scripts/python_coverage.sh`). These additions
-perform no standalone TypeScript check, Node build-config tests, production compile
-or image build. Genuine affected validation retains those checks. Documentation-only
-master changes and explicitly excluded inputs add no producer work or scan; other
-repository inputs follow the whole-project scope. Workflow changes already select
-all three domains. PR reuse follows the narrow
-independent evidence checks above.
+A master push imports the Go profile, frontend LCOV and Python Cobertura XML
+produced by that push's `ci.yml` run.
 
 The snippet's analyzer cache is used once at `~/.sonar/cache`. It is separate from
 the action's scanner-binary tool cache. Existing checkout pins, full history, required `SonarCloud Code Analysis` identity, and merge protections are

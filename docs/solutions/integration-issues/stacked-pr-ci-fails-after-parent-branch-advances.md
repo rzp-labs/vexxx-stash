@@ -17,6 +17,12 @@ tags: [stacked-prs, github-actions, pull-request-base-sha, merge-ref, ci-require
 
 # Stacked PR CI fails after its parent branch advances
 
+> Historical note: the policy scripts described here (`scripts/image_publication_policy.py`,
+> `scripts/sonar_scan_policy.py`, the reuse helpers) and the `docker-publish.yml`
+> workflow were removed by VEX-146. The replacement `ci.yml` trusts GitHub's
+> merge protections instead of validating checkout identity, so the failure mode
+> below no longer applies. This document is kept for history.
+
 ## Problem
 A PR based on another PR's branch (not `master`) failed `ci-required` after a new commit was pushed to that parent branch. Re-running CI didn't help. In this session the failure only cleared after the parent PR merged and the child was rebased onto `master` and pushed.
 
