@@ -531,4 +531,154 @@ describe("optional media session controls", () => {
       expect.any(Error)
     );
   });
+
+  it("ignores metadata set after disposal", () => {
+    const { api } = session();
+    vi.stubGlobal(
+      "MediaMetadata",
+      class {
+        constructor(public data: unknown) {}
+      }
+    );
+    const p = createPlayer();
+    p.ready();
+    p.plugin.setMetadata("before", "artist", "poster");
+    p.dispose();
+    p.plugin.setMetadata("after", "artist", "poster");
+    expect(api.metadata).toBeNull();
+    expect(posthogClient.captureException).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the player poster, then empty artwork, for media controls", () => {
+    const { api } = session();
+    vi.stubGlobal(
+      "MediaMetadata",
+      class {
+        constructor(public data: unknown) {}
+      }
+    );
+    const p = createPlayer();
+    p.ready();
+    p.mock.poster.mockReturnValue("player-poster");
+    p.plugin.setMetadata("title", "artist", "");
+    expect(api.metadata).toMatchObject({
+      data: { artwork: [{ src: "player-poster", type: "image/jpeg" }] },
+    });
+    p.mock.poster.mockReturnValue("");
+    p.plugin.setMetadata("title", "artist", "");
+    expect(api.metadata).toMatchObject({
+      data: { artwork: [{ src: "", type: "image/jpeg" }] },
+    });
+  });
+
+  it("retains diagnostics when releasing controls fails", () => {
+    const { api } = session();
+    api.setActionHandler.mockImplementation(
+      (action: MediaSessionAction, callback: (() => void) | null) => {
+        if (callback === null) throw new Error(`release ${action} failed`);
+      }
+    );
+    Object.defineProperty(api, "metadata", {
+      configurable: true,
+      set: (value) => {
+        if (value === null) throw new Error("metadata clear failed");
+      },
+    });
+    Object.defineProperty(api, "playbackState", {
+      configurable: true,
+      set: (value) => {
+        if (value === "none") throw new Error("state reset failed");
+      },
+    });
+    const p = createPlayer();
+    p.ready();
+    p.dispose();
+    for (const operation of [
+      "media_session.release.play",
+      "media_session.release.pause",
+      "media_session.release.nexttrack",
+      "media_session.release.previoustrack",
+      "media_session.metadata",
+      "media_session.playback_state",
+    ]) {
+      expect(posthogClient.captureException).toHaveBeenCalledWith(
+        expect.any(Error),
+        expect.objectContaining({ operation })
+      );
+    }
+    // metadata clear also fails once during activation, before disposal.
+    expect(posthogClient.captureException).toHaveBeenCalledTimes(7);
+  });
+
+  it("retains diagnostics when closing stale play feedback fails", async () => {
+    const { handlers } = session();
+    const p = createPlayer();
+    const modal = {
+      close: vi.fn(() => {
+        throw new Error("close failed");
+      }),
+      isDisposed: () => false,
+    };
+    p.mock.createModal.mockReturnValue(modal);
+    p.ready();
+    p.mock.play.mockRejectedValueOnce(
+      new DOMException("denied", "NotAllowedError")
+    );
+    handlers.get("play")?.();
+    await vi.waitFor(() => expect(p.mock.createModal).toHaveBeenCalledOnce());
+    // A successful retry still reports the failed dismissal.
+    handlers.get("play")?.();
+    await vi.waitFor(() =>
+      expect(posthogClient.captureException).toHaveBeenCalledWith(
+        expect.any(Error),
+        expect.objectContaining({ operation: "media_session.play_feedback" })
+      )
+    );
+    // Clearing feedback on playback reports the failure too.
+    p.mock.play.mockRejectedValueOnce(
+      new DOMException("denied", "NotAllowedError")
+    );
+    handlers.get("play")?.();
+    await vi.waitFor(() => expect(p.mock.createModal).toHaveBeenCalledTimes(2));
+    p.emit("play");
+    expect(posthogClient.captureException).toHaveBeenCalledTimes(2);
+    expect(videojs.log.error).toHaveBeenCalledWith(
+      "Media session play_feedback failed",
+      expect.any(Error)
+    );
+  });
+
+  it.each(["pause", "dispose"])(
+    "does not dismiss feedback for a play superseded by %s",
+    async (interruption) => {
+      const { handlers } = session();
+      const p = createPlayer();
+      const modal = { close: vi.fn(), isDisposed: () => false };
+      p.mock.createModal.mockReturnValue(modal);
+      p.ready();
+      p.mock.play.mockRejectedValueOnce(
+        new DOMException("denied", "NotAllowedError")
+      );
+      handlers.get("play")?.();
+      await vi.waitFor(() => expect(p.mock.createModal).toHaveBeenCalledOnce());
+      let resolve!: () => void;
+      p.mock.play.mockImplementationOnce(
+        () =>
+          new Promise<void>((done) => {
+            resolve = done;
+          })
+      );
+      handlers.get("play")?.();
+      if (interruption === "pause") p.emit("pause");
+      else p.dispose();
+      resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      // Disposal already closed the feedback once; pause leaves it open.
+      expect(modal.close).toHaveBeenCalledTimes(
+        interruption === "dispose" ? 1 : 0
+      );
+      expect(posthogClient.captureException).not.toHaveBeenCalled();
+    }
+  );
 });
