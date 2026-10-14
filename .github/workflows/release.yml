@@ -1,0 +1,170 @@
+name: Release
+
+# Publishes the tested image and vX.Y.Z tag when master lands a new VERSION.
+# PRs touching this workflow dry-run build+smoke: no secrets, no writes.
+on:
+  push: {branches: [master], paths: [VERSION]}
+  workflow_dispatch:
+  pull_request: {paths: [.github/workflows/release.yml]}
+
+permissions: {contents: read}
+
+# Serialized per ref; publishing runs never cancel mid-publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/rzp-labs/vexxx-stash
+  LOCAL_IMAGE: vexxx-release:${{ github.sha }}
+
+jobs:
+  build:
+    name: Build and smoke test image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions: {contents: read, packages: read}
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: {fetch-depth: 0, persist-credentials: false}
+      - name: Resolve release metadata and refuse unsafe releases
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c "import sys; sys.path.insert(0, 'scripts'); from release_version import read_version; print(read_version())")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u -d "@$(git show -s --format=%ct "$GITHUB_SHA")" +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
+          test "${{ github.event_name }}" = pull_request && exit 0
+          test "${{ github.ref }}" = refs/heads/master ||
+            { echo "Releases only publish from refs/heads/master" >&2; exit 1; }
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$version" \
+            --jq '.[] | .ref + " " + .object.sha' | grep -F "refs/tags/v$version " | cut -d' ' -f2 || true)
+          if test -n "$tag" && test "$tag" != "$GITHUB_SHA"; then
+            echo "v$version exists at $tag; bump VERSION instead of moving it" >&2
+            exit 1
+          fi
+      - name: Log in to GHCR for the overwrite check
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reject overwriting a published release version
+        if: github.event_name != 'pull_request'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if docker manifest inspect "$IMAGE:v$VERSION" > /dev/null 2>&1; then
+            echo "$IMAGE:v$VERSION already published; bump VERSION" >&2
+            exit 1
+          fi
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build Linux amd64 image locally
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env:
+          # Dry runs must not require PostHog credentials; publishes upload symbols.
+          POSTHOG_UPLOAD_REQUIRED: ${{ github.event_name == 'pull_request' && 'false' || 'true' }}
+        with:
+          context: .
+          file: docker/build/x86_64/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          build-args: |
+            GITHASH=${{ github.sha }}
+            STASH_VERSION=${{ steps.meta.outputs.version }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            POSTHOG_UPLOAD_REQUIRED=${{ env.POSTHOG_UPLOAD_REQUIRED }}
+            POSTHOG_CLI_PROJECT_ID=${{ vars.POSTHOG_CLI_PROJECT_ID }}
+            POSTHOG_CLI_HOST=${{ vars.POSTHOG_CLI_HOST }}
+            VITE_PUBLIC_POSTHOG_PROJECT_TOKEN=${{ vars.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN }}
+            VITE_PUBLIC_POSTHOG_HOST=${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
+            GITHUB_ACTIONS=true
+            GITHUB_SHA=${{ github.sha }}
+            GITHUB_REF_NAME=${{ github.ref_name }}
+            GITHUB_REPOSITORY=${{ github.repository }}
+            GITHUB_SERVER_URL=${{ github.server_url }}
+          secrets: |
+            POSTHOG_CLI_API_KEY=${{ github.event_name != 'pull_request' && secrets.POSTHOG_CLI_API_KEY || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+      - name: Smoke test container and verify source identity
+        env:
+          EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          docker image inspect --format '{{ .Id }}' "$LOCAL_IMAGE" > image.id
+          docker run --detach --name vexxx-smoke \
+            --publish 127.0.0.1:9999:9999 \
+            --env STASH_HOST=0.0.0.0 \
+            --env POSTHOG_PROJECT_TOKEN=offline-smoke \
+            --env POSTHOG_HOST=http://127.0.0.1:1 \
+            "$(cat image.id)"
+          trap 'docker logs vexxx-smoke; docker rm --force vexxx-smoke' EXIT
+          docker exec vexxx-smoke sh -ec 'test "$POSTHOG_PROJECT_TOKEN" = offline-smoke && test "$POSTHOG_HOST" = http://127.0.0.1:1'
+          curl --fail --silent --show-error --retry 30 \
+            --retry-all-errors --retry-delay 2 --max-time 5 \
+            http://127.0.0.1:9999/ > /dev/null
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$LOCAL_IMAGE")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$LOCAL_IMAGE")" = "$EXPECTED_VERSION"
+          test "$(docker image inspect --format '{{ .Os }}/{{ .Architecture }}' "$LOCAL_IMAGE")" = 'linux/amd64'
+          test "${{ github.event_name }}" = pull_request || docker save "$LOCAL_IMAGE" --output image.tar
+      - name: Transfer tested image to publication job
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tested-image
+          path: image.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish image and tag
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {contents: write, packages: write}
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: {name: tested-image}
+      - name: Log in to GHCR for publication
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested image without rebuilding
+        run: |
+          docker load --input image.tar
+          for tag in "v$VERSION" latest "sha-$GITHUB_SHA"; do
+            docker tag "$LOCAL_IMAGE" "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
+      - name: Tag the release commit and summarize
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/v$VERSION" --jq '.object.sha' 2>/dev/null || true)
+          if test -n "$existing" && test "$existing" != "$GITHUB_SHA"; then
+            echo "v$VERSION moved to $existing during this run; refusing" >&2
+            exit 1
+          fi
+          test -n "$existing" || gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" > /dev/null
+          {
+            echo "Published $IMAGE:v$VERSION + :latest + :sha-$GITHUB_SHA"
+            docker image inspect --format '{{range .RepoDigests}}{{.}}{{end}}' "$IMAGE:v$VERSION"
+            echo "Tagged v$VERSION at $GITHUB_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
