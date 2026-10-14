@@ -22,7 +22,7 @@
     "test": "node --test scripts/posthog-build-config.test.mjs && vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "node --test scripts/posthog-build-config.test.mjs && vitest run --coverage",
     "lint": "npm run lint:js && npm run lint:css",
     "lint:css": "stylelint --cache \"src/**/*.scss\"",
     "lint:js": "eslint --cache src/",

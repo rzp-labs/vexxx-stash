@@ -12,7 +12,7 @@ func TestGenerationStderrRecordDelimitersMatchExclusiveGrammar(t *testing.T) {
 	fragments := []string{
 		"-----BEGIN PRIVATE KEY-----", "------BEGIN RSA PRIVATE KEY-----", "-----END PRIVATE KEY-----",
 		"-----BEGIN PRIVATE PRIVATE KEY-----", "-----BEGIN PPRIVATE KEY-----", "-----BEGIN X PRIVATE KEY------",
-		"-----BEGIN PRIVATE KEY----", "-----BEGIN BAD", "-----END ", "x", "-", " A ",
+		"-----BEGIN PRIVATE KEY----", "-----BEGIN BAD", "-----END ", "x", "-", " A ", "-----BE-", "-----EN-",
 		"-----BEGIN PRIVATE KEY---------END PRIVATE KEY-----", "-----END PRIVATE KEY---------BEGIN PRIVATE KEY-----",
 	}
 	inputs := []string{

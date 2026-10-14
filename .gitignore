@@ -95,3 +95,4 @@ scratch/
 /.claude/skills/integration-go/
 /ui/v2.5/.claude/skills/integration-javascript_web/
 /ui/v2.5/.claude/skills/integration-react-react-router-6/
+.context/compound-engineering/

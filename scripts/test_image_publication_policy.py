@@ -1,5 +1,6 @@
-import json
+import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -254,8 +255,8 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                     with self.subTest(base=base, path=path, draft=draft):
                         result = self.plan(name="pull_request", paths=[path],
                                            event={"pull_request": {"base": {"ref": base}, "draft": draft}})
-                        self.assertEqual(result["deferred"], draft)
-                        self.assertEqual(result["run_tests"], tests and not draft)
+                        self.assertFalse(result["deferred"])
+                        self.assertEqual(result["run_tests"], tests)
                         self.assertEqual(result["build_image"], image and not draft)
                         self.assertFalse(result["publish"])
                         self.assertEqual(result["image_ref"], "")
@@ -327,17 +328,18 @@ class ImagePublicationPolicyTests(unittest.TestCase):
                     self.assertFalse(ready["publish"])
                 draft = self.plan(name="pull_request", paths=[path],
                                   event={"pull_request": {"draft": True}})
-                self.assertTrue(draft["deferred"])
-                self.assertFalse(draft["run_tests"] or draft["build_image"] or draft["publish"])
+                self.assertFalse(draft["deferred"])
+                self.assertTrue(draft["run_tests"] and draft["packaging_pending"])
+                self.assertFalse(draft["build_image"] or draft["publish"])
         self.assertEqual(policy.affected(["scripts/ffmpeg/README.md"]), (False, False))
         self.assertFalse(policy.obligations(["scripts/gpu_generation/benchmark.py"])["build_image"])
 
-    def test_drafts_defer_and_ready_transition_selects_validation(self):
+    def test_drafts_validate_and_hold_packaging_until_authorized(self):
         for draft in (True, False):
             result = self.plan(name='pull_request', paths=['docker/build/x86_64/Dockerfile'],
                                event={'pull_request': {'draft': draft}})
-            self.assertEqual(result['deferred'], draft)
-            self.assertEqual(result['run_tests'], not draft)
+            self.assertFalse(result['deferred'])
+            self.assertTrue(result['run_tests'])
             self.assertEqual(result['build_image'], not draft)
 
     def test_manual_publication_requires_master(self):
@@ -383,9 +385,9 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         for metadata in (None, 'd' * 40, merge):
             pr = {'base': {'sha': BASE}, 'head': {'sha': SHA}, 'merge_commit_sha': metadata}
             with patch.object(policy.subprocess, 'check_output',
-                              return_value=f'{merge} {BASE} {SHA}\n'.encode()) as run:
+                              side_effect=[f'{merge} {BASE} {SHA}\n'.encode(), 't' * 40 + '\n', 't' * 40 + '\n']) as run:
                 policy.validate_pr_merge(Path.cwd(), pr, merge)
-            self.assertEqual(run.call_args.args[0], ['git', 'rev-list', '--parents', '-n', '1', merge])
+            self.assertEqual(run.call_args_list[0].args[0], ['git', 'rev-list', '--parents', '-n', '1', merge])
 
     def test_pr_merge_rejects_wrong_head_base_or_nonmerge_checkout(self):
         merge = 'c' * 40
@@ -503,11 +505,22 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertEqual(validator['env']['PACKAGING_EVIDENCE_PATH'], '/tmp/pr-packaging.json')
         evidence_save = next(step for step in validator['steps'] if step.get('name') == 'Save PR packaging evidence')
         self.assertEqual(evidence_save['with']['path'], '${{ env.PACKAGING_EVIDENCE_PATH }}')
-        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read', 'id-token': 'write'})
+        self.assertEqual(validator['permissions'], {'contents': 'read', 'actions': 'read', 'checks': 'read', 'id-token': 'write'})
         self.assertNotIn('needs', validator)  # Required check starts immediately.
         self.assertNotIn('if', validator)  # It must never be skipped for a draft.
         self.assertFalse(any('login-action' in step.get('uses', '') for step in validator['steps']))
-        self.assertEqual(sum('checkout' in step.get('uses', '') for step in validator['steps']), 1)
+        checkouts = [step for step in validator['steps'] if 'checkout' in step.get('uses', '')]
+        self.assertEqual(len(checkouts), 2)
+        self.assertNotIn('path', checkouts[0].get('with', {}))  # Validation checkout stays intact.
+        source_checkout = checkouts[1]
+        self.assertEqual(source_checkout['name'], 'Checkout exact source for Sonar')
+        self.assertEqual(source_checkout['with']['path'], 'sonar-source')
+        self.assertFalse(source_checkout['with']['persist-credentials'])
+        self.assertEqual(source_checkout['with']['fetch-depth'], 0)
+        self.assertIn('github.event.pull_request.head.sha', source_checkout['with']['ref'])
+        self.assertIn("steps.required_gate.outcome == 'success'", source_checkout['if'])
+        self.assertLess(next(i for i, step in enumerate(validator['steps'])
+                             if step.get('id') == 'required_gate'), validator['steps'].index(source_checkout))
         checks = next(step['run'] for step in validator['steps'] if step.get('id') == 'policy_tests')
         self.assertIn('test_image_publication_policy.py', checks)
         self.assertIn('test_check_intel_runtime.py', checks)
@@ -531,8 +544,7 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         self.assertIn('ready_for_review', document['on']['pull_request']['types'])
         self.assertIn('converted_to_draft', document['on']['pull_request']['types'])
         self.assertEqual(document['env']['POSTHOG_UPLOAD_REQUIRED'], 'false')
-        self.assertIn("'validation-deferred' || 'ci-required'", jobs['ci-required']['name'])
-        self.assertIn('github.event.pull_request.draft', jobs['ci-required']['name'])
+        self.assertEqual(jobs['ci-required']['name'], 'ci-required')
         compiles = [step for step in validator['steps'] if step.get('name', '').startswith('Production ')]
         self.assertEqual(len(compiles), 2)
         for step in compiles:
@@ -583,6 +595,49 @@ class ImagePublicationPolicyTests(unittest.TestCase):
             for step in job["steps"]:
                 if "run" in step:
                     subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True, capture_output=True)
+
+
+    def test_pr_entrypoint_records_full_merge_identity(self):
+        merge = 'c' * 40
+        event = {'number': 65, 'action': 'synchronize',
+                 'pull_request': {'base': {'sha': BASE, 'ref': 'master', 'repo': {'full_name': REPO}},
+                                  'head': {'sha': SHA, 'repo': {'full_name': REPO}}}}
+
+        def git(command, **kwargs):
+            if command[1] == 'rev-parse':
+                return (merge if command[2] == 'HEAD' else 'd' * 40).encode() + b'\n'
+            if command[1] == 'rev-list':
+                return f'{merge} {BASE} {SHA}\n'.encode()
+            if command[1] == 'merge-base':
+                return BASE.encode() + b'\n'
+            if command[1] == 'diff':
+                return b'docs/new.md\0'
+            if command[1] == 'show':
+                return b'1760227200\n'
+            raise AssertionError(command)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_path, output, plan_path, summary = (root / name for name in
+                                                      ('event.json', 'output', 'plan.json', 'summary'))
+            event_path.write_text(json.dumps(event))
+            env = {'GITHUB_EVENT_PATH': str(event_path), 'GITHUB_EVENT_NAME': 'pull_request',
+                   'GITHUB_REF_TYPE': 'branch', 'GITHUB_REF_NAME': 'feature', 'GITHUB_SHA': merge,
+                   'GITHUB_REPOSITORY': REPO, 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1',
+                   'VALIDATION_PLAN_PATH': str(plan_path), 'GITHUB_STEP_SUMMARY': str(summary),
+                   'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, env), patch.object(policy.subprocess, 'check_output', side_effect=git), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                policy.main()
+            written = json.loads(plan_path.read_text())
+            self.assertEqual(written['base'], BASE)
+            self.assertEqual(written['head'], SHA)
+            self.assertEqual(written['target'], 'master')
+            self.assertEqual(written['pr'], 65)
+            self.assertEqual(written['action'], 'synchronize')
+            self.assertEqual(written['merge_base'], BASE)
+            self.assertIn(f'head={SHA}\n', output.read_text())
+            self.assertIn('### Validation plan', summary.read_text())
 
 
 if __name__ == "__main__":

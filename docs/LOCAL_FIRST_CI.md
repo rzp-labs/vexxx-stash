@@ -22,14 +22,40 @@ history or a checkout mismatch fails planning. Master pushes classify the whole
 `before..after` range. The summary records base/head/merge/tree identities and
 selected groups. Unknown paths select all test domains, not an image.
 
-Drafts defer substantive checks and report the separate informational
-`validation-deferred` context. Becoming ready starts the real `ci-required` job
-immediately, before planning and tests, so the required context stays pending
-through validation rather than waiting on a dependent aggregate. It verifies
-planner success, valid domain coverage, generation, selected tests and compilation,
-and any required image build/smoke. Skipped selected steps, failures and cancelled
-runs cannot satisfy it. Superseded PR runs alone are cancelled. Master protection
-requires `ci-required`; this patch does not change repository settings.
+Drafts run affected validation and Sonar automatically under `ci-required`, before
+peer review. The job starts immediately and verifies planner success, valid domain
+coverage, generation, selected tests and compilation. Draft packaging changes
+remain pending separate build authorization. Native validation and Sonar can clear
+first; a final packaging guard keeps `ci-required` unsuccessful until the existing
+ready build and smoke test complete. Missing packaging is never reported as passed. Superseded PR runs alone are cancelled. Master protection and
+the native required `SonarCloud Code Analysis` app check are unchanged.
+
+For same-repository PRs, native tests and reports can be reused from a completed
+run only after independently verifying the complete tracked input inventory,
+workflow bytes, declared variables, current run attempt, artifact digests and actual
+successful generation/test/production-compile steps. An image donor must instead
+prove its real successful Docker build and smoke test with skipped host compiles. Only a `sonar.exclusions`
+configuration change can differ between validation inputs; it always needs a new
+scan. Missing or malformed test evidence executes selected checks normally. An
+artifact assertion alone cannot authorize reuse.
+
+Marking ready requires a completed successful pre-review scan and the native
+Sonar app result for the current head, base, target and complete merge-result Git
+tree. A ready event verifies those identities again and reuses clearance rather
+than scanning twice. A draft packaging donor may have a failed final packaging
+guard, but its native validation, scan and recorded clearance must all pass, and
+that guard must be its sole failed step. Other PR events scan again, including any change after review.
+A base advance or retarget requires new validation; equal head SHAs or diff summaries
+alone are insufficient. Sonar's supported HEAD checkout must have exactly the
+same Git tree as the tested merge. Branches with merge-only changes must be updated.
+
+Pending GitHub mergeability is retried briefly with identities checked each time;
+settled conflicts, changed identities and exhausted retries still fail.
+
+The workflow checks current GitHub PR metadata before validation, before scanning
+and after native clearance. These checks cannot atomically lock the base at merge.
+Server-side strict up-to-date protection or a merge queue with checks on its group
+SHA is needed to close that race; this change neither installs nor bypasses rules.
 
 Deliberate release/manual runs can reuse backend, frontend or Python tests from
 one successful master push at the exact commit and workflow revision. The probe
@@ -38,8 +64,8 @@ attempt, and successful classifier/aggregate/domain steps. The summary records
 source run/attempt, commit/workflow revision, workflow digest and domain coverage.
 Unproven domains execute normally; missing, pending, failed, stale, mismatched or
 inaccessible evidence triggers normal execution. PR checks, tree equality and
-nearby commits are insufficient for release test reuse. Ordinary PR/master tests
-still execute their selected domains.
+nearby commits are insufficient for release test reuse. Ordinary master tests still execute their selected domains; PR reuse follows the
+independent native evidence checks above.
 
 For a packaging-changing PR, a successful real build/smoke can record a small
 seven-day evidence artifact containing identities, hashes, resolved base-image
@@ -100,19 +126,20 @@ For a candidate affecting both application domains, the existing commands are:
 ```sh
 export POSTHOG_UPLOAD_REQUIRED=false
 make pre-ui generate generate-login-locale
-# Same test targets as make test / make it, with cached results disabled.
-go test -count=1 ./...
+# Same test targets as CI; the tagged pass also runs every untagged test.
 go test -count=1 -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
 (cd ui/v2.5 && pnpm test && pnpm run check)
-make ui-only
+# CI's validation compile skips the legacy bundle; images still build it.
+STASH_NOLEGACY=true make ui-only
 make flags-release flags-pie stash
 ```
 
 For backend-only changes, use `make generate-backend generate-login-locale`, the
-same two Go test commands, and `make flags-release flags-pie stash`. The existing
+same tagged Go test command, and `make flags-release flags-pie stash`. The existing
 `touch-ui` generation prerequisite provides the embed placeholder: this compile
 checks backend linking, not a complete UI deliverable. For frontend-only changes,
-use `make pre-ui generate-ui`, the frontend test/type commands, and `make ui-only`.
+use `make pre-ui generate-ui`, the frontend test/type commands, and
+`STASH_NOLEGACY=true make ui-only`.
 Python changes use `python3 -m unittest discover -s scripts -p 'test_*.py'`; when
 present, also run the existing suite in `scripts/gpu_generation`.
 

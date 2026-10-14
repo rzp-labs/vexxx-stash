@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 )
 
@@ -39,5 +40,28 @@ func TestGenerationExecutionCauseRequiresSuccessfulCancelAction(t *testing.T) {
 	original := errors.New("process failure")
 	if got := TrackGenerationExecutionCause(&exec.Cmd{}, ctx)(original); got != original {
 		t.Fatal("missing cancellation action changed error", got)
+	}
+}
+
+func TestGenerationExecutionCauseKeepsNormalExitAfterInterrupt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix subprocess fixture")
+	}
+	err := exec.Command("sh", "-c", "exit 3").Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+		t.Fatal("fixture did not produce an ordinary exit code", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := &exec.Cmd{Cancel: func() error { return nil }}
+	wrap := TrackGenerationExecutionCause(cmd, ctx)
+	cancel()
+	if err := cmd.Cancel(); err != nil {
+		t.Fatal("stub cancel action failed", err)
+	}
+	// A child that exited normally before the kill retains its own exit error.
+	if got := wrap(exit); got != exit {
+		t.Fatal("ordinary exit code was attributed to context cancellation", got)
 	}
 }

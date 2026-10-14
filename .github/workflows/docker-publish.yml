@@ -45,18 +45,21 @@ jobs:
   ci-required:
     # Start the protected context immediately, including repeated ready events at
     # the same SHA. A dependent aggregate would leave an older success visible.
-    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'validation-deferred' || 'ci-required' }}
+    name: ci-required
     runs-on: ubuntu-latest
     timeout-minutes: 80
     permissions:
       contents: read
       actions: read
+      checks: read
       id-token: write
     env:
       # Job env cannot use the runner context. /tmp is outside Docker's context;
       # GitHub-hosted jobs have isolated filesystems, including this proof file.
       VALIDATION_PLAN_PATH: /tmp/vexxx-validation-plan-${{ github.run_id }}-${{ github.run_attempt }}.json
       PACKAGING_EVIDENCE_PATH: /tmp/pr-packaging.json
+      SONAR_VALIDATION_EVIDENCE_PATH: /tmp/validation-evidence.json
+      SONAR_CLEARANCE_PATH: /tmp/sonar-clearance.json
       # Freeze the declared variable inputs for both proof and Docker invocation.
       POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_CLI_PROJECT_ID }}
       POSTHOG_CLI_HOST: ${{ vars.POSTHOG_CLI_HOST }}
@@ -82,6 +85,9 @@ jobs:
           python3 -m unittest discover -s scripts -p test_check_intel_runtime.py
           python3 -m unittest discover -s scripts -p test_reuse_master_validation.py
           python3 -m unittest discover -s scripts -p test_reuse_pr_packaging.py
+          python3 -m unittest discover -s scripts -p test_sonar_scan_policy.py
+          python3 -m unittest discover -s scripts -p test_sonar_classification.py
+          python3 -m unittest discover -s scripts -p test_reuse_sonar_validation.py
       - name: Classify changed inputs and deliberate publication
         id: plan
         run: python3 scripts/image_publication_policy.py
@@ -99,28 +105,28 @@ jobs:
           REQUIRED_BACKEND: ${{ steps.plan.outputs.backend }}
           REQUIRED_FRONTEND: ${{ steps.plan.outputs.frontend }}
           REQUIRED_PYTHON: ${{ steps.plan.outputs.python }}
-        run: python3 scripts/reuse_master_validation.py
+        run: python3 scripts/reuse_sonar_validation.py
 
-      - if: steps.reuse.outputs.execute_backend == 'true'
+      - if: steps.reuse.outputs.execute_backend == 'true' || steps.plan.outputs.sonar_coverage_backend == 'true'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-      - if: steps.reuse.outputs.execute_frontend == 'true'
+      - if: steps.reuse.outputs.execute_frontend == 'true' || steps.plan.outputs.sonar_coverage_frontend == 'true'
         uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 10.34.4
       - name: Configure pnpm store before restoring cache
-        if: steps.reuse.outputs.execute_frontend == 'true'
+        if: steps.reuse.outputs.execute_frontend == 'true' || steps.plan.outputs.sonar_coverage_frontend == 'true'
         # Keep setup-node's cache path aligned with make pre-ui in CI.
         run: pnpm config set store-dir ~/.pnpm-store
-      - if: steps.reuse.outputs.execute_frontend == 'true'
+      - if: steps.reuse.outputs.execute_frontend == 'true' || steps.plan.outputs.sonar_coverage_frontend == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: ui/v2.5/pnpm-lock.yaml
       - name: Install media tools
-        if: steps.reuse.outputs.execute_backend == 'true'
+        if: steps.reuse.outputs.execute_backend == 'true' || steps.plan.outputs.sonar_coverage_backend == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg libvips-tools
@@ -136,22 +142,66 @@ jobs:
         id: backend_test
         if: steps.reuse.outputs.execute_backend == 'true'
         # Keep build/module caches, but execute tests again against this tree.
+        # The tagged pass also compiles and runs every untagged test, so one pass covers both.
         run: |
-          go test -count=1 ./...
-          go test -count=1 -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
+          mkdir -p dist/coverage
+          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
+          test -s dist/coverage/go.out
+      - name: Generate inputs for backend coverage only
+        id: backend_coverage_generate
+        if: steps.plan.outputs.sonar_coverage_backend == 'true'
+        run: make generate-backend generate-login-locale
+      - name: Go coverage only for unchanged backend
+        id: backend_coverage_test
+        if: steps.plan.outputs.sonar_coverage_backend == 'true'
+        run: |
+          mkdir -p dist/coverage
+          go test -count=1 -covermode=atomic -coverprofile=dist/coverage/go.out -tags 'sqlite_stat4 sqlite_math_functions integration' ./...
+          test -s dist/coverage/go.out
+      - name: Retain Go coverage from this validation
+        if: steps.backend_test.outcome == 'success' || steps.backend_coverage_test.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: go-coverage
+          path: dist/coverage/go.out
+          if-no-files-found: error
+          retention-days: 7
       - name: Frontend tests and type check
         id: frontend_test
         if: steps.reuse.outputs.execute_frontend == 'true'
         working-directory: ui/v2.5
         run: |
-          pnpm test
+          pnpm run test:coverage
+          test -s ../../dist/coverage/frontend/lcov.info
           pnpm run check
+      - name: Generate inputs for frontend coverage only
+        id: frontend_coverage_generate
+        if: steps.plan.outputs.sonar_coverage_frontend == 'true'
+        run: make pre-ui generate-ui
+      - name: Frontend coverage only for unchanged frontend
+        id: frontend_coverage_test
+        if: steps.plan.outputs.sonar_coverage_frontend == 'true'
+        working-directory: ui/v2.5
+        run: |
+          pnpm exec vitest run --coverage
+          test -s ../../dist/coverage/frontend/lcov.info
+      - name: Retain frontend coverage from this validation
+        if: steps.frontend_test.outcome == 'success' || steps.frontend_coverage_test.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-coverage
+          path: dist/coverage/frontend/lcov.info
+          if-no-files-found: error
+          retention-days: 7
       - name: Production frontend compilation
         id: frontend_compile
         env:
           BUILD_DATE: ${{ steps.plan.outputs.build_date }}
           GITHASH: ${{ github.sha }}
           STASH_VERSION: ${{ steps.plan.outputs.version }}
+          # Validation-only compile: skip the legacy bundle (~90% of build time).
+          # Image builds and releases still compile it inside Docker.
+          STASH_NOLEGACY: 'true'
         if: steps.reuse.outputs.execute_frontend == 'true' && steps.plan.outputs.build_image != 'true'
         # Image candidates compile once in Docker with release maps/metadata.
         run: make ui-only
@@ -167,11 +217,19 @@ jobs:
       - name: Python regression tests
         id: python_test
         if: steps.reuse.outputs.execute_python == 'true'
-        run: |
-          python3 -m unittest discover -s scripts -p 'test_*.py'
-          if test -d scripts/gpu_generation; then
-            python3 -m unittest discover -s scripts/gpu_generation -p 'test_*.py'
-          fi
+        run: scripts/python_coverage.sh
+      - name: Python coverage only for unchanged scripts
+        id: python_coverage_test
+        if: steps.plan.outputs.sonar_coverage_python == 'true'
+        run: scripts/python_coverage.sh
+      - name: Retain Python coverage from this validation
+        if: steps.python_test.outcome == 'success' || steps.python_coverage_test.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-coverage
+          path: dist/coverage/python.xml
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Build Linux amd64 image locally
         id: image_build
@@ -260,6 +318,12 @@ jobs:
           REUSE_ATTEMPT: ${{ steps.reuse.outputs.reuse_attempt }}
           REUSE_REVISION: ${{ steps.reuse.outputs.reuse_revision }}
           REUSE_WORKFLOW_DIGEST: ${{ steps.reuse.outputs.reuse_workflow_digest }}
+          PR_EVENT: ${{ github.event_name == 'pull_request' }}
+          PR_REUSE_VALIDATED: ${{ steps.reuse.outputs.pr_reuse_validated }}
+          REUSE_INPUT_DIGEST: ${{ steps.reuse.outputs.reuse_input_digest }}
+          CURRENT_INPUT_DIGEST: ${{ steps.reuse.outputs.current_input_digest }}
+          REUSE_TREE: ${{ steps.reuse.outputs.reuse_tree }}
+          PACKAGING_PENDING: ${{ steps.plan.outputs.packaging_pending }}
           BUILD_IMAGE: ${{ steps.plan.outputs.build_image }}
           PACKAGING_REUSED: ${{ steps.packaging_reuse.outputs.reused }}
           EXECUTE_IMAGE: ${{ steps.packaging_reuse.outputs.execute_image }}
@@ -299,8 +363,8 @@ jobs:
           if e['PLAN_RESULT'] != 'success':
               errors.append('Planner did not succeed')
           draft = e['DRAFT_EVENT'] == 'true'
-          if e['DRAFT_EVENT'] not in ('true', 'false') or e['DEFERRED'] != ('true' if draft else 'false'):
-              errors.append('Draft event does not match planner deferral')
+          if e['DRAFT_EVENT'] not in ('true', 'false') or e['DEFERRED'] != 'false':
+              errors.append('Automatic validation must not be deferred')
           reused = False
           for domain in ('BACKEND', 'FRONTEND', 'PYTHON'):
               values = [e[domain], e['REQUIRED_' + domain], e['REUSED_' + domain]]
@@ -319,13 +383,21 @@ jobs:
                   if e[domain + '_COMPILE_RESULT'] != ('success' if compile_selected else 'skipped'):
                       errors.append('Unexpected production compile outcome: ' + domain)
               reused |= reuse
-              if draft and (execute or required or reuse):
-                  errors.append('Draft must defer substantive checks')
-          if reused and (e['REUSE_ALLOWED'] != 'true' or not re.fullmatch(r'[1-9][0-9]*', e['REUSE_RUN']) or
-                         not re.fullmatch(r'[1-9][0-9]*', e['REUSE_ATTEMPT']) or
-                         e['REUSE_REVISION'] != e['EXPECTED_SHA'] or
-                         not re.fullmatch(r'[0-9a-f]{64}', e['REUSE_WORKFLOW_DIGEST'])):
-              errors.append('Missing exact workflow/source proof')
+
+          if reused:
+              valid = (re.fullmatch(r'[1-9][0-9]*', e['REUSE_RUN']) and
+                       re.fullmatch(r'[1-9][0-9]*', e['REUSE_ATTEMPT']) and
+                       re.fullmatch(r'[0-9a-f]{64}', e['REUSE_WORKFLOW_DIGEST']))
+              if e.get('PR_EVENT') == 'true':
+                  valid = (valid and e.get('PR_REUSE_VALIDATED') == 'true' and
+                           re.fullmatch(r'[0-9a-f]{64}', e.get('CURRENT_INPUT_DIGEST', '')) and
+                           e.get('REUSE_INPUT_DIGEST') == e.get('CURRENT_INPUT_DIGEST') and
+                           re.fullmatch(r'[0-9a-f]{40}', e.get('REUSE_TREE', '')))
+              else:
+                  valid = (valid and e['REUSE_ALLOWED'] == 'true' and
+                           e['REUSE_REVISION'] == e['EXPECTED_SHA'])
+              if not valid:
+                  errors.append('Missing exact workflow/source proof')
           required_groups = [e['REQUIRED_' + key] for key in ('BACKEND', 'FRONTEND', 'PYTHON')]
           if e['REQUIRED_TESTS'] not in ('true', 'false') or (e['REQUIRED_TESTS'] == 'true') != ('true' in required_groups):
               errors.append('Required tests do not match planned domains')
@@ -362,11 +434,32 @@ jobs:
           with Path(e['GITHUB_STEP_SUMMARY']).open('a') as summary:
               summary.write('\n\n' + (
               '\n'.join(errors) if errors else (
-                  'Draft: validation deferred. This informational context is not ci-required; ready-for-review starts required validation.'
-                  if draft else 'All selected validation obligations passed (executed, proven exact-master tests, or verified equivalent PR packaging).')))
+                  'All selected native validation obligations passed (executed or verified equivalent native results).' +
+                  (' Packaging remains unverified; the final required job will fail until authorized validation.'
+                   if e.get('PACKAGING_PENDING') == 'true' else ''))))
           if errors:
               raise SystemExit('\n'.join(errors))
           PYCODE
+
+      - name: Record executed native validation
+        id: validation_record
+        if: >-
+          steps.required_gate.outcome == 'success' &&
+          (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/master'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXECUTED_BACKEND: ${{ steps.reuse.outputs.execute_backend }}
+          EXECUTED_FRONTEND: ${{ steps.reuse.outputs.execute_frontend }}
+          EXECUTED_PYTHON: ${{ steps.reuse.outputs.execute_python }}
+        run: python3 scripts/reuse_sonar_validation.py record-validation
+      - name: Save executed validation evidence
+        if: steps.validation_record.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: validation-evidence-${{ github.run_attempt }}
+          path: ${{ env.SONAR_VALIDATION_EVIDENCE_PATH }}
+          if-no-files-found: error
+          retention-days: 7
 
       # Proof includes a GitHub-signed receipt bound to its hash, never an image.
       - name: Record PR packaging evidence
@@ -386,6 +479,92 @@ jobs:
           path: ${{ env.PACKAGING_EVIDENCE_PATH }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Explain Sonar scope and imported coverage
+        if: steps.plan.outcome == 'success'
+        env:
+          SCAN: ${{ steps.plan.outputs.sonar_scan }}
+          STATUS: ${{ steps.plan.outputs.sonar_status }}
+          ADDED_DOMAINS: ${{ steps.plan.outputs.sonar_added_domains }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as f:
+              f.write('\nSonar scan: ' + os.environ['SCAN'] + '; policy: ' + os.environ['STATUS'] +
+                      '; added test domains: ' + (os.environ['ADDED_DOMAINS'] or 'none') + '\n')
+          PY
+      - name: Checkout exact source for Sonar
+        if: steps.plan.outputs.sonar_scan == 'true' && steps.required_gate.outcome == 'success' && steps.reuse.outputs.sonar_clearance_reused != 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          path: sonar-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source identity and reuse this run's coverage
+        id: sonar_reports
+        if: steps.plan.outputs.sonar_scan == 'true' && steps.required_gate.outcome == 'success' && steps.reuse.outputs.sonar_clearance_reused != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TESTED_SHA: ${{ github.sha }}
+          ANALYSIS_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          GO_REPORTS: ${{ steps.plan.outputs.sonar_go_paths }}
+          LCOV_REPORTS: ${{ steps.plan.outputs.sonar_lcov_paths }}
+          PYTHON_REPORTS: ${{ steps.plan.outputs.sonar_python_paths }}
+        run: python3 scripts/sonar_scan_policy.py
+      - name: Cache Sonar analyzer downloads
+        if: steps.plan.outputs.sonar_scan == 'true' && steps.sonar_reports.outcome == 'success'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+      - name: Submit analysis to the existing Sonar project
+        id: sonar_scan
+        if: >-
+          steps.plan.outputs.sonar_scan == 'true' && steps.sonar_reports.outcome == 'success' &&
+          ((github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master') ||
+           (github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            github.event.pull_request.base.repo.full_name == github.repository &&
+            github.event.pull_request.base.ref != ''))
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          projectBaseDir: sonar-source
+          args: >-
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.scm.revision=${{ steps.plan.outputs.head || github.sha }}
+            -Dsonar.go.coverage.reportPaths=${{ steps.plan.outputs.sonar_go_paths }}
+            -Dsonar.javascript.lcov.reportPaths=${{ steps.plan.outputs.sonar_lcov_paths }}
+            -Dsonar.python.coverage.reportPaths=${{ steps.plan.outputs.sonar_python_paths }}
+
+      - name: Record current native Sonar clearance
+        id: sonar_record
+        if: github.event_name == 'pull_request' && steps.sonar_scan.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SONAR_SCAN_STARTED_AT: ${{ steps.sonar_reports.outputs.scan_started_at }}
+          SONAR_SCAN_SUCCEEDED: 'true'
+        run: python3 scripts/reuse_sonar_validation.py record-clearance
+      - name: Save current Sonar clearance
+        if: steps.sonar_record.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sonar-clearance-${{ github.run_attempt }}
+          path: ${{ env.SONAR_CLEARANCE_PATH }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # Draft packaging must not prevent native validation or pre-review Sonar.
+      # Keep ci-required unsuccessful until the existing ready build/smoke runs.
+      - name: Require selected packaging validation
+        if: steps.plan.outputs.packaging_pending == 'true'
+        run: |
+          echo 'Packaging remains unverified; authorize the existing ready build and smoke test before merge.'
+          exit 1
 
   publish:
     needs: ci-required

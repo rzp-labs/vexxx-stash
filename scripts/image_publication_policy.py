@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 from release_version import development_version, read_version, validate_version
+from sonar_scan_policy import properties, scanner_plan
 
 RELEASE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -77,16 +78,19 @@ def affected(paths):
     return any(groups[key] for key in ("backend", "frontend", "python")), groups["build_image"]
 
 
-def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_id="1", attempt="1", declared_version=None):
+def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_id="1", attempt="1", declared_version=None, sonar_enabled=False):
     if not SHA.fullmatch(sha) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("invalid source identity")
     local = "vexxx-ci:" + sha
     declared_version = validate_version(declared_version if declared_version is not None else read_version())
     result = {"run_tests": False, "backend": False, "frontend": False, "python": False,
-              "deferred": False, "build_image": False, "publish": False,
+              "deferred": False, "build_image": False, "packaging_pending": False, "publish": False,
               "local_ref": local, "image_ref": "", "sha_ref": "", "latest_ref": "",
               "release_version": declared_version, "version": development_version(declared_version, sha)}
     if event.get("deleted"):
+        result.update(sonar_scan=False, sonar_status='deleted', sonar_added_domains='',
+                      sonar_go_paths='', sonar_lcov_paths='',
+                      sonar_coverage_backend=False, sonar_coverage_frontend=False)
         return result
     if event_name == "push" and ref_type == "tag":
         # The workflow glob is only a prefilter. This is the exact version gate.
@@ -129,10 +133,22 @@ def plan(event_name, ref_type, ref_name, sha, repository, event, paths=(), run_i
         groups = obligations(paths)
         result.update(groups, run_tests=any(groups[key] for key in ("backend", "frontend", "python")))
         if event_name == "pull_request" and event.get("pull_request", {}).get("draft"):
-            result.update(deferred=True, run_tests=False, backend=False, frontend=False,
-                          python=False, build_image=False)
+            # Drafts perform affected validation and Sonar before peer review.
+            # Packaging remains an explicit, separately authorized operation.
+            result.update(packaging_pending=result['build_image'], build_image=False)
     else:
         raise ValueError("unsupported publication event")
+    groups, scan = scanner_plan(event_name, ref_type, ref_name, repository, event,
+                                paths, {key: result[key] for key in
+                                ('backend', 'frontend', 'python', 'build_image')},
+                                properties(Path(__file__).resolve().parent.parent),
+                                enabled=sonar_enabled)
+    if scan['sonar_status'] in ('fork_or_missing_trust_metadata', 'missing_target_branch'):
+        # Retargeting can retain an older same-SHA Sonar success. Fail this fresh
+        # required validation run; absence of a new Sonar check is not a blocker.
+        raise ValueError('Unsupported Sonar PR scope: ' + scan['sonar_status'])
+    result.update(groups, **scan)
+    result['run_tests'] = any(result[key] for key in ('backend', 'frontend', 'python'))
     return result
 
 
@@ -185,6 +201,8 @@ def validate_pr_merge(cwd, pr, checkout):
         ["git", "rev-list", "--parents", "-n", "1", checkout], cwd=cwd, timeout=60).decode().split()
     if parents != [checkout, base, head]:
         raise ValueError("checkout is not the expected PR base/head merge")
+    from sonar_scan_policy import verify_source_snapshot, properties
+    verify_source_snapshot(cwd, checkout, head, properties(cwd))
 
 
 def main():
@@ -204,13 +222,15 @@ def main():
         name == "pull_request" or (name == "push" and kind == "branch" and not event.get("deleted"))) else []
     result = plan(name, kind, os.environ["GITHUB_REF_NAME"], os.environ["GITHUB_SHA"],
                   os.environ["GITHUB_REPOSITORY"], event, paths,
-                  os.environ.get("GITHUB_RUN_ID", "1"), os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
+                  os.environ.get("GITHUB_RUN_ID", "1"), os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
+                  sonar_enabled=True)
     timestamp = subprocess.check_output(["git", "show", "-s", "--format=%ct", sha], timeout=60).decode().strip()
     build_date = datetime.fromtimestamp(int(timestamp), timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     result.update(checkout=sha, tree=tree, build_date=build_date)
     if name == "pull_request":
         pr = event["pull_request"]
-        result.update(base=pr["base"]["sha"], head=pr["head"]["sha"])
+        result.update(base=pr["base"]["sha"], head=pr["head"]["sha"],
+                      target=pr['base']['ref'], pr=event['number'], action=event.get('action', ''))
         result["merge_base"] = subprocess.check_output(
             ["git", "merge-base", result["base"], result["head"]], timeout=60).decode().strip()
     elif name == "push":
