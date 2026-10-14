@@ -1,12 +1,14 @@
 import json
+import os
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import image_publication_policy as publication
-from sonar_scan_policy import COVERAGE, parse_properties, properties, scanner_plan, verify_source_snapshot, prepare_source_reports, verify_current_pr
+from sonar_scan_policy import COVERAGE, parse_properties, properties, scanner_plan, matches, verify_source_snapshot, prepare_source_reports, verify_current_pr
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = 'rzp-labs/vexxx-stash'
@@ -431,6 +433,75 @@ class CurrentPRIdentityTests(unittest.TestCase):
             return next(responses)
         with self.assertRaisesRegex(ValueError, 'base changed'):
             verify_current_pr(api, self.plan, REPO, sleeper=lambda _: None)
+
+
+class ScanPolicyRemainingTests(unittest.TestCase):
+    def test_single_character_wildcards_stay_within_one_component(self):
+        self.assertTrue(matches('assets/a.png', 'assets/?.png'))
+        self.assertFalse(matches('assets/deep/a.png', 'assets/?.png'))
+        self.assertFalse(matches('assets/.png', 'assets/?.png'))
+        self.assertTrue(matches('a/b/c.py', '**/c.py'))
+        self.assertFalse(matches('a/b/c.py', '*/c.py'))
+
+    def test_current_pr_rejects_nonnumeric_numbers_and_repo_identity(self):
+        self.plan = {'pr': 'x', 'head': SHA, 'base': 'b' * 40, 'target': 'master', 'tree': 'c' * 40}
+        for number in ('x', -1, True, 0):
+            with self.subTest(number=number):
+                with self.assertRaisesRegex(ValueError, 'invalid PR number'):
+                    verify_current_pr(lambda p: self.fail(p), {**self.plan, 'pr': number}, REPO)
+        self.plan = {'pr': 65, 'head': SHA, 'base': 'b' * 40, 'target': 'master', 'tree': 'c' * 40}
+        for side in ('head', 'base'):
+            pr = {'state': 'open', 'mergeable': True, 'merge_commit_sha': 'd' * 40,
+                  'head': {'sha': self.plan['head'], 'repo': {'full_name': REPO}},
+                  'base': {'sha': self.plan['base'], 'ref': 'master', 'repo': {'full_name': REPO}}}
+            pr[side]['repo']['full_name'] = 'other/fork'
+            with self.subTest(side=side), self.assertRaisesRegex(ValueError, 'PR repository changed'):
+                verify_current_pr(lambda path: pr, self.plan, REPO)
+
+    def test_report_selection_rejects_unconfigured_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
+            (root / 'sonar-source').mkdir()
+            with patch('sonar_scan_policy.verify_source_snapshot'), \
+                    patch('sonar_scan_policy.subprocess.check_output', return_value=SHA + '\n'):
+                with self.assertRaisesRegex(ValueError, 'unexpected coverage report path'):
+                    prepare_source_reports(root, root / 'sonar-source', SHA, SHA, 'secret/coverage.txt', '')
+
+    def test_entrypoint_binds_pr_identity_and_records_scan_start(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
+            (root / 'sonar-source').mkdir()
+            plan_path = root / 'plan.json'
+            plan_path.write_text(json.dumps({'pr': 'invalid'}))
+            output = root / 'outputs'
+            env = {'GITHUB_EVENT_NAME': 'pull_request', 'VALIDATION_PLAN_PATH': str(plan_path),
+                   'GITHUB_REPOSITORY': REPO, 'TESTED_SHA': SHA, 'ANALYSIS_SHA': SHA,
+                   'GO_REPORTS': '', 'LCOV_REPORTS': '', 'PYTHON_REPORTS': '',
+                   'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, env, clear=True), \
+                    patch('pathlib.Path.cwd', return_value=root), \
+                    patch('sonar_scan_policy.subprocess.check_output', return_value=SHA + '\n'):
+                with self.assertRaisesRegex(ValueError, 'invalid PR number'):
+                    runpy.run_path(str(ROOT / 'scripts/sonar_scan_policy.py'), run_name='__main__')
+                self.assertFalse(output.exists())
+                os.environ['GITHUB_EVENT_NAME'] = 'push'
+                runpy.run_path(str(ROOT / 'scripts/sonar_scan_policy.py'), run_name='__main__')
+            line = output.read_text().strip()
+            self.assertTrue(line.startswith('scan_started_at='))
+            from datetime import datetime
+            self.assertIsNotNone(datetime.fromisoformat(line.split('=', 1)[1]).tzinfo)
+    def test_scan_entry_requires_full_analysis_revision(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'sonar-project.properties').write_text((ROOT / 'sonar-project.properties').read_text())
+            (root / 'sonar-source').mkdir()
+            with patch('sonar_scan_policy.subprocess.check_output') as run, \
+                    self.assertRaisesRegex(ValueError, 'invalid analysis revision'):
+                prepare_source_reports(root, root / 'sonar-source', SHA, 'refs/heads/master', '', '')
+            run.assert_not_called()
+
 
 
 if __name__ == '__main__':
