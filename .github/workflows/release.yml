@@ -199,3 +199,41 @@ jobs:
             test "$SKIP" = true || docker image inspect --format '{{range .RepoDigests}}{{.}}{{end}}' "$IMAGE:v$VERSION"
             echo "Tagged v$VERSION at $GITHUB_SHA"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Records the release in Linear's "Vexxx" pipeline (continuous, production)
+  # with the VEX issues from commits since the previous version tag. Linear
+  # generates the release notes itself: the pipeline has auto-generate release
+  # notes on completion enabled. Separate from publish so a Linear outage never
+  # blocks the image; re-run this job alone to retry.
+  linear-release:
+    name: Record Linear release
+    needs: [build, publish]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      LINEAR_ACCESS_KEY: ${{ secrets.LINEAR_ACCESS_KEY }}
+    steps:
+      - if: env.LINEAR_ACCESS_KEY == ''
+        run: echo "::warning::LINEAR_ACCESS_KEY is not set; no Linear release recorded for v$VERSION"
+      - if: env.LINEAR_ACCESS_KEY != ''
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: {fetch-depth: 0, persist-credentials: false}
+      - name: Find the previous release tag
+        id: base
+        if: env.LINEAR_ACCESS_KEY != ''
+        run: |
+          prev=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | awk -v cur="v$VERSION" '$0 == cur {exit} {p = $0} END {print p}')
+          echo "Scanning ${prev:-<pipeline baseline>}..$GITHUB_SHA"
+          echo "ref=$prev" >> "$GITHUB_OUTPUT"
+      - if: env.LINEAR_ACCESS_KEY != ''
+        uses: linear/linear-release-action@30f9ae77461ec29f07fffe0c52edd1909bfbb6f5 # v0.18.1
+        with:
+          access_key: ${{ env.LINEAR_ACCESS_KEY }}
+          name: v${{ env.VERSION }}
+          version: v${{ env.VERSION }}
+          base_ref: ${{ steps.base.outputs.ref }}
+          links: |
+            Image=https://github.com/${{ github.repository }}/pkgs/container/vexxx-stash
+            Release run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
