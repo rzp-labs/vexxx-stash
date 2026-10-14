@@ -6,28 +6,36 @@ run the affected complete checks once after the inputs stop changing. Existing G
 build/module caches and the pnpm store remain useful; cached passing test results
 are not acceptance evidence.
 
-| Changed inputs | Local and CI confirmation | Automatic image |
+| Changed inputs | Local confirmation | Automatic image |
 | --- | --- | --- |
 | Backend source/tests or Go dependencies | Generate backend/login locales; unit and integration tests; production backend compile | No |
-| Frontend source/tests or pnpm dependencies | Frozen install; generate operations; Vitest; TypeScript | No |
+| Frontend source/tests or pnpm dependencies | Frozen install; generate operations; Vitest; TypeScript; production UI compile | No |
 | Schema, generators, workflow, unknown/shared inputs | Both domains and Python regression tests | No |
 | Python scripts | Python regression suites | No |
 | UI locale inputs | Both domains | No |
 | Docker packaging, `.dockerignore`, Makefile, runtime packaging probe | Both domains plus build/startup smoke of Linux amd64 image | Yes |
-| Explicit documentation paths | Cheap change-detection and aggregate jobs | No |
+| Explicit documentation paths | No domain checks | No |
+
+On PRs, `ci.yml` runs only the matching domain jobs (ui changes → `frontend`,
+scripts → `python`, most other paths → `backend`+`frontend`+`python`, Docker
+inputs → `image`); docs-only PRs run no domain jobs. On `merge_group` and
+`master` pushes every domain runs, plus production compiles (`make ui-only` in
+`frontend`, `make flags-release flags-pie stash` in `backend`) that PRs skip.
 
 ## CI pipeline
 
 `ci.yml` runs on pull requests, merge groups, and pushes to `master`. A `changes`
-job detects which inputs changed; `backend`, `frontend`, `python`, and `image`
-(Docker-packaging changes only) run in parallel, plus `branch-name` on PRs and a
-`sonar` scan. The aggregate `ci-required` job is the required check on `master`.
-Pushing to a PR branch cancels its in-progress run. Each run executes its jobs
-fresh; there is no cross-run evidence reuse, so master branch protection (and the
-merge queue, once enabled) is what guarantees the tested tree is what lands.
+job classifies PR inputs; `backend`, `frontend`, `python`, and `image` run in
+parallel, plus `branch-name` on PRs and a `sonar` scan on PRs and `master`
+pushes (not `merge_group`). The aggregate `ci-required` job is the required
+check on `master`. Pushing to a PR branch cancels its in-progress run. Each run
+executes its jobs fresh; there is no cross-run evidence reuse, so master branch
+protection (and the merge queue, once enabled) is what guarantees the tested
+tree is what lands.
 
-PR runs do not build a production frontend bundle or push images. When a PR
-touches Docker packaging, the `image` job builds and smoke-tests the real
+PR runs do not build a production frontend or backend bundle. The `image` job
+runs on PRs only when Docker packaging inputs changed; on `merge_group` and
+`master` it always runs. Either way it builds and smoke-tests the real
 `linux/amd64` image but publishes nothing.
 
 ## Existing commands
@@ -89,9 +97,10 @@ Before 1.0, document compatibility changes in the release notes.
 
 Released application/UI metadata, the OCI version label, PostHog `$app_version`
 and UI source-map release version use `0.1.0`; Git and GHCR tags use `v0.1.0`.
-The commit SHA remains separate revision/build provenance. Local and ordinary CI
-builds use `0.1.0-dev+sha.<12hex>`; a feature name or transport tag is never the
-application version. `make` resolves this default with Python 3 and `VERSION`.
+The commit SHA remains separate revision/build provenance. Local `make` builds
+default to `0.1.0-dev+sha.<12hex>` (resolved with Python 3 and `VERSION`); CI
+builds instead stamp `STASH_VERSION` straight from `VERSION`. A feature name or
+transport tag is never the application version.
 The release build bakes the version into the backend and UI before compiling.
 
 Releasing is a normal reviewed change: open a PR from a `release-vX.Y.Z` branch

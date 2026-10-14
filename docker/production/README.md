@@ -98,8 +98,13 @@ Releasing is automatic: when a `VERSION` bump lands on `master`,
 smoke-tests it, and pushes that same image to
 `ghcr.io/rzp-labs/vexxx-stash` as `vX.Y.Z`, `latest` and `sha-<commit>`, then
 creates the git tag `vX.Y.Z`. It does not re-run tests (master already required
-`ci-required`) and refuses to overwrite an existing version tag. To re-run the
-release build manually, use `workflow_dispatch` on release.yml.
+`ci-required`) and refuses to overwrite an existing version tag. To re-run
+manually, use `workflow_dispatch` on release.yml: a dispatch retries an
+unpublished release, or — when `vX.Y.Z` was already published from the same
+commit — finishes any missing `latest`/`sha-` aliases and the git tag without
+rebuilding. A version already published from another commit fails; release a
+new `VERSION` instead. Registry lookup failures refuse publication rather than
+treating the version as absent.
 
 The release job uses `GITHUB_TOKEN` with `packages: write`; no PAT is needed in
 repository secrets. After the first successful publication, set the package's

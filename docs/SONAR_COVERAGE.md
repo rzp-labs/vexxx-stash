@@ -56,8 +56,8 @@ V8 coverage. Vitest includes untested `src/**/*.{ts,tsx}` files and writes
 `scripts/gpu_generation/`) under coverage.py, which is installed with hash pinning
 from `scripts/coverage-requirements.txt` into a venv that keeps the runner's
 system PyYAML. `scripts/coverage.ini` measures all of `scripts/` and writes
-repository-relative paths, so `dist/coverage/python.xml` (Cobertura) resolves from
-Sonar's `sonar-source` checkout. The hyphenated `scripts/ffmpeg/build-*.py` image
+repository-relative paths, so `dist/coverage/python.xml` (Cobertura) resolves
+against the scanner's repo-root checkout. The hyphenated `scripts/ffmpeg/build-*.py` image
 build scripts are not importable and are not measured. There is no fabricated
 report for build scripts or other languages.
 
@@ -96,26 +96,23 @@ history is fetched and the scanner uses the actual HEAD checkout. The merge
 queue runs its own `ci-required` jobs before landing. Forks do not receive the
 token. Release runs do not scan.
 
-PR scans import the coverage reports produced by that run's `backend`,
-`frontend` and `python` jobs. The `sonar` job waits for its actual quality gate;
-the `SonarCloud Code Analysis` app check on `master` remains required alongside
-`ci-required`. Missing or empty reports fail the scan. No partial PR import is
+The `sonar` job downloads the `go-coverage`, `frontend-coverage` and
+`python-coverage` artifacts only from the domain jobs that succeeded in that
+run, then scans and waits for its actual quality gate. It does not run on
+`merge_group` (the `master` push covers the landed tree). The `SonarCloud Code
+Analysis` app check on `master` remains required alongside `ci-required`.
+Domain jobs require their report to be nonempty; no partial-domain import is
 presented as full-project coverage.
 
 A master push imports the Go profile, frontend LCOV and Python Cobertura XML
 produced by that push's `ci.yml` run.
 
-The snippet's analyzer cache is used once at `~/.sonar/cache`. It is separate from
-the action's scanner-binary tool cache. Existing checkout pins, full history, required `SonarCloud Code Analysis` identity, and merge protections are
-preserved. The commented placeholder build/test job is not introduced.
-
-The scanner checkout must not live under a dot-directory. Early runs used
-`.sonar-source` as `projectBaseDir`; the scanner marks every file below a hidden
-base directory as hidden, and only sensors that opt into hidden files (IaC, text
-and secrets) received them. Go, JavaScript/TypeScript, CSS and Python sensors were
-skipped, so the project reported 851 IaC lines across 9 files and imported no
-coverage. The checkout is now `sonar-source`, and the workflow test rejects any
-hidden path component in `projectBaseDir`.
+The `sonar` job checks out the repository root with full history and relies on
+the scan action's own caches; there is no separate analyzer-cache or
+`projectBaseDir` configuration. Historical note: an earlier workflow checked
+out under a hidden `.sonar-source` directory, which made the scanner treat
+every file as hidden and skip the Go/JavaScript/CSS/Python sensors. Scanning
+from the repo root avoids that failure mode.
 
 Before marking VEX-119 complete, inspect real PR and master scanner logs for Go/LCOV
 imports and unresolved paths, compare representative covered/uncovered files and

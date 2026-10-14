@@ -67,10 +67,11 @@ bound aggregate memory. Upload-enabled map builds use the locally verified
 4 GiB. The launcher and Vite share the exact upload-eligibility predicate.
 
 Normal PR/master validation neither publishes images nor exposes the PostHog
-personal upload key. Docker source/symbol uploads require deliberate publication
-eligibility AND the planner output; the credential expression independently
-rejects PR and normal master events. BuildKit mounts the key only for those build
-steps. Package-write permissions remain in the separately guarded publisher.
+personal upload key. Only `release.yml`'s build job mounts the upload secret,
+and only for `master` push and `workflow_dispatch` runs; PR dry runs of
+release.yml and `ci.yml`'s image job mount an empty secret and build with
+`POSTHOG_UPLOAD_REQUIRED=false`. BuildKit mounts the key only for those build
+steps. Package-write permissions remain in the separately guarded publish job.
 The backend CLI is pinned to 0.16.2, matching the frontend lockfile.
 
 The existing `build-release-posthog-linux` and `build-release-posthog-macos`
