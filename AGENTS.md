@@ -59,6 +59,23 @@ Write every report, summary, or handoff to the user through the `ce-noslop` skil
 When the user asks for a commit message, **only output the message text** — do not stage files or run `git commit`. Leave all git operations (add, commit, push, branch, etc.) to the user.
 Do not infer Git authorization from review classification or routine coding work.
 
+### Issues and branches
+
+When the user has authorized branching or opening a PR:
+
+- Work is tracked in the Linear team `VEX`. Use the `linear` CLI to find or create
+  the issue first (`linear issue view VEX-123`,
+  `linear issue create --team VEX -t "<title>" --description-file <file>`).
+- Create the branch with `linear issue start VEX-123 --from-ref origin/master`.
+  It uses the issue's Linear branch name (`username/vex-123`), which is the
+  required format: `username/vex-123` plus an optional hyphenated suffix. The only
+  other accepted names are `release-vX.Y.Z` for releases and a few legacy
+  branches ([contribution guide](docs/CONTRIBUTING.md)). The `branch-name` CI job
+  (`scripts/check_branch_name.py`) fails `ci-required` for any other name.
+- Start the PR title with the issue ID (`VEX-123: …`). Squash merges keep it in the
+  commit subject, which is how Linear links the issue and attaches it to a release.
+- `master` lands through the merge queue: `gh pr merge <n> --squash` queues the PR.
+
 ## Cursor Cloud specific instructions
 
 - The image Go is 1.22 and `node` on `PATH` may be 22. This repo needs Go 1.26 (`go.mod`) and Node 24 (CI). The environment install puts Go 1.26.9 in `/usr/local/go` and Node 24.21.0 plus pnpm 10.33.4 in `/usr/local/node`. `/etc/profile.d/vexxx-dev.sh` prepends those directories and sets `GOTOOLCHAIN=local`. Non-login shells need the same `PATH` or they will build with the wrong toolchain.
