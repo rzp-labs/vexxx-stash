@@ -12,6 +12,35 @@ from sonar_scan_policy import properties, scanner_plan
 RELEASE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 SHA = re.compile(r"[0-9a-f]{40}")
 LABEL = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+NAMING_REPOSITORY = "rzp-labs/vexxx-stash"
+ISSUE_BRANCH = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*/[Vv][Ee][Xx]-[1-9][0-9]*(?:-[A-Za-z0-9]+)*")
+LEGACY_BRANCHES = frozenset(("master", "codex/ct102-media-generation", "feat/posthog-instrumentation"))
+
+
+def validate_pr_source_branch(repository, pr):
+    """Validate source metadata; only repository-owned heads receive exceptions."""
+    if repository != NAMING_REPOSITORY:
+        return
+    head = pr.get("head") if isinstance(pr, dict) else None
+    branch = head.get("ref") if isinstance(head, dict) else None
+    head_repo = head.get("repo") if isinstance(head, dict) else None
+    full_name = head_repo.get("full_name") if isinstance(head_repo, dict) else None
+    if not isinstance(branch, str) or not branch or not isinstance(full_name, str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name):
+        raise ValueError("missing or malformed PR source branch/repository metadata")
+    if ISSUE_BRANCH.fullmatch(branch):
+        return
+    if full_name == repository:
+        if branch in LEGACY_BRANCHES or branch.startswith("release-") and RELEASE.fullmatch(branch[8:]):
+            return
+        author = pr.get("user")
+        if (branch.startswith("dependabot/") and len(branch) > len("dependabot/")
+                and isinstance(author, dict) and author.get("login") == "dependabot[bot]"
+                and author.get("type") == "Bot"):
+            return
+    raise ValueError("PR source branch must use username/VEX-123 with an optional hyphenated suffix; "
+                     "only same-repository master, exact legacy branches, release-vX.Y.Z, "
+                     "and verified Dependabot branches are exempt")
 
 
 def obligations(paths):
@@ -183,6 +212,7 @@ def main():
     tree = checkout_identity(Path.cwd(), sha)
     if name == "pull_request":
         validate_pr_merge(Path.cwd(), event["pull_request"], sha)
+        validate_pr_source_branch(os.environ["GITHUB_REPOSITORY"], event["pull_request"])
     if name == "push" and kind == "branch" and not event.get("deleted") and event["after"] != sha:
         raise ValueError("checkout is not the landed revision")
     if name == "push" and kind == "tag" and not event.get("deleted"):

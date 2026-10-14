@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from copy import deepcopy
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,6 +24,166 @@ class ImagePublicationPolicyTests(unittest.TestCase):
     def plan(self, name="push", kind="branch", ref="master", paths=(), event=None, **kwargs):
         kwargs.setdefault('declared_version', '0.1.0')
         return policy.plan(name, kind, ref, SHA, REPO, event or {}, paths, **kwargs)
+
+    def source_pr(self, branch='codex/vex-117', repository=REPO, **kwargs):
+        return {'head': {'ref': branch, 'repo': {'full_name': repository}}, **kwargs}
+
+    def test_issue_source_names_accept_case_and_hyphenated_suffixes_from_forks(self):
+        for repository in (REPO, 'contributor/vexxx-stash'):
+            for branch in ('codex/vex-117', 'nehpz/VEX-117-branch-rules',
+                           'codex/vex-111-wrapper-20261012', 'A-B/vEx-1-Suffix-2'):
+                with self.subTest(repository=repository, branch=branch):
+                    policy.validate_pr_source_branch(REPO, self.source_pr(branch, repository))
+
+    def test_issue_source_names_reject_invalid_and_injection_shaped_names(self):
+        for branch in ('vex-117', 'codex/117', 'codex/vex-0', 'codex/vex-0117',
+                       'codex/ct-117', 'codex/vex-117-', 'codex/vex-117--suffix',
+                       'codex/vex-117/path', '-codex/vex-117', 'codex-/vex-117',
+                       'co--dex/vex-117', 'co_dex/vex-117', 'codex/vex-117_under',
+                       'codex/vex-117\n', 'codex/vex-117;echo-secret',
+                       'codex/$(echo-secret)', 'codex/`echo-secret`', 'codex/vex-١١٧'):
+            with self.subTest(branch=branch), self.assertRaisesRegex(ValueError, 'PR source branch must use'):
+                policy.validate_pr_source_branch(REPO, self.source_pr(branch))
+
+    def test_source_exceptions_are_exact_and_repository_owned(self):
+        accepted = ('master', 'codex/ct102-media-generation', 'feat/posthog-instrumentation',
+                    'release-v0.2.7', 'release-v0.0.0', 'release-v12.345.678')
+        for branch in accepted:
+            with self.subTest(branch=branch):
+                policy.validate_pr_source_branch(REPO, self.source_pr(branch))
+                with self.assertRaises(ValueError):
+                    policy.validate_pr_source_branch(REPO, self.source_pr(branch, 'fork/vexxx-stash'))
+        for branch in ('Master', 'codex/ct102-media-generation-extra', 'feat/posthog-other',
+                       'release-v1.2', 'release-v01.2.3', 'release-v1.02.3', 'release-v1.2.03',
+                       'release-v1.2.3-rc.1', 'release-v1.2.3+build', 'release-v1.2.3/extra',
+                       'release-v1.2.3\n', 'Release-v1.2.3'):
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                policy.validate_pr_source_branch(REPO, self.source_pr(branch))
+
+    def test_dependabot_requires_same_repository_and_original_verified_bot_author(self):
+        bot = {'login': 'dependabot[bot]', 'type': 'Bot'}
+        for branch in ('dependabot/library', 'dependabot/npm_and_yarn/ui/v2.5/library-1.2.3'):
+            policy.validate_pr_source_branch(REPO, self.source_pr(branch, user=bot))
+            for repository, author in ((REPO, None), (REPO, {}), (REPO, 'dependabot[bot]'),
+                                       (REPO, {'login': 'dependabot[bot]', 'type': 'User'}),
+                                       (REPO, {'login': 'other[bot]', 'type': 'Bot'}),
+                                       ('fork/vexxx-stash', bot)):
+                with self.subTest(branch=branch, repository=repository, author=author):
+                    with self.assertRaises(ValueError):
+                        policy.validate_pr_source_branch(REPO, self.source_pr(branch, repository, user=author))
+        for branch in ('dependabot', 'dependabot/', 'Dependabot/library', 'human/feature'):
+            with self.assertRaises(ValueError):
+                policy.validate_pr_source_branch(REPO, self.source_pr(branch, user=bot))
+        # The helper never consults event.sender or GITHUB_ACTOR on a rerun.
+        with patch.dict(os.environ, {'GITHUB_ACTOR': 'dependabot[bot]'}), self.assertRaises(ValueError):
+            policy.validate_pr_source_branch(REPO, self.source_pr('dependabot/library', sender=bot))
+
+    def test_source_metadata_fails_closed_even_for_conforming_names(self):
+        for pr in (None, [], {}, {'head': None}, {'head': []}, {'head': {}},
+                   {'head': {'ref': 'codex/vex-117'}}, self.source_pr(None), self.source_pr(''),
+                   self.source_pr(117), self.source_pr(repository=None), self.source_pr(repository=''),
+                   self.source_pr(repository='repo'), self.source_pr(repository='owner/repo\n'),
+                   {'head': {'ref': 'codex/vex-117', 'repo': None}},
+                   {'head': {'ref': 'codex/vex-117', 'repo': {'full_name': 117}}}):
+            with self.subTest(pr=pr), self.assertRaisesRegex(ValueError, 'missing or malformed'):
+                policy.validate_pr_source_branch(REPO, pr)
+        policy.validate_pr_source_branch('other/repository', None)
+
+    def test_naming_change_paths_select_only_python_without_images(self):
+        paths = ['scripts/image_publication_policy.py', 'scripts/test_image_publication_policy.py',
+                 'docs/CONTRIBUTING.md']
+        self.assertEqual(policy.obligations(paths),
+                         {'backend': False, 'frontend': False, 'python': True, 'build_image': False})
+        for draft in (True, False):
+            pr = self.source_pr(draft=draft)
+            policy.validate_pr_source_branch(REPO, pr)
+            result = self.plan(name='pull_request', paths=paths, event={'pull_request': pr})
+            # Drafts still run affected validation; only packaging is held.
+            self.assertTrue(result['python'])
+            self.assertFalse(result['deferred'])
+            self.assertFalse(result['backend'] or result['frontend'] or result['build_image'] or result['publish'])
+
+    def test_cli_source_validation_precedes_planning_and_preserves_merge_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git_env = {**os.environ, 'GIT_AUTHOR_NAME': 'Fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
+                       'GIT_COMMITTER_NAME': 'Fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid',
+                       'GIT_AUTHOR_DATE': '2026-01-01T00:00:00Z', 'GIT_COMMITTER_DATE': '2026-01-01T00:00:00Z'}
+            def git(*args, input=None):
+                return subprocess.check_output(['git', *args], cwd=root, env=git_env,
+                                               input=input, text=True).strip()
+            git('init', '-q')
+            (root / 'README.md').write_text('fixture\n')
+            (root / 'sonar-project.properties').write_text('sonar.projectKey=fixture\n')
+            git('add', 'README.md', 'sonar-project.properties')
+            tree = git('write-tree')
+            base = git('commit-tree', tree, '-m', 'base')
+            (root / 'docker').mkdir()
+            (root / 'docker' / 'fixture').write_text('packaging input\n')
+            git('add', 'docker/fixture')
+            head_tree = git('write-tree')
+            head = git('commit-tree', head_tree, '-p', base, '-m', 'head')
+            merge = git('commit-tree', head_tree, '-p', base, '-p', head, '-m', 'merge')
+            git('update-ref', 'HEAD', merge)
+            event_path, output, plan_path, summary = [root / name for name in ('event.json', 'output', 'plan.json', 'summary')]
+            ambient = root / 'ambient-plan.json'
+            ambient.write_text('unrelated plan\n')
+            env = {**git_env, 'GITHUB_EVENT_PATH': str(event_path), 'GITHUB_OUTPUT': str(output),
+                   'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_REF_TYPE': 'branch',
+                   'GITHUB_REF_NAME': '117/merge', 'GITHUB_SHA': merge, 'GITHUB_REPOSITORY': REPO,
+                   'VALIDATION_PLAN_PATH': str(plan_path), 'GITHUB_STEP_SUMMARY': str(summary)}
+            pr = {**self.source_pr(), 'base': {'sha': base, 'ref': 'any/stack-base',
+                                               'repo': {'full_name': REPO}},
+                  'merge_commit_sha': None}
+            pr['head']['sha'] = head
+            cases = [(REPO, pr, merge, True)]
+            for branch, repository, author, accepted in (
+                    # Conforming fork names pass naming but Sonar fails fork heads.
+                    ('fork-user/VEX-117-suffix', 'fork/vexxx-stash', None, False),
+                    ('release-v0.2.7', REPO, None, True),
+                    ('master', 'fork/vexxx-stash', None, False),
+                    ('release-v0.2.7', 'fork/vexxx-stash', None, False),
+                    ('dependabot/npm/library', REPO, {'login': 'dependabot[bot]', 'type': 'Bot'}, True),
+                    ('dependabot/npm/library', REPO, {'login': 'human', 'type': 'User'}, False),
+                    ('feature/no-issue', REPO, None, False),
+                    (None, REPO, None, False)):
+                changed = deepcopy(pr)
+                changed['head'].update(ref=branch, repo={'full_name': repository})
+                changed['user'] = author
+                for draft in (True, False):
+                    changed['draft'] = draft
+                    cases.append((REPO, deepcopy(changed), merge, accepted))
+            other_pr = deepcopy(pr)
+            other_pr['head'].pop('ref')
+            other_pr['head']['repo'] = {'full_name': 'other/repository'}
+            other_pr['base']['repo'] = {'full_name': 'other/repository'}
+            cases.append(('other/repository', other_pr, merge, True))
+            cases.append((REPO, pr, head, False))  # Good name cannot hide a nonmerge checkout.
+            for repository, source, checkout, accepted in cases:
+                with self.subTest(repository=repository, source=source, checkout=checkout):
+                    git('update-ref', 'HEAD', checkout)
+                    for path in (output, plan_path, summary):
+                        path.unlink(missing_ok=True)
+                    event_path.write_text(json.dumps({'number': 65, 'pull_request': source}))
+                    run_env = {**env, 'GITHUB_REPOSITORY': repository, 'GITHUB_SHA': checkout,
+                               'GITHUB_ACTOR': 'dependabot[bot]'}
+                    with patch.dict(os.environ, {'VALIDATION_PLAN_PATH': str(ambient)}):
+                        result = subprocess.run([sys.executable, str(Path(policy.__file__))], cwd=root,
+                                                env=run_env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    self.assertEqual(ambient.read_text(), 'unrelated plan\n')
+                    if accepted:
+                        planned = json.loads(plan_path.read_text())
+                        self.assertEqual(planned['head'], head)
+                        self.assertEqual(planned['base'], base)
+                        self.assertEqual(planned['tree'], head_tree)
+                        self.assertFalse(planned['deferred'])
+                        self.assertEqual(planned['build_image'], not source.get('draft', False))
+                        self.assertFalse(planned['publish'])
+                        self.assertIn('publish=false\n', output.read_text())
+                    else:
+                        self.assertEqual(result.stdout, '')
+                        self.assertFalse(output.exists() or plan_path.exists() or summary.exists())
 
     def test_master_and_pull_requests_never_publish(self):
         for name in ("push", "pull_request"):
@@ -445,7 +606,8 @@ class ImagePublicationPolicyTests(unittest.TestCase):
         merge = 'c' * 40
         event = {'number': 65, 'action': 'synchronize',
                  'pull_request': {'base': {'sha': BASE, 'ref': 'master', 'repo': {'full_name': REPO}},
-                                  'head': {'sha': SHA, 'repo': {'full_name': REPO}}}}
+                                  'head': {'sha': SHA, 'ref': 'codex/vex-65',
+                                           'repo': {'full_name': REPO}}}}
 
         def git(command, **kwargs):
             if command[1] == 'rev-parse':
