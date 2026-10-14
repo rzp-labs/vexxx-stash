@@ -229,6 +229,29 @@ func TestSpriteTuningSkipsFirstSamplesThatExceedProjectedAllowance(t *testing.T)
 	}
 }
 
+func renderTimedSprite(ctx context.Context, lanes int, times []float64, path string) error {
+	generationbudget.RecordProcess(ctx, 7)
+	// Every larger candidate improves for exactly the same tiles. The
+	// initial one-lane cost leaves time for all six bounded first trials.
+	timer := time.NewTimer(time.Duration((len(times)+lanes-1)/lanes) * 80 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	err = jpeg.Encode(f, image.NewRGBA(image.Rect(0, 0, 72, 72)), nil)
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
 func TestSpriteTuningContinuesSeedOneSearchToDemandBound(t *testing.T) {
 	b, err := generationbudget.NewWithResources(generationbudget.Settings{}, func() generationbudget.Resources {
 		return generationbudget.Resources{CPUs: 4, MemoryAvailable: 6 << 30, GPUAvailable: -1}
@@ -243,26 +266,7 @@ func TestSpriteTuningContinuesSeedOneSearchToDemandBound(t *testing.T) {
 	var trials []trial
 	render := func(ctx context.Context, lanes int, times []float64, path string) error {
 		trials = append(trials, trial{lanes, len(times)})
-		generationbudget.RecordProcess(ctx, 7)
-		// Every larger candidate improves for exactly the same tiles. The
-		// initial one-lane cost leaves time for all six bounded first trials.
-		timer := time.NewTimer(time.Duration((len(times)+lanes-1)/lanes) * 80 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-		}
-		f, err := os.Create(path)
-		if err != nil {
-			return err
-		}
-		err = jpeg.Encode(f, image.NewRGBA(image.Rect(0, 0, 72, 72)), nil)
-		closeErr := f.Close()
-		if err != nil {
-			return err
-		}
-		return closeErr
+		return renderTimedSprite(ctx, lanes, times, path)
 	}
 	g := Generator{}
 	plan := ffmpeg.IntelGenerationPlan{Filter: "scale_vaapi=w=8:h=8"}
