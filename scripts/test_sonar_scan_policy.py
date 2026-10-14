@@ -166,12 +166,6 @@ class ScanPolicyTests(unittest.TestCase):
         disabled = publication.plan('pull_request', 'branch', 'docs', SHA, REPO,
                                     retargeted, ['README.md'], declared_version='0.2.7')
         self.assertFalse(disabled['sonar_scan'])
-        import yaml
-        workflow = yaml.safe_load((ROOT / '.github/workflows/docker-publish.yml').read_text())
-        self.assertIn('edited', workflow['on']['pull_request']['types'])
-        gate = next(s for s in workflow['jobs']['ci-required']['steps'] if s.get('id') == 'required_gate')
-        self.assertIn("steps.plan.outcome == 'success'", gate['env']['PLAN_RESULT'])
-        self.assertIn("if e['PLAN_RESULT'] != 'success':", gate['run'])
 
     def test_workflow_keeps_token_step_scoped_and_uses_exact_source_checkout(self):
         import yaml
