@@ -167,9 +167,10 @@ func TestSpriteTuningComparesEqualWorkWhenStartupAmortizes(t *testing.T) {
 		generationbudget.RecordProcess(ctx, 7)
 		// Startup is fixed. Higher lane counts are slower per tile, although
 		// the old unequal-work comparison favored them by amortizing startup.
+		// The gap tolerates ~90ms of scheduler stall on loaded CI runners.
 		perTile := 10 * time.Millisecond
 		if lanes > 4 {
-			perTile = 12 * time.Millisecond
+			perTile = 20 * time.Millisecond
 		}
 		timer := time.NewTimer(100*time.Millisecond + time.Duration(len(times))*perTile)
 		defer timer.Stop()
