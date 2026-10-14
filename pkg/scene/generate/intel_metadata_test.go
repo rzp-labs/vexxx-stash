@@ -361,3 +361,23 @@ func TestIntelMetadataRefusalDiagnosticPreservesBoundedStderrAndNoAssets(t *test
 		})
 	}
 }
+
+// The strict wrapper must preserve the actionable device and probe bound when
+// GPU frame metadata fails, so callers can classify the refusal stage.
+func TestIntelSourceMetadataErrorDiagnosticCarriesDeviceAndProbeBound(t *testing.T) {
+	g := metadataTestGenerator(t, "exit 0\n", generationbudget.Settings{})
+	g.Encoder = nil // fail before any subprocess, keeping a deterministic reason
+	device := "/dev/dri/renderD129"
+	_, err := g.IntelSourceMetadata(context.Background(), "synthetic", ffmpeg.IntelGenerationConfig{Backend: "vaapi", Device: device})
+	var intelErr *ffmpeg.IntelGenerationError
+	if !errors.As(err, &intelErr) {
+		t.Fatalf("metadata failure lost the strict diagnostic: %v", err)
+	}
+	d := intelErr.Diagnostic
+	if d.Selected != "vaapi" || d.Actual != "none" || d.Stage != "metadata" {
+		t.Fatalf("metadata refusal misclassified: %+v", d)
+	}
+	if !strings.Contains(d.Reason, "ffmpeg unavailable") || d.Device != device || d.ProbeTimeout != intelMetadataProbeTimeout {
+		t.Fatalf("reason/device/probe bound missing from source diagnostic: %+v", d)
+	}
+}
